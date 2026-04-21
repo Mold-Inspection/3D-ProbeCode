@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button
+from matplotlib.widgets import Button, TextBox
 from matplotlib.colors import LinearSegmentedColormap
 import tkinter as tk
 from tkinter import filedialog
@@ -74,6 +74,18 @@ class UIManager:
         self.btn_back.on_clicked(lambda event: self.show_view('Back'))
         self.btn_left.on_clicked(lambda event: self.show_view('Left'))
         self.btn_right.on_clicked(lambda event: self.show_view('Right'))
+        
+        # 1. กล่องข้อความสำหรับกรอก Laser Reference
+        ax_box = plt.axes([0.65, 0.17, 0.15, 0.05])
+        self.text_box = TextBox(ax_box, 'Laser Ref (mm): ', initial='100', color='#424242', hovercolor='#616161')
+        self.text_box.label.set_color('white') # ให้ตัวหนังสือเป็นสีขาวรับ Dark Mode
+        
+        # ผูก Event ว่าถ้าพิมพ์ตัวเลขเสร็จแล้วกด Enter ให้คำนวณใหม่
+        self.text_box.on_submit(self.update_z_calculation)
+
+        # 2. ตัวหนังสือสำหรับแสดงผลการคำนวณ (วางไว้บนๆ กราฟ)
+        self.status_text = self.fig.text(0.5, 0.95, "Setup Status: Waiting for STL...", 
+                                         color='yellow', fontsize=12, fontweight='bold', ha='center')
 
     # --- NEW ROTATION LOGIC ---
     def rotate_screen(self, event):
@@ -97,6 +109,7 @@ class UIManager:
             self.marked_points = [] 
             self.screen_rotation = 0 # Reset rotation on new file
             self.show_view('Top')
+            self.update_z_calculation()
 
     def update_plot(self, x, y, z_vert, z_faces, triangles, title, cmap):
         self.ax.clear()
@@ -248,5 +261,21 @@ class UIManager:
         self.ax.set_ylim([ydata - new_height * (1 - rely), ydata + new_height * rely])
         self.fig.canvas.draw_idle()
 
+    # --- NEW: UPDATE SETUP STATUS ---
+    def update_z_calculation(self, text_val=None):
+        if self.geo.mesh is None: return
+        
+        try:
+            # ดึงตัวเลขจากกล่อง Textbox
+            laser_ref = float(self.text_box.text) 
+            # ส่งไปให้ Geometry Engine คำนวณ
+            result_msg = self.geo.calculate_optimal_z_height(laser_ref)
+            # อัปเดตข้อความบนหน้าจอ
+            self.status_text.set_text(result_msg)
+            self.fig.canvas.draw_idle()
+        except ValueError:
+            self.status_text.set_text("❌ Error: กรุณากรอกตัวเลข Laser Reference ให้ถูกต้อง")
+            self.fig.canvas.draw_idle()
+    
     def show(self):
         plt.show()

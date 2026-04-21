@@ -85,3 +85,28 @@ class MoldGeometry:
         return self.get_2d_projection(rx_deg=90, ry_deg=0, rz_deg=-90, screen_rot=rot)
     def get_right_view(self, rot=0):
         return self.get_2d_projection(rx_deg=90, ry_deg=0, rz_deg=90, screen_rot=rot)
+    
+    # --- NEW: STEP 1 - CALCULATE Z HEIGHT ---
+    def calculate_optimal_z_height(self, laser_ref):
+        if self.mesh is None:
+            return "Please load an STL file first."
+            
+        # 1. ดึงค่าความหนาและความลึกจาก 3D Mesh
+        extents = self.get_physical_dimensions()
+        mold_thickness = extents[2] # ความหนารวมแกน Z
+        
+        z_raw = self.mesh.vertices[:, 2]
+        surface_z = np.max(z_raw)
+        z_depth = surface_z - z_raw
+        max_pocket_depth = np.max(z_depth) # ความลึกที่สุดของร่อง
+
+        # 2. คำนวณหาจุดกึ่งกลางและระยะ Z
+        mid_scan_z = mold_thickness - (max_pocket_depth / 2)
+        recommended_z_height = mid_scan_z + laser_ref
+
+        # 3. เช็คความปลอดภัย
+        clearance = recommended_z_height - mold_thickness
+        if clearance <= 5.0:
+            return f"⚠️ ระวังชน! แนะนำคาน Z: {recommended_z_height:.1f} mm (ห่างชิ้นงาน {clearance:.1f} mm)"
+            
+        return f"✅ Setup Z-Height: {recommended_z_height:.1f} mm"
