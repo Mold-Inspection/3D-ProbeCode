@@ -1,1 +1,1 @@
-geo = MoldGeometry('bottom clamping plate_pcs2b.stl')
+s
