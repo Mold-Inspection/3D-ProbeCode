@@ -95,7 +95,7 @@ class UIManager:
     def _setup_left_sidebar(self):
         ctk.CTkLabel(self.sidebar_left, text="3D CNC Control", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(20, 10))
         
-        self.btn_upload = ctk.CTkButton(self.sidebar_left, text="Upload STL", fg_color="#2e7d32", hover_color="#4caf50", command=self.open_file_dialog)
+        self.btn_upload = ctk.CTkButton(self.sidebar_left, text="Upload STEP or STP", fg_color="#2e7d32", hover_color="#4caf50", command=self.open_file_dialog)
         self.btn_upload.pack(pady=10, padx=20, fill="x")
         
         self.info_frame = ctk.CTkFrame(self.sidebar_left, fg_color="#1e1e1e", corner_radius=5)
@@ -289,7 +289,11 @@ class UIManager:
             self.show_view(self.current_view)
 
     def open_file_dialog(self):
-        filepath = ctk.filedialog.askopenfilename(title="Select 3D Model", filetypes=[("STL Files", "*.stl"), ("All Files", "*.*")])
+        # [MODIFIED] เปลี่ยนจากการรับ STL มาเป็น STEP
+        filepath = ctk.filedialog.askopenfilename(
+            title="Select 3D CAD Model", 
+            filetypes=[("STEP Files", "*.stp *.step"), ("All Files", "*.*")]
+        )
         if filepath:
             filename = os.path.basename(filepath)
             self.geo.load_file(filepath)

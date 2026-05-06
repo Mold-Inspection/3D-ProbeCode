@@ -1,26 +1,58 @@
 import trimesh
 import numpy as np
 from trimesh.transformations import euler_matrix
+import os
+import cadquery as cq  # [NEW] เพิ่มไลบรารีสำหรับจัดการไฟล์ STEP (B-Rep)
 
 class MoldGeometry:
     def __init__(self, filepath=None):
         self.mesh = None
         self.triangles = None
+        self.step_data = None  # [NEW] ตัวแปรนี้จะเก็บข้อมูลสมการคณิตศาสตร์ที่แท้จริง รอไว้ใช้ดึงพิกัดทำ G-Code
         if filepath:
             self.load_file(filepath)
     
     def load_file(self, filepath):
-        self.mesh = trimesh.load(filepath)
+        ext = os.path.splitext(filepath)[1].lower()
+        
+        # --- NEW: ระบบตรวจจับไฟล์และ Tessellation อัตโนมัติ ---
+        if ext in ['.stp', '.step']:
+            print("Loading STEP file and tessellating for UI...")
+            # 1. โหลดข้อมูล B-Rep เข้ามาเก็บไว้เป็น Backend (เอาไว้คำนวณ Pathing วันหลัง)
+            self.step_data = cq.importers.importStep(filepath)
+            
+            # 2. จำลองสร้างโครงข่าย Mesh เป็นไฟล์ชั่วคราว เพื่อส่งต่อให้ UI
+            temp_stl_path = "temp_ui_mesh.stl"
+            # [MODIFIED] เพิ่มพารามิเตอร์ tolerance (ระยะห่าง) และ angularTolerance (องศา)
+            # ค่าที่สูงขึ้น = โหลดไวขึ้นมาก แต่ภาพอาจจะดูเป็นเหลี่ยมขึ้นเล็กน้อย
+            cq.exporters.export(
+                self.step_data, 
+                temp_stl_path, 
+                exportType='STL', 
+                tolerance=0.5,           # ปกติจะเป็น 0.001 ซึ่งละเอียดเกินไป
+                angularTolerance=0.5     # ปกติจะเป็น 0.1
+            )
+            
+            # 3. ให้ trimesh โหลดตัว Mesh เข้ามา (ทำให้โค้ดที่เหลือของคุณทำงานได้ปกติต่อไป)
+            self.mesh = trimesh.load(temp_stl_path)
+            
+            # 4. ลบไฟล์ชั่วคราวทิ้งเพื่อความสะอาด
+            if os.path.exists(temp_stl_path):
+                os.remove(temp_stl_path)
+        else:
+            # กรณีผู้ใช้อัปโหลดไฟล์ STL แบบเดิม ก็ยังรองรับอยู่
+            self.mesh = trimesh.load(filepath)
+            self.step_data = None 
+
+        # --- โค้ดด้านล่างนี้คือของเดิมของคุณเป๊ะๆ ไม่มีการเปลี่ยนแปลง ---
         self.mesh.apply_translation(-self.mesh.centroid)
         
-        # --- NEW: AUTO-ALIGN CAD FILES ---
-        # Force the thinnest dimension to be the Z-axis (Depth)
         extents = self.mesh.extents
-        min_axis = np.argmin(extents) # Finds the thinnest axis (0=X, 1=Y, 2=Z)
+        min_axis = np.argmin(extents) 
         
-        if min_axis == 0: # If X is the thinnest, rotate 90 deg around Y
+        if min_axis == 0: 
             self.mesh.apply_transform(euler_matrix(0, np.radians(90), 0))
-        elif min_axis == 1: # If Y is the thinnest, rotate 90 deg around X
+        elif min_axis == 1: 
             self.mesh.apply_transform(euler_matrix(np.radians(90), 0, 0))
             
         self.triangles = self.mesh.faces
