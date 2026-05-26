@@ -3,21 +3,24 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import customtkinter as ctk
-from tkinter import ttk 
 import numpy as np
 import os
 
 ctk.set_appearance_mode("Dark")  
 ctk.set_default_color_theme("blue")  
 
+# [MODIFIED] เพิ่มการเก็บค่า Layers และ Points ต่อ Layer ลงใน Object
 class HoleFeature:
-    def __init__(self, hid, x, y, surface_z, bottom_z, depth):
+    def __init__(self, hid, x, y, surface_z, bottom_z, depth, radius):
         self.id = hid
         self.x = x
         self.y = y
         self.surface_z = surface_z
         self.bottom_z = bottom_z
         self.depth = depth
+        self.radius = radius 
+        self.layers = 3              # ค่า Default ขั้นต่ำ 3 ชั้น
+        self.points_per_layer = 4    # ค่า Default ขั้นต่ำ 4 จุด
 
 class UIManager:
     def __init__(self, geometry_engine):
@@ -35,27 +38,12 @@ class UIManager:
         self.max_physical_dim = None 
         
         self.view_buttons = {}
+        self.hole_widgets = {}
         
         self.root = ctk.CTk()
         self.root.title("3D Laser Scanner Simulator")
         self.root.geometry("1400x800") 
         
-        style = ttk.Style(self.root)
-        style.theme_use("default")
-        style.configure("Treeview", 
-                        background="#2b2b2b",
-                        foreground="white",
-                        rowheight=30,
-                        fieldbackground="#2b2b2b",
-                        borderwidth=0,
-                        font=('Arial', 10))
-        style.map('Treeview', background=[('selected', '#1f538d')])
-        style.configure("Treeview.Heading",
-                        background="#1f1f1f",
-                        foreground="white",
-                        relief="flat")
-        style.map("Treeview.Heading", background=[('active', '#333333')])
-
         self.sidebar_left = ctk.CTkFrame(self.root, width=250, corner_radius=0)
         self.sidebar_left.pack(side="left", fill="y")
         
@@ -158,24 +146,10 @@ class UIManager:
         self.right_header = ctk.CTkLabel(self.sidebar_right, text="Detected Holes", font=ctk.CTkFont(size=16, weight="bold"))
         self.right_header.pack(pady=(20, 10), padx=20, anchor="w")
 
-        self.tree_frame = ctk.CTkFrame(self.sidebar_right, fg_color="transparent")
-        self.tree_frame.pack(fill="both", expand=True, padx=20, pady=20)
-
-        columns = ("id", "type")
-        self.tree = ttk.Treeview(self.tree_frame, columns=columns, show="tree", selectmode="browse")
-        
-        self.tree.column("#0", width=300, minwidth=200, stretch=ctk.YES) 
-        self.tree.column("id", width=0, stretch=ctk.NO) 
-        self.tree.column("type", width=0, stretch=ctk.NO)
-
-        scrollbar = ttk.Scrollbar(self.tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscroll=scrollbar.set)
-        
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-        self.tree.bind("<Button-1>", self.on_tree_click)
+        # [MODIFIED] เปลี่ยนจาก ttk.Treeview เป็น CTkScrollableFrame
+        # เพื่อรองรับ inline settings (Z-Layers / Points per Layer) ต่อรูได้โดยตรง
+        self.holes_list_frame = ctk.CTkScrollableFrame(self.sidebar_right, fg_color="transparent")
+        self.holes_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
     def _set_view_controls_locked(self, is_locked):
         target_state = "disabled" if is_locked else "normal"
@@ -233,6 +207,10 @@ class UIManager:
                 center_x = float(np.mean(cluster_x))
                 center_y = float(np.mean(cluster_y))
                 
+                distances = np.hypot(cluster_x - center_x, cluster_y - center_y)
+                radius = float(np.percentile(distances, 95))
+                if radius < 1.0: radius = 2.0 
+                
                 if is_positive_view:
                     surf_z = surface_z
                     bot_z = float(np.min(cluster_z))
@@ -243,7 +221,7 @@ class UIManager:
                     max_depth = float(bot_z - surf_z)
                 
                 hid = len(holes) + 1
-                holes.append(HoleFeature(hid, center_x, center_y, surf_z, bot_z, max_depth))
+                holes.append(HoleFeature(hid, center_x, center_y, surf_z, bot_z, max_depth, radius))
         
         holes.sort(key=lambda h: (-round(h.y / 5.0), h.x))
         for i, h in enumerate(holes):
@@ -252,205 +230,305 @@ class UIManager:
         return holes
 
     def update_treeview(self, holes):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-            
+        # [MODIFIED] ล้าง widget ทั้งหมดใน CTkScrollableFrame แทน Treeview rows
+        for widget in self.holes_list_frame.winfo_children():
+            widget.destroy()
+        self.hole_widgets = {}
+
         if not holes and self.holes_detected:
-            self.tree.insert("", "end", text="   -- No holes detected --")
+            ctk.CTkLabel(self.holes_list_frame, text="-- No holes detected --", text_color="gray").pack(pady=20)
             return
         elif not self.holes_detected:
-            self.tree.insert("", "end", text="   -- Press Generate Holes --")
+            ctk.CTkLabel(self.holes_list_frame, text="-- Press Generate Holes --", text_color="gray").pack(pady=20)
             return
-            
+
         for i, hole in enumerate(holes):
-            node_text = f" 🎯 Hole {hole.id} [X: {hole.x:.2f}, Y: {hole.y:.2f}] Depth: {hole.depth:.2f} mm"
-            self.tree.insert("", "end", text=node_text, values=(f"H{i}", "Parent"), open=True)
+            container = ctk.CTkFrame(self.holes_list_frame, fg_color="transparent")
+            container.pack(fill="x", pady=2)
 
-    def on_tree_select(self, event):
-        selected_items = self.tree.selection()
-        if not self.scatter_holes and self.current_tab == "Selection": return
+            btn_text = f"🎯 Hole {hole.id} [X: {hole.x:.1f}, Y: {hole.y:.1f}] D: {hole.depth:.1f}"
+            btn = ctk.CTkButton(container, text=btn_text, anchor="w",
+                                fg_color="#1f1f1f", hover_color="#2c2c2c", corner_radius=4,
+                                command=lambda idx=i: self.on_hole_select(idx))
+            btn.pack(fill="x")
 
-        colors = ['white'] * self.current_holes_count
-        self.selected_hole_idx = None
-        
-        if selected_items:
-            item = selected_items[0]
-            values = self.tree.item(item, "values")
-            if values and str(values[0]).startswith("H"):
-                try:
-                    idx = int(values[0][1:])
-                    if 0 <= idx < self.current_holes_count:
-                        colors[idx] = 'yellow' 
-                        self.selected_hole_idx = idx
-                except ValueError: pass
+            # [NEW] settings_frame inline ต่อรู — ซ่อนไว้จนกว่าจะ expand
+            settings_frame = ctk.CTkFrame(container, fg_color="#2b2b2b", corner_radius=4)
+
+            layer_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+            layer_frame.pack(fill="x", padx=15, pady=(10, 5))
+            ctk.CTkLabel(layer_frame, text="Z-Layers:").pack(side="left")
+            opt_layers = ctk.CTkOptionMenu(layer_frame, values=["3", "4", "5", "6", "8", "10"],
+                                           command=lambda val, idx=i: self.on_config_change_for_hole(idx),
+                                           width=60, height=25)
+            opt_layers.set(str(hole.layers))
+            opt_layers.pack(side="right")
+
+            points_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+            points_frame.pack(fill="x", padx=15, pady=(0, 10))
+            ctk.CTkLabel(points_frame, text="Points/Layer:").pack(side="left")
+            opt_points = ctk.CTkOptionMenu(points_frame, values=["4", "6", "8", "12", "16"],
+                                           command=lambda val, idx=i: self.on_config_change_for_hole(idx),
+                                           width=60, height=25)
+            opt_points.set(str(hole.points_per_layer))
+            opt_points.pack(side="right")
+
+            self.hole_widgets[i] = {
+                'container': container,
+                'btn': btn,
+                'settings_frame': settings_frame,
+                'opt_layers': opt_layers,
+                'opt_points': opt_points,
+                'is_expanded': False
+            }
+
+    def on_hole_select(self, idx):
+        # [MODIFIED] แทน on_tree_select — toggle expand/collapse settings_frame inline
+        for i, widgets in self.hole_widgets.items():
+            widgets['btn'].configure(fg_color="#1f1f1f")
+            if widgets['is_expanded'] and i != idx:
+                widgets['settings_frame'].pack_forget()
+                widgets['is_expanded'] = False
+
+        sel = self.hole_widgets[idx]
+        sel['btn'].configure(fg_color="#1f538d")
+        if not sel['is_expanded']:
+            sel['settings_frame'].pack(fill="x", pady=(0, 2))
+            sel['is_expanded'] = True
+
+        self.selected_hole_idx = idx
 
         if self.current_tab == "Selection" and self.scatter_holes:
+            colors = ['white'] * self.current_holes_count
+            colors[idx] = 'yellow'
             self.scatter_holes.set_facecolors(colors)
             self.canvas.draw_idle()
         elif self.current_tab == "Customization":
             self.draw_cross_section()
-    
+        elif self.current_tab == "Path Mapper":
+            self.draw_path_mapper()
+
+    def on_config_change_for_hole(self, idx):
+        # [NEW] อัปเดต layers/points ต่อรูจาก inline dropdown
+        if idx >= len(self.current_holes):
+            return
+        hole = self.current_holes[idx]
+        widgets = self.hole_widgets[idx]
+        hole.layers = int(widgets['opt_layers'].get())
+        hole.points_per_layer = int(widgets['opt_points'].get())
+        if self.current_tab == "Path Mapper":
+            self.draw_path_mapper()
+        elif self.current_tab == "Customization":
+            self.draw_cross_section()
+
+    # [KEPT] on_config_change เดิม — ยังใช้กับ Customization/Path Mapper ผ่าน selected_hole_idx
+    def on_config_change(self, value):
+        if self.selected_hole_idx is not None:
+            hole = self.current_holes[self.selected_hole_idx]
+            hole.layers = int(self.var_layers.get()) if hasattr(self, 'var_layers') else hole.layers
+            hole.points_per_layer = int(self.var_points.get()) if hasattr(self, 'var_points') else hole.points_per_layer
+            if self.current_tab == "Path Mapper":
+                self.draw_path_mapper()
+
     def on_tree_click(self, event):
-        item = self.tree.identify_row(event.y)
-        if item and item in self.tree.selection():
-            self.tree.selection_remove(item)
-            self.on_tree_select(None)
-            return "break"
+        return "break"
 
     def draw_cross_section(self):
-        self.ax.clear()
-        self.cax.clear()
-        self.cax.set_visible(False) 
-        
+        # [MODIFIED] Customization mode: แสดงเฉพาะ 3D Path Map แบบเต็มหน้าจอ
+        # ลบ 2D cross-section ออก, ลบ safe Z-path (clearance) ออก,
+        # เพิ่มแสดงพื้นผิว (surface disk) ที่จุดลึกที่สุดของรู
+        self.fig.clf()
+
+        # ซ่อน colorbar axis (ไม่ใช้ใน Customization)
+        if hasattr(self, 'cax'):
+            self.cax = None
+
         if self.selected_hole_idx is None or not self.current_holes:
+            self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
             self.ax.set_title("Please select a hole from the right panel to analyze.", color="white", fontsize=16)
             self.ax.set_axis_off()
             self.canvas.draw()
             return
-            
-        self.ax.set_axis_on()
+
         hole = self.current_holes[self.selected_hole_idx]
-        
-        # [MODIFIED] กลับมาดึงข้อมูลเฉพาะบริเวณรอบๆ รู เพื่อให้ซูมเข้าใกล้ๆ
-        tolerance_y = 1.5
-        tolerance_x = max(hole.depth * 2.0, 20.0) 
-        
-        mask = (np.abs(self.current_y - hole.y) < tolerance_y) & (np.abs(self.current_x - hole.x) < tolerance_x)
-        profile_x = self.current_x[mask]
-        profile_z = self.current_z[mask]
-        
-        sorted_indices = np.argsort(profile_x)
-        profile_x = profile_x[sorted_indices]
-        profile_z = profile_z[sorted_indices]
-        
-        nominal_surface_z = hole.surface_z
-        depth_for_ref = hole.depth if hole.depth > 1.0 else 5.0 
-        taper_reference_plane_z = nominal_surface_z - depth_for_ref / 2.0 
-        bottom_z = hole.bottom_z
-        
-        z_wall_mask = (profile_z < (nominal_surface_z - 1.0)) & (profile_z > (bottom_z + 1.0))
-        wall_x = profile_x[z_wall_mask]
-        wall_z = profile_z[z_wall_mask]
-        
-        left_wall_mask = wall_x < hole.x
-        right_wall_mask = wall_x > hole.x
-        left_wall_x, left_wall_z = wall_x[left_wall_mask], wall_z[left_wall_mask]
-        right_wall_x, right_wall_z = wall_x[right_wall_mask], wall_z[right_wall_mask]
-        
-        taper_angle_left, taper_angle_right = 0.0, 0.0
-        line_left_x, line_right_x = [], []
-        
-        if len(left_wall_x) > 5:
-            m_l, c_l = np.polyfit(left_wall_z, left_wall_x, 1)
-            alpha_l_rad = np.arctan(m_l)
-            taper_angle_left = np.abs(np.degrees(alpha_l_rad))
-            z_fit = np.array([bottom_z, nominal_surface_z])
-            line_left_x = m_l * z_fit + c_l
-            
-        if len(right_wall_x) > 5:
-            m_r, c_r = np.polyfit(right_wall_z, right_wall_x, 1)
-            alpha_r_rad = np.arctan(m_r)
-            taper_angle_right = np.abs(np.degrees(alpha_r_rad))
-            z_fit = np.array([bottom_z, nominal_surface_z])
-            line_right_x = m_r * z_fit + c_r
-            
-        total_taper_angle = taper_angle_left + taper_angle_right
-        
-        if len(line_left_x) > 0 and len(line_right_x) > 0:
-            left_gauge_x = m_l * taper_reference_plane_z + c_l
-            right_gauge_x = m_r * taper_reference_plane_z + c_r
-            gauge_distance = np.abs(right_gauge_x - left_gauge_x)
-        else:
-            gauge_distance = 0.0
-            left_gauge_x, right_gauge_x = hole.x, hole.x 
 
-        # วาดเส้นโปรไฟล์และจุดสัมผัส
-        if len(profile_x) > 0:
-            self.ax.plot(profile_x, profile_z, color='#00e5ff', linewidth=2.5, marker='o', markersize=3, label="Measured Surface Profile")
-        
-        self.ax.axhline(y=nominal_surface_z, color='gray', linestyle='--', label='Nominal Reference Surface')
-        self.ax.axhline(y=taper_reference_plane_z, color='orange', linestyle=':', label='Taper Reference Plane (Gauge)')
-        
-        z_fit_draw = np.array([bottom_z, nominal_surface_z])
-        if len(line_left_x) > 0:
-            self.ax.plot(m_l * z_fit_draw + c_l, z_fit_draw, color='red', linestyle='-', linewidth=2, label=f'Left Taper Line ({taper_angle_left:.1f}°)')
-        if len(line_right_x) > 0:
-            self.ax.plot(m_r * z_fit_draw + c_r, z_fit_draw, color='red', linestyle='-', linewidth=2, label=f'Right Taper Line ({taper_angle_right:.1f}°)')
-            
-        if len(line_left_x) > 0 and len(line_right_x) > 0:
-            self.ax.scatter([left_gauge_x, right_gauge_x], [taper_reference_plane_z, taper_reference_plane_z], color='yellow', marker='o', s=100, zorder=10, label='Gauge Points')
-        
-        self.ax.axvline(x=hole.x, color='white', linestyle='-.', alpha=0.5)
+        # ══════════════════════════════════════════
+        # 3D Path Map เต็มหน้าจอ (ไม่มี 2D cross-section)
+        # ══════════════════════════════════════════
+        self.fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
+        ax_path = self.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
+        self.ax = ax_path
 
-        # การแสดงผลข้อความ
-        label_x = hole.x - (tolerance_x * 0.8)
-        if len(profile_x) > 0:
-            self.ax.annotate('', xy=(label_x + 5, nominal_surface_z), xytext=(label_x, nominal_surface_z), arrowprops=dict(arrowstyle='<->', color='white', linewidth=1))
-            self.ax.text(label_x - 1, nominal_surface_z, 'Reference Surface', color='white', fontsize=10, ha='right', va='center')
-            
-            self.ax.annotate('', xy=(label_x + 5, taper_reference_plane_z), xytext=(label_x, taper_reference_plane_z), arrowprops=dict(arrowstyle='<->', color='orange', linewidth=1))
-            self.ax.text(label_x - 1, taper_reference_plane_z, 'Reference Plane', color='orange', fontsize=10, ha='right', va='center')
-            
-            self.ax.annotate('', xy=(label_x + 5, bottom_z), xytext=(label_x, bottom_z), arrowprops=dict(arrowstyle='<->', color='gray', linewidth=1))
-            self.ax.text(label_x - 1, bottom_z, 'Hole Bottom', color='gray', fontsize=10, ha='right', va='center')
+        layers = hole.layers
+        points = hole.points_per_layer
 
-        if total_taper_angle > 0:
-            text_pos_x, text_pos_z = hole.x, bottom_z + 3.0
-            self.ax.text(text_pos_x, text_pos_z, f'Total Taper Angle\n2α = {total_taper_angle:.1f}°', color='red', fontsize=12, fontweight='bold', ha='center', va='center', bbox=dict(facecolor='#1e1e1e', alpha=0.8, edgecolor='red', boxstyle='round'))
-        
-        if gauge_distance > 0:
-            self.ax.annotate('', xy=(left_gauge_x, taper_reference_plane_z - 1.0), xytext=(right_gauge_x, taper_reference_plane_z - 1.0), arrowprops=dict(arrowstyle='<->', color='yellow', linewidth=1.5))
-            text_pos_x, text_pos_z = hole.x, taper_reference_plane_z - 2.5
-            self.ax.text(text_pos_x, text_pos_z, f'Gauge Distance\n= {gauge_distance:.2f} mm', color='yellow', fontsize=11, fontweight='bold', ha='center', va='center')
-            
-        if len(left_wall_x) > 0 and len(left_wall_z) > 0:
-            self.ax.text(min(left_wall_x) - 1, left_wall_z[0], 'Tapered Hole', color='red', fontsize=12, rotation=90, va='center')
-        
-        if len(profile_x) > 0:
-            self.ax.text(hole.x + (tolerance_x * 0.5), nominal_surface_z + 2, 'Nominal Section', color='white', fontsize=12, ha='left')
+        # [FIX] z_levels:
+        #   - เริ่มจาก surface_z ลงมา (layer แรกอยู่ใต้ปาก ไม่เกินขอบบน)
+        #   - layer สุดท้ายหยุดก่อนถึง bottom จริง ด้วย margin = 10% ของความลึก (อย่างน้อย 1 mm)
+        z_margin_top    = max(hole.depth * 0.05, 0.5)   # ระยะห่างจากปากรูลงมา
+        z_margin_bottom = max(hole.depth * 0.10, 1.0)   # ระยะห่างจาก bottom ขึ้นมา (layer สุดท้าย)
+        z_levels = np.linspace(hole.surface_z - z_margin_top,
+                               hole.bottom_z  + z_margin_bottom,
+                               layers)
 
-        self.ax.set_title(f"Detailed Analysis: Cross-Section of Hole {hole.id}", color='white', fontsize=16)
-        self.ax.set_xlabel("X-Axis (mm)", color='white', fontsize=13)
-        self.ax.set_ylabel("Z-Axis / Depth (mm)", color='white', fontsize=13)
-        self.ax.tick_params(colors='white')
-        
-        # [MODIFIED] ตั้งค่าขอบเขต (Limits) ให้ซูมรอบๆ รู
-        if len(profile_x) > 0:
-            cx = hole.x
-            half_span = tolerance_x
-            self.ax.set_xlim([cx - half_span, cx + half_span])
-            
-        z_margin = max(depth_for_ref / 2.0, 3.0) 
-        self.ax.set_ylim([bottom_z - z_margin, nominal_surface_z + z_margin])
-        
-        # [NEW] สั่งล็อคอัตราส่วน 1:1 ให้ภาพสมจริง ไม่ถูกบีบอัด
-        self.ax.set_aspect('equal')
-        
-        self.ax.grid(True, linestyle=':', alpha=0.5, color='gray')
-        self.ax.legend(facecolor='#1e1e1e', edgecolor='gray', labelcolor='white', loc='upper right')
-        
+        # วาด Wireframe กระบอก (ผนังรู)
+        z_cyl = np.linspace(hole.bottom_z, hole.surface_z, 15)
+        theta = np.linspace(0, 2*np.pi, 20)
+        theta_grid, z_grid = np.meshgrid(theta, z_cyl)
+        ax_path.plot_wireframe(hole.x + hole.radius * np.cos(theta_grid),
+                               hole.y + hole.radius * np.sin(theta_grid),
+                               z_grid, color='#0277bd', alpha=0.25)
+
+        # [NEW] วาดพื้นผิวที่จุดลึกที่สุด (bottom surface disk) เพื่อยืนยันทิศทางของรู
+        theta_fill = np.linspace(0, 2*np.pi, 60)
+        r_fill = np.linspace(0, hole.radius, 8)
+        theta_disk, r_disk = np.meshgrid(theta_fill, r_fill)
+        disk_x = hole.x + r_disk * np.cos(theta_disk)
+        disk_y = hole.y + r_disk * np.sin(theta_disk)
+        disk_z = np.full_like(disk_x, hole.bottom_z)
+        ax_path.plot_surface(disk_x, disk_y, disk_z, color='#00e5ff', alpha=0.35, linewidth=0)
+        # วาดวงกลมขอบ bottom เพื่อให้เห็นชัด
+        ax_path.plot(hole.x + hole.radius * np.cos(theta_fill),
+                     hole.y + hole.radius * np.sin(theta_fill),
+                     np.full_like(theta_fill, hole.bottom_z),
+                     color='#00e5ff', linewidth=1.5, alpha=0.7)
+        # label บน bottom surface
+        ax_path.text(hole.x, hole.y, hole.bottom_z,
+                     f"Bottom Z={hole.bottom_z:.2f}", color='#00e5ff',
+                     fontsize=7, ha='center', va='top', zorder=10)
+
+        # ══════════════════════════════════════════
+        # สร้าง Tool Path
+        # - จุดสัมผัสผนังอยู่ที่ขอบ (radius พอดี) ไม่เลยออกนอกชิ้นงาน
+        # - เดินจากกึ่งกลาง → ขอบโดยตรง ไม่มี overshoot
+        # - หลังครบทุก layer เพิ่มจุดกึ่งกลางที่ bottom_z เพื่อวัดความลึกสูงสุด
+        # ══════════════════════════════════════════
+        path_x, path_y, path_z = [hole.x], [hole.y], [hole.surface_z]
+        touch_x, touch_y, touch_z = [], [], []
+
+        for z in z_levels:
+            # ลงมาที่ระดับชั้น
+            path_x.append(hole.x); path_y.append(hole.y); path_z.append(z)
+            for ang in np.linspace(0, 2*np.pi, points, endpoint=False):
+                # เดินตรงออกไปแตะขอบ (radius พอดี = ขอบชิ้นงาน)
+                px = hole.x + hole.radius * np.cos(ang)
+                py = hole.y + hole.radius * np.sin(ang)
+                touch_x.append(px); touch_y.append(py); touch_z.append(z)
+                path_x.append(px);  path_y.append(py);  path_z.append(z)
+                # ถอยกลับกึ่งกลางก่อนไปจุดถัดไป
+                path_x.append(hole.x); path_y.append(hole.y); path_z.append(z)
+
+        # [NEW] จุดกึ่งกลางที่ bottom_z — วัดความลึกสูงสุด
+        path_x.append(hole.x); path_y.append(hole.y); path_z.append(hole.bottom_z)
+        touch_x.append(hole.x); touch_y.append(hole.y); touch_z.append(hole.bottom_z)
+        # ถอยกลับขึ้น surface
+        path_x.append(hole.x); path_y.append(hole.y); path_z.append(hole.surface_z)
+
+        ax_path.plot(path_x, path_y, path_z, color='yellow', linestyle='--', linewidth=1.2,
+                     label='Tool Path', alpha=0.8)
+        # จุดสัมผัสผนัง
+        wall_touch_x = touch_x[:-1]; wall_touch_y = touch_y[:-1]; wall_touch_z = touch_z[:-1]
+        ax_path.scatter(wall_touch_x, wall_touch_y, wall_touch_z, color='red', s=25,
+                        depthshade=False, label='Wall Contact Points')
+        # จุดกึ่งกลาง bottom — แยกสีให้เห็นชัด
+        ax_path.scatter([touch_x[-1]], [touch_y[-1]], [touch_z[-1]], color='#ffea00', s=80,
+                        marker='*', depthshade=False, label='Bottom Depth Point', zorder=10)
+
+        # [FIX] ปรับ scale แกน X, Y, Z ให้สมดุลกัน — ป้องกัน Z ยาวบิดเบี้ยว
+        max_r = hole.radius * 1.6
+        z_range = hole.surface_z - hole.bottom_z
+        xy_range = max_r * 2
+
+        # บังคับให้ทุกแกนมีสัดส่วนเท่ากันด้วยการสร้าง bounding cube
+        mid_x, mid_y = hole.x, hole.y
+        mid_z = (hole.bottom_z + hole.surface_z) / 2.0
+        max_range = max(xy_range, z_range) / 2.0
+
+        ax_path.set_xlim([mid_x - max_range, mid_x + max_range])
+        ax_path.set_ylim([mid_y - max_range, mid_y + max_range])
+        ax_path.set_zlim([mid_z - max_range, mid_z + max_range])
+
+        # ตกแต่ง 3D plot
+        ax_path.set_title(f"3D Probing Path — Hole {hole.id}  |  {layers}L × {points}P + 1 bottom = {layers*points + 1} pts  |  Depth: {hole.depth:.2f} mm",
+                          color='white', fontsize=12, pad=12)
+        for spine in [ax_path.xaxis, ax_path.yaxis, ax_path.zaxis]:
+            spine.set_pane_color((0, 0, 0, 0))
+            spine.line.set_color("gray")
+        ax_path.tick_params(colors='white', labelsize=7)
+        ax_path.set_xlabel("X (mm)", color='white', fontsize=9, labelpad=2)
+        ax_path.set_ylabel("Y (mm)", color='white', fontsize=9, labelpad=2)
+        ax_path.set_zlabel("Z (mm)", color='white', fontsize=9, labelpad=2)
+        ax_path.legend(facecolor='#1e1e1e', edgecolor='gray', labelcolor='white',
+                       loc='upper right', fontsize=7)
+
+        self.canvas.draw()
+
+    # [PLACEHOLDER] Path Mapper — สำรองไว้สำหรับพัฒนาในอนาคต
+    # จะใช้รับ Log File จาก OpenBuilds และแสดงผลเปรียบเทียบพิกัดจริง vs CAD
+    def draw_path_mapper(self):
+        self.fig.clf()
+        self.ax = self.fig.add_subplot(111, facecolor='#1a1a2e')
+        self.fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+
+        self.ax.set_xlim(0, 1)
+        self.ax.set_ylim(0, 1)
+        self.ax.set_axis_off()
+
+        # กล่องกรอบหลัก
+        self.ax.add_patch(plt.Rectangle((0.05, 0.1), 0.9, 0.8,
+                          linewidth=1.5, edgecolor='#1f538d',
+                          facecolor='#0d1117', zorder=1))
+
+        # ไอคอนและข้อความ
+        self.ax.text(0.5, 0.72, '🚧', fontsize=42, ha='center', va='center',
+                     transform=self.ax.transAxes, zorder=2)
+
+        self.ax.text(0.5, 0.58, 'Path Mapper', fontsize=22, fontweight='bold',
+                     color='white', ha='center', va='center',
+                     transform=self.ax.transAxes, zorder=2)
+
+        self.ax.text(0.5, 0.48, 'Under Development', fontsize=13,
+                     color='#1f538d', ha='center', va='center',
+                     transform=self.ax.transAxes, zorder=2)
+
+        # เส้นแบ่ง
+        self.ax.plot([0.15, 0.85], [0.43, 0.43], color='#1f538d',
+                     linewidth=0.8, alpha=0.6, transform=self.ax.transAxes)
+
+        # รายการฟีเจอร์ที่จะทำในอนาคต
+        future_items = [
+            "📂  Import G38.2 Log File from OpenBuilds",
+            "📐  Apply Probe Radius Compensation",
+            "⭕  Least Squares Circle Fitting per Layer",
+            "📊  Deviation Report vs CAD Reference",
+        ]
+        for i, item in enumerate(future_items):
+            self.ax.text(0.5, 0.36 - i * 0.065, item, fontsize=10,
+                         color='#aaaaaa', ha='center', va='center',
+                         transform=self.ax.transAxes, zorder=2)
+
         self.canvas.draw()
 
     def on_nav_change(self, selected_tab):
         self.current_tab = selected_tab
-        
+
         if selected_tab == "Selection":
             self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
-            self.cax.set_visible(True)
+            # เสมอ rebuild 2D subplot ให้สะอาด ไม่ว่าจะมาจาก Customization (3D axis) หรือที่ไหน
+            self.fig.clf()
+            self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
+            self.fig.subplots_adjust(bottom=0.1, right=0.85, left=0.1, top=0.9)
+            self.cax = self.fig.add_axes([0.88, 0.15, 0.03, 0.7])
+            self._setup_events()
             self.show_view(self.current_view)
-            
+
         elif selected_tab == "Customization":
             self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
             self.draw_cross_section()
-            
-        else:
-            self.sidebar_right.pack_forget()
-            self.ax.clear()
-            self.cax.clear()
-            self.cax.set_visible(False)
-            self.ax.set_title("Path Mapper & G-Code - Coming Soon", color="white", fontsize=16)
-            self.ax.set_axis_off()
-            self.canvas.draw()
+
+        elif selected_tab == "Path Mapper":
+            self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
+            self.draw_path_mapper()
             
     def on_generate_holes(self):
         if self.geo.mesh is None: return
@@ -463,13 +541,18 @@ class UIManager:
         self.holes_detected = False
         self.current_holes = []
         self.selected_hole_idx = None
-        self._set_view_controls_locked(False) 
-        
-        if self.current_tab == "Customization":
-            self.nav_selector.set("Selection")
-            self.on_nav_change("Selection")
-        else:
-            self.show_view(self.current_view)
+        self._set_view_controls_locked(False)
+
+        # rebuild 2D subplot ให้ถูกต้องก่อน nav ไป Selection
+        self.fig.clf()
+        self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
+        self.fig.subplots_adjust(bottom=0.1, right=0.85, left=0.1, top=0.9)
+        self.cax = self.fig.add_axes([0.88, 0.15, 0.03, 0.7])
+        self._setup_events()
+
+        self.nav_selector.set("Selection")
+        self.current_tab = "Selection"
+        self.show_view(self.current_view)
 
     def rotate_screen(self):
         if self.geo.mesh is None: return
@@ -510,8 +593,9 @@ class UIManager:
         if self.current_tab != "Selection": return 
         
         self.ax.clear()
-        self.cax.clear()
-        self.cax.set_visible(True)
+        if hasattr(self, 'cax'):
+            self.cax.clear()
+            self.cax.set_visible(True)
         self.ax.set_axis_on()
         
         self.current_x, self.current_y, self.current_z = x, y, z_vert
@@ -559,9 +643,10 @@ class UIManager:
             
         self.ax.set_aspect('equal')
         
-        cbar = self.fig.colorbar(tpc, cax=self.cax)
-        cbar.set_label("Depth / Z-Axis (mm)", fontsize=12, color="white")
-        cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
+        if hasattr(self, 'cax'):
+            cbar = self.fig.colorbar(tpc, cax=self.cax)
+            cbar.set_label("Depth / Z-Axis (mm)", fontsize=12, color="white")
+            cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
         
         self.hover_text = self.ax.annotate(
             "", xy=(0, 0), xytext=(15, 15), textcoords="offset points",
@@ -604,7 +689,7 @@ class UIManager:
 
     def on_press(self, event):
         if event.inaxes != self.ax: return
-        if self.current_tab != "Selection": return
+        if self.current_tab == "Path Mapper": return # ข้ามการจัดการเมาส์ของ 2D ไปให้ 3D ทำงาน
         
         if event.button == 1:
             self.drag_state['is_dragging'] = True
@@ -616,6 +701,7 @@ class UIManager:
 
     def on_motion(self, event):
         if event.inaxes != self.ax: return
+        if self.current_tab == "Path Mapper": return # ข้ามการจัดการเมาส์ของ 2D ไปให้ 3D ทำงาน
         
         if self.drag_state['is_dragging']: 
             dx_pixel, dy_pixel = event.x - self.drag_state['x'], event.y - self.drag_state['y']
@@ -654,7 +740,7 @@ class UIManager:
 
     def on_scroll(self, event):
         if event.inaxes != self.ax: return 
-        if self.current_tab != "Selection": return
+        if self.current_tab == "Path Mapper": return # ข้ามการจัดการซูมของ 2D ไปให้ 3D ทำงาน
         
         base_scale = 1.2 
         scale_factor = 1 / base_scale if event.button == 'up' else base_scale

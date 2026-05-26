@@ -11,7 +11,6 @@ def main():
     
     # 2. Pass it to the UI
     ui = UIManager(geo)
-    
     # 3. Show the UI!
     ui.show()
 
