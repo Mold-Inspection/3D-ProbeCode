@@ -68,7 +68,7 @@ class UIManager:
         self.nav_selector.pack(side="top", pady=5) 
 
         plt.style.use('dark_background')
-        colors = ["white", "red"]
+        colors = ["white", "yellow", "orange", "red"]
         self.cmap = LinearSegmentedColormap.from_list("depth_color", colors)
 
         self.fig = Figure(figsize=(10, 8), facecolor='#242424')
@@ -163,7 +163,7 @@ class UIManager:
     def _detect_holes_in_view(self, x, y, z, view_name):
         if len(z) == 0: return []
         
-        if view_name in ['Top', 'Front', 'Right']:
+        if view_name in ['Bottom', 'Front', 'Right']:
             surface_z = np.max(z)
             bottom_z = np.min(z)
             valid_indices = np.where((z < surface_z - 1.0) & (z > bottom_z + 1.0))[0]
@@ -215,13 +215,18 @@ class UIManager:
                     surf_z = surface_z
                     bot_z = float(np.min(cluster_z))
                     max_depth = float(surf_z - bot_z)
+                    # Z สูงสุดของ cluster = ขอบปากรูจริง (อาจต่ำกว่า surface_z ของชิ้นงาน)
+                    hole_top_z = float(np.max(cluster_z))
                 else:
                     surf_z = surface_z
                     bot_z = float(np.max(cluster_z))
                     max_depth = float(bot_z - surf_z)
+                    hole_top_z = float(np.min(cluster_z))
                 
                 hid = len(holes) + 1
-                holes.append(HoleFeature(hid, center_x, center_y, surf_z, bot_z, max_depth, radius))
+                hf = HoleFeature(hid, center_x, center_y, surf_z, bot_z, max_depth, radius)
+                hf.hole_top_z = hole_top_z   # ขอบปากรูจริงของ cluster นี้
+                holes.append(hf)
         
         holes.sort(key=lambda h: (-round(h.y / 5.0), h.x))
         for i, h in enumerate(holes):
@@ -334,132 +339,291 @@ class UIManager:
         return "break"
 
     def draw_cross_section(self):
-        # [MODIFIED] Customization mode: แสดงเฉพาะ 3D Path Map แบบเต็มหน้าจอ
-        # ลบ 2D cross-section ออก, ลบ safe Z-path (clearance) ออก,
-        # เพิ่มแสดงพื้นผิว (surface disk) ที่จุดลึกที่สุดของรู
         self.fig.clf()
+        self.cax = None  # ไม่ใช้ colorbar ใน Customization
 
-        # ซ่อน colorbar axis (ไม่ใช้ใน Customization)
-        if hasattr(self, 'cax'):
-            self.cax = None
+        # ── guard: ต้องมีข้อมูล mesh และรูที่เลือก ────────────────────────────
+        has_mesh = hasattr(self, 'current_x') and self.current_x is not None and len(self.current_x) > 0
+        has_hole = self.selected_hole_idx is not None and len(self.current_holes) > 0
 
-        if self.selected_hole_idx is None or not self.current_holes:
+        if not has_mesh:
             self.ax = self.fig.add_subplot(111, facecolor='#1e1e1e')
-            self.ax.set_title("Please select a hole from the right panel to analyze.", color="white", fontsize=16)
+            self.ax.set_title("Please upload a model and generate holes first.",
+                              color="white", fontsize=15)
             self.ax.set_axis_off()
             self.canvas.draw()
             return
 
-        hole = self.current_holes[self.selected_hole_idx]
-
-        # ══════════════════════════════════════════
-        # 3D Path Map เต็มหน้าจอ (ไม่มี 2D cross-section)
-        # ══════════════════════════════════════════
+        # ── สร้าง 3D subplot เต็มหน้าจอ ──────────────────────────────────────
         self.fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
-        ax_path = self.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
-        self.ax = ax_path
+        ax3d = self.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
+        self.ax = ax3d
 
-        layers = hole.layers
-        points = hole.points_per_layer
+        # ══════════════════════════════════════════════════════════════════════
+        # 1. วาดชิ้นงานทั้งหมดแบบ Wireframe (ตาข่าย ไม่มีผิวทึบ)
+        #    ใช้ข้อมูล mesh เดิมจาก current_x/y/z + current_triangles
+        # ══════════════════════════════════════════════════════════════════════
+        x3   = self.current_x
+        y3   = self.current_y
+        z3   = self.current_z
+        tris = self.current_triangles
 
-        # [FIX] z_levels:
-        #   - เริ่มจาก surface_z ลงมา (layer แรกอยู่ใต้ปาก ไม่เกินขอบบน)
-        #   - layer สุดท้ายหยุดก่อนถึง bottom จริง ด้วย margin = 10% ของความลึก (อย่างน้อย 1 mm)
-        z_margin_top    = max(hole.depth * 0.05, 0.5)   # ระยะห่างจากปากรูลงมา
-        z_margin_bottom = max(hole.depth * 0.10, 1.0)   # ระยะห่างจาก bottom ขึ้นมา (layer สุดท้าย)
-        z_levels = np.linspace(hole.surface_z - z_margin_top,
-                               hole.bottom_z  + z_margin_bottom,
-                               layers)
+        n_tri   = len(tris)
+        MAX_TRIS = 16000                          # [MODIFIED] เพิ่มจาก 4000 → 16000
+        step    = max(1, n_tri // MAX_TRIS)
+        sampled = tris[::step]
 
-        # วาด Wireframe กระบอก (ผนังรู)
-        z_cyl = np.linspace(hole.bottom_z, hole.surface_z, 15)
-        theta = np.linspace(0, 2*np.pi, 20)
-        theta_grid, z_grid = np.meshgrid(theta, z_cyl)
-        ax_path.plot_wireframe(hole.x + hole.radius * np.cos(theta_grid),
-                               hole.y + hole.radius * np.sin(theta_grid),
-                               z_grid, color='#0277bd', alpha=0.25)
+        # รวม edge segments ทั้งหมดแล้ว plot ครั้งเดียว
+        tx = x3[sampled]   # shape (N,3)
+        ty = y3[sampled]
+        tz = z3[sampled]
+        nan_col = np.full((len(sampled), 1), np.nan)
+        seg_x = np.hstack([tx[:, [0,1,2,0]], nan_col]).ravel()
+        seg_y = np.hstack([ty[:, [0,1,2,0]], nan_col]).ravel()
+        seg_z = np.hstack([tz[:, [0,1,2,0]], nan_col]).ravel()
 
-        # [NEW] วาดพื้นผิวที่จุดลึกที่สุด (bottom surface disk) เพื่อยืนยันทิศทางของรู
-        theta_fill = np.linspace(0, 2*np.pi, 60)
-        r_fill = np.linspace(0, hole.radius, 8)
-        theta_disk, r_disk = np.meshgrid(theta_fill, r_fill)
-        disk_x = hole.x + r_disk * np.cos(theta_disk)
-        disk_y = hole.y + r_disk * np.sin(theta_disk)
-        disk_z = np.full_like(disk_x, hole.bottom_z)
-        ax_path.plot_surface(disk_x, disk_y, disk_z, color='#00e5ff', alpha=0.35, linewidth=0)
-        # วาดวงกลมขอบ bottom เพื่อให้เห็นชัด
-        ax_path.plot(hole.x + hole.radius * np.cos(theta_fill),
-                     hole.y + hole.radius * np.sin(theta_fill),
-                     np.full_like(theta_fill, hole.bottom_z),
-                     color='#00e5ff', linewidth=1.5, alpha=0.7)
-        # label บน bottom surface
-        ax_path.text(hole.x, hole.y, hole.bottom_z,
-                     f"Bottom Z={hole.bottom_z:.2f}", color='#00e5ff',
-                     fontsize=7, ha='center', va='top', zorder=10)
+        ax3d.plot(seg_x, seg_y, seg_z,
+                  color="#1f538d", linewidth=0.8, alpha=0.6)
 
-        # ══════════════════════════════════════════
-        # สร้าง Tool Path
-        # - จุดสัมผัสผนังอยู่ที่ขอบ (radius พอดี) ไม่เลยออกนอกชิ้นงาน
-        # - เดินจากกึ่งกลาง → ขอบโดยตรง ไม่มี overshoot
-        # - หลังครบทุก layer เพิ่มจุดกึ่งกลางที่ bottom_z เพื่อวัดความลึกสูงสุด
-        # ══════════════════════════════════════════
-        path_x, path_y, path_z = [hole.x], [hole.y], [hole.surface_z]
-        touch_x, touch_y, touch_z = [], [], []
+        # ── [NEW] pre-compute triangle sets ต่อรู สำหรับใช้ highlight ──────────
+        # สร้าง mask ว่า triangle ไหนอยู่ใน bounding cylinder ของแต่ละรู
+        # ใช้ centroid ของแต่ละ triangle เทียบกับ (hole.x, hole.y, hole.radius)
+        # และ z ต้องอยู่ระหว่าง bottom_z และ hole_top_z
+        tri_cx = x3[tris].mean(axis=1)   # centroid X ของทุก triangle
+        tri_cy = y3[tris].mean(axis=1)   # centroid Y
+        tri_cz = z3[tris].mean(axis=1)   # centroid Z
 
-        for z in z_levels:
-            # ลงมาที่ระดับชั้น
-            path_x.append(hole.x); path_y.append(hole.y); path_z.append(z)
-            for ang in np.linspace(0, 2*np.pi, points, endpoint=False):
-                # เดินตรงออกไปแตะขอบ (radius พอดี = ขอบชิ้นงาน)
-                px = hole.x + hole.radius * np.cos(ang)
-                py = hole.y + hole.radius * np.sin(ang)
-                touch_x.append(px); touch_y.append(py); touch_z.append(z)
-                path_x.append(px);  path_y.append(py);  path_z.append(z)
-                # ถอยกลับกึ่งกลางก่อนไปจุดถัดไป
-                path_x.append(hole.x); path_y.append(hole.y); path_z.append(z)
+        # ── bounding box ของชิ้นงานทั้งหมด ───────────────────────────────────
+        xmin, xmax = float(np.min(x3)), float(np.max(x3))
+        ymin, ymax = float(np.min(y3)), float(np.max(y3))
+        zmin, zmax = float(np.min(z3)), float(np.max(z3))
+        cx = (xmin + xmax) / 2.0
+        cy = (ymin + ymax) / 2.0
+        cz = (zmin + zmax) / 2.0
+        half = max(xmax - xmin, ymax - ymin, zmax - zmin) / 2.0 * 1.1
 
-        # [NEW] จุดกึ่งกลางที่ bottom_z — วัดความลึกสูงสุด
-        path_x.append(hole.x); path_y.append(hole.y); path_z.append(hole.bottom_z)
-        touch_x.append(hole.x); touch_y.append(hole.y); touch_z.append(hole.bottom_z)
-        # ถอยกลับขึ้น surface
-        path_x.append(hole.x); path_y.append(hole.y); path_z.append(hole.surface_z)
+        # ══════════════════════════════════════════════════════════════════════
+        # 2. วาด ID label + highlight mesh จริงของทุกรู (ไม่มีวงแหวนสังเคราะห์)
+        # ══════════════════════════════════════════════════════════════════════
+        for i, h in enumerate(self.current_holes):
+            r_z    = getattr(h, 'hole_top_z', h.surface_z)
+            is_sel = (i == self.selected_hole_idx)
 
-        ax_path.plot(path_x, path_y, path_z, color='yellow', linestyle='--', linewidth=1.2,
-                     label='Tool Path', alpha=0.8)
-        # จุดสัมผัสผนัง
-        wall_touch_x = touch_x[:-1]; wall_touch_y = touch_y[:-1]; wall_touch_z = touch_z[:-1]
-        ax_path.scatter(wall_touch_x, wall_touch_y, wall_touch_z, color='red', s=25,
-                        depthshade=False, label='Wall Contact Points')
-        # จุดกึ่งกลาง bottom — แยกสีให้เห็นชัด
-        ax_path.scatter([touch_x[-1]], [touch_y[-1]], [touch_z[-1]], color='#ffea00', s=80,
-                        marker='*', depthshade=False, label='Bottom Depth Point', zorder=10)
+            # ID label
+            ax3d.text(h.x, h.y, r_z + half * 0.02,
+                      str(h.id), color='white', fontsize=7,
+                      ha='center', va='bottom')
 
-        # [FIX] ปรับ scale แกน X, Y, Z ให้สมดุลกัน — ป้องกัน Z ยาวบิดเบี้ยว
-        max_r = hole.radius * 1.6
-        z_range = hole.surface_z - hole.bottom_z
-        xy_range = max_r * 2
+            # หา triangles ของรูนี้จาก mesh จริง
+            dist_h   = np.hypot(tri_cx - h.x, tri_cy - h.y)
+            surf_z_g = float(np.min(z3))          # Z น้อย = ผิวบนของชิ้นงาน
+            z_lo_h   = min(h.bottom_z, r_z)       # ปากรู
+            z_hi_h   = max(h.bottom_z, r_z) + 0.5 # ก้นรู
 
-        # บังคับให้ทุกแกนมีสัดส่วนเท่ากันด้วยการสร้าง bounding cube
-        mid_x, mid_y = hole.x, hole.y
-        mid_z = (hole.bottom_z + hole.surface_z) / 2.0
-        max_range = max(xy_range, z_range) / 2.0
+            # mask หลัก: ผนังรู (z_lo_h ถึง z_hi_h, radius * 1.2)
+            mask_wall = (
+                (dist_h <= h.radius * 1.2) &
+                (tri_cz >= z_lo_h - 0.3) &
+                (tri_cz <= z_hi_h)
+            )
+            # mask ขอบบน: triangle ระหว่าง surface_z ถึง hole_top_z
+            # ขยาย radius เป็น 1.3 เพราะ triangle ผนังด้านบนมี centroid อยู่บนขอบเอียง
+            mask_rim = (
+                (dist_h <= h.radius * 1.3) &
+                (tri_cz >= surf_z_g - 0.5) &
+                (tri_cz <  z_lo_h + 0.3)
+            )
+            hmask = mask_wall | mask_rim
+            htris = tris[hmask]
 
-        ax_path.set_xlim([mid_x - max_range, mid_x + max_range])
-        ax_path.set_ylim([mid_y - max_range, mid_y + max_range])
-        ax_path.set_zlim([mid_z - max_range, mid_z + max_range])
+            if len(htris) > 0:
+                htx = x3[htris]; hty = y3[htris]; htz = z3[htris]
+                nan_h = np.full((len(htris), 1), np.nan)
+                hxs = np.hstack([htx[:,[0,1,2,0]], nan_h]).ravel()
+                hys = np.hstack([hty[:,[0,1,2,0]], nan_h]).ravel()
+                hzs = np.hstack([htz[:,[0,1,2,0]], nan_h]).ravel()
+                if is_sel:
+                    # [MODIFIED] รูที่เลือก: สีเขียวสว่าง เส้นหนา
+                    ax3d.plot(hxs, hys, hzs, color="#e68600", linewidth=1.6, alpha=0.95,
+                              label='Selected Hole Mesh')
+                else:
+                    ax3d.plot(hxs, hys, hzs, color='#1f538d', linewidth=0.9, alpha=0.5)
 
-        # ตกแต่ง 3D plot
-        ax_path.set_title(f"3D Probing Path — Hole {hole.id}  |  {layers}L × {points}P + 1 bottom = {layers*points + 1} pts  |  Depth: {hole.depth:.2f} mm",
-                          color='white', fontsize=12, pad=12)
-        for spine in [ax_path.xaxis, ax_path.yaxis, ax_path.zaxis]:
-            spine.set_pane_color((0, 0, 0, 0))
-            spine.line.set_color("gray")
-        ax_path.tick_params(colors='white', labelsize=7)
-        ax_path.set_xlabel("X (mm)", color='white', fontsize=9, labelpad=2)
-        ax_path.set_ylabel("Y (mm)", color='white', fontsize=9, labelpad=2)
-        ax_path.set_zlabel("Z (mm)", color='white', fontsize=9, labelpad=2)
-        ax_path.legend(facecolor='#1e1e1e', edgecolor='gray', labelcolor='white',
-                       loc='upper right', fontsize=7)
+        # ══════════════════════════════════════════════════════════════════════
+        # 3. Probing path เฉพาะรูที่เลือก — อิง mesh จริงทั้งหมด
+        # ══════════════════════════════════════════════════════════════════════
+        if has_hole:
+            hole   = self.current_holes[self.selected_hole_idx]
+            layers = hole.layers
+            points = hole.points_per_layer
+
+            rim_z  = getattr(hole, 'hole_top_z', hole.surface_z)
+            bot_z  = hole.bottom_z
+
+            # vertices ของรูนี้
+            dist_v = np.hypot(x3 - hole.x, y3 - hole.y)
+            z_lo_v = min(bot_z, rim_z) - 2.0
+            z_hi_v = max(bot_z, rim_z) + 2.0
+            # radius * 1.6 เพื่อให้ครอบคลุม vertex ขอบเอียงด้านนอกด้วย
+            vmask  = (dist_v <= hole.radius * 1.6) & (z3 >= z_lo_v) & (z3 <= z_hi_v)
+            vx = x3[vmask]; vy = y3[vmask]; vz = z3[vmask]
+
+            depth_span = abs(rim_z - bot_z)
+
+            # ── สร้าง radius profile จาก mesh จริง — interpolate แทน band-search ──
+            # เก็บ (z, r) ของทุก vertex ในรู แล้ว fit เป็น profile ต่อเนื่อง
+            # วิธีนี้ให้ทุก layer ได้ radius ที่ตรงกับรูปทรง mesh จริง
+            # โดยไม่ขึ้นกับจำนวน layers หรือความกว้างของ band
+            if len(vz) >= 6:
+                # bin vertex ตาม Z เพื่อลด noise — ใช้ percentile 85 ต่อ bin
+                n_bins    = max(20, layers * 4)
+                z_bins    = np.linspace(float(np.min(vz)), float(np.max(vz)), n_bins + 1)
+                z_profile = []
+                r_profile = []
+                for bi in range(n_bins):
+                    b_mask = (vz >= z_bins[bi]) & (vz < z_bins[bi+1])
+                    if b_mask.sum() >= 2:
+                        r_vals = np.hypot(vx[b_mask]-hole.x, vy[b_mask]-hole.y)
+                        z_profile.append(float((z_bins[bi] + z_bins[bi+1]) / 2))
+                        r_profile.append(float(np.percentile(r_vals, 72)))
+                z_profile = np.array(z_profile)
+                r_profile = np.array(r_profile)
+
+                def mesh_radius_at_z(target_z):
+                    if len(z_profile) < 2:
+                        return hole.radius
+                    return float(np.interp(target_z, z_profile, r_profile,
+                                           left=r_profile[0], right=r_profile[-1]))
+            else:
+                def mesh_radius_at_z(target_z):
+                    return hole.radius
+
+            EDGE_HALF = 0.5
+
+            # ── [1] Top Contact Ring (ปากรู = Z น้อยที่สุด) ──────────────────
+            # ในระบบนี้ Z เพิ่มขึ้นตามความลึก → Z น้อย = ผิวบน / ปากรู
+            SURFACE_Z  = float(np.min(z3))          # ผิวบนสุดของชิ้นงาน
+            TRUE_TOP_Z = float(np.min(vz))           # ปากรูจริง (Z น้อยสุดในรู)
+            contact_top_z = max(TRUE_TOP_Z, SURFACE_Z)   # clamp ไม่ให้เกินผิวบน
+
+            top_r = mesh_radius_at_z(contact_top_z)
+            theta_t = np.linspace(0, 2*np.pi, 72)
+            ax3d.plot(hole.x + top_r * np.cos(theta_t),
+                      hole.y + top_r * np.sin(theta_t),
+                      np.full_like(theta_t, contact_top_z),
+                      color='#ff6d00', linewidth=2.5, alpha=1.0, label='Top Contact Ring')
+
+            r_arr  = np.linspace(0, top_r, 10)
+            T_top, R_top = np.meshgrid(theta_t, r_arr)
+            ax3d.plot_surface(hole.x + R_top*np.cos(T_top),
+                              hole.y + R_top*np.sin(T_top),
+                              np.full_like(R_top, contact_top_z),
+                              color='#ff6d00', alpha=0.45,
+                              linewidth=0, antialiased=True)
+
+            z_start = contact_top_z   # layer แรกเริ่มที่ปากรู
+
+            # ── Bottom edge ring (วงฟ้า = Z มากที่สุด = ก้นรู) ────────────────
+            TRUE_BOT_Z = float(np.max(vz))           # ก้นรูจริง (Z มากสุดในรู)
+            bot_band = (vz >= TRUE_BOT_Z - EDGE_HALF * 2) & (vz <= TRUE_BOT_Z + EDGE_HALF)
+            if bot_band.sum() >= 3:
+                ba  = np.arctan2(vy[bot_band]-hole.y, vx[bot_band]-hole.x)
+                bd  = np.hypot(vx[bot_band]-hole.x,   vy[bot_band]-hole.y)
+                sb  = np.argsort(ba)
+                bot_r_edge = float(np.percentile(bd, 80))
+                bxc = np.append(hole.x + bd[sb]*np.cos(ba[sb]), hole.x + bd[sb[0]]*np.cos(ba[sb[0]]))
+                byc = np.append(hole.y + bd[sb]*np.sin(ba[sb]), hole.y + bd[sb[0]]*np.sin(ba[sb[0]]))
+                bzc = np.full(len(bxc), TRUE_BOT_Z)
+                ax3d.plot(bxc, byc, bzc, color='#00e5ff', linewidth=2.0, alpha=1.0, label='Bottom Edge')
+            else:
+                bot_r_edge = mesh_radius_at_z(TRUE_BOT_Z)
+                ax3d.plot(hole.x + bot_r_edge*np.cos(np.linspace(0,2*np.pi,60)),
+                          hole.y + bot_r_edge*np.sin(np.linspace(0,2*np.pi,60)),
+                          np.full(60, TRUE_BOT_Z), color='#00e5ff', linewidth=2.0, alpha=1.0)
+
+            # ── [1] Blue circle plane ที่ก้นรู (แทน mesh ที่ก้น) ────────────────
+            # ขนาด = Bottom Edge radius (bot_r_edge)
+            theta_b  = np.linspace(0, 2*np.pi, 72)
+            r_bot    = np.linspace(0, bot_r_edge, 10)
+            T_bot, R_bot = np.meshgrid(theta_b, r_bot)
+            ax3d.plot_surface(hole.x + R_bot*np.cos(T_bot),
+                              hole.y + R_bot*np.sin(T_bot),
+                              np.full_like(R_bot, TRUE_BOT_Z),
+                              color='#00bcd4', alpha=0.6,
+                              linewidth=0, antialiased=True,
+                              label='Bottom Floor')
+
+            z_end = TRUE_BOT_Z - EDGE_HALF   # layer สุดท้ายอยู่ก่อนถึงก้นรู 0.5mm
+
+            # crosshair + label ที่ true bottom
+            bot_r_cd = bot_r_edge * 0.25
+            for ddx, ddy in [(bot_r_cd, 0), (0, bot_r_cd)]:
+                ax3d.plot([hole.x-ddx, hole.x+ddx], [hole.y-ddy, hole.y+ddy],
+                          [TRUE_BOT_Z, TRUE_BOT_Z], color='#00e5ff', linewidth=1.5, alpha=0.9)
+            ax3d.text(hole.x, hole.y, TRUE_BOT_Z - abs(rim_z-bot_z)*0.05,
+                      f"Bottom Z={TRUE_BOT_Z:.2f}", color='#00e5ff', fontsize=7,
+                      ha='center', va='top')
+
+            z_levels_path = np.linspace(z_start, z_end, layers)
+
+            px_list, py_list, pz_list = [hole.x], [hole.y], [z_start]
+            tx_list, ty_list, tz_list = [], [], []
+
+            for z in z_levels_path:
+                r_at_z = mesh_radius_at_z(z) * 0.92
+                px_list.append(hole.x); py_list.append(hole.y); pz_list.append(z)
+                for ang in np.linspace(0, 2*np.pi, points, endpoint=False):
+                    ppx = hole.x + r_at_z * np.cos(ang)
+                    ppy = hole.y + r_at_z * np.sin(ang)
+                    tx_list.append(ppx); ty_list.append(ppy); tz_list.append(z)
+                    px_list += [ppx, hole.x]
+                    py_list += [ppy, hole.y]
+                    pz_list += [z,   z]
+
+            # ดาววัดความลึกสูงสุด → TRUE_BOT_Z จริง (ไม่ใช่ z_end)
+            px_list.append(hole.x); py_list.append(hole.y); pz_list.append(TRUE_BOT_Z)
+            tx_list.append(hole.x); ty_list.append(hole.y); tz_list.append(TRUE_BOT_Z)
+            px_list.append(hole.x); py_list.append(hole.y); pz_list.append(z_start)
+
+            ax3d.plot(px_list, py_list, pz_list,
+                      color='yellow', linestyle='--', linewidth=1.2,
+                      label='Tool Path', alpha=0.85)
+
+            wall_n = len(tx_list) - 1
+            ax3d.scatter(tx_list[:wall_n], ty_list[:wall_n], tz_list[:wall_n],
+                         color='red', s=22, depthshade=False,
+                         label=f'Wall Contact ({layers}L×{points}P)')
+            ax3d.scatter([tx_list[-1]], [ty_list[-1]], [tz_list[-1]],
+                         color='#ffea00', s=90, marker='*',
+                         depthshade=False, label='Bottom Depth Point', zorder=10)
+
+            title_str = (f"Customization — Hole {hole.id}  |  "
+                         f"R={hole.radius:.1f} mm  Depth={(rim_z-bot_z):.2f} mm  |  "
+                         f"{layers}L × {points}P + 1 = {layers*points+1} pts")
+
+            ax3d.view_init(elev=-135, azim=30)
+
+        else:
+            title_str = "Customization — Select a hole to show probing path"
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 4. ตั้งค่า axis + ตกแต่ง
+        # ══════════════════════════════════════════════════════════════════════
+        ax3d.set_xlim([cx - half, cx + half])
+        ax3d.set_ylim([cy - half, cy + half])
+        ax3d.set_zlim([cz - half, cz + half])
+
+        ax3d.set_title(title_str, color='white', fontsize=11, pad=10)
+        for spine in [ax3d.xaxis, ax3d.yaxis, ax3d.zaxis]:
+            spine.set_pane_color((0.10, 0.10, 0.10, 1.0))
+            spine.line.set_color('gray')
+        ax3d.tick_params(colors='white', labelsize=7)
+        ax3d.set_xlabel("X (mm)", color='white', fontsize=9, labelpad=2)
+        ax3d.set_ylabel("Y (mm)", color='white', fontsize=9, labelpad=2)
+        ax3d.set_zlabel("Z (mm)", color='white', fontsize=9, labelpad=2)
+        if has_hole:
+            ax3d.legend(facecolor='#1e1e1e', edgecolor='gray',
+                        labelcolor='white', loc='upper right', fontsize=7)
 
         self.canvas.draw()
 
@@ -722,7 +886,7 @@ class UIManager:
             close_points = np.where(dist < 2.0)[0]
             
             if len(close_points) > 0:
-                if self.current_view in ['Top', 'Front', 'Right']:
+                if self.current_view in ['Bottom', 'Front', 'Right']:
                     best_idx = close_points[np.argmin(self.current_z[close_points])]
                     surface_z = np.max(self.current_z)
                     depth = surface_z - self.current_z[best_idx]
