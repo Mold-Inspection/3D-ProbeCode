@@ -23,14 +23,21 @@ class MoldGeometry:
             
             # 2. จำลองสร้างโครงข่าย Mesh เป็นไฟล์ชั่วคราว เพื่อส่งต่อให้ UI
             temp_stl_path = "temp_ui_mesh.stl"
-            # [MODIFIED] เพิ่มพารามิเตอร์ tolerance (ระยะห่าง) และ angularTolerance (องศา)
-            # ค่าที่สูงขึ้น = โหลดไวขึ้นมาก แต่ภาพอาจจะดูเป็นเหลี่ยมขึ้นเล็กน้อย
+            # [MODIFIED] ปรับความละเอียด mesh
+            # tolerance      = chord deviation (mm) — ยิ่งต่ำยิ่งละเอียด ขอบโค้งเนียนขึ้น
+            # angularTolerance = มุมสูงสุดระหว่าง facet (องศา) — ยิ่งต่ำยิ่งเนียน
+            #
+            # เปรียบเทียบระดับความละเอียด:
+            #   หยาบมาก  : tolerance=0.50, angularTolerance=0.50  (โหลด ~1s)
+            #   ปานกลาง  : tolerance=0.10, angularTolerance=0.20  (โหลด ~3s)  ← ค่าใหม่
+            #   ละเอียด  : tolerance=0.05, angularTolerance=0.10  (โหลด ~8s)
+            #   ละเอียดมาก: tolerance=0.01, angularTolerance=0.05  (โหลด ~30s+)
             cq.exporters.export(
-                self.step_data, 
-                temp_stl_path, 
-                exportType='STL', 
-                tolerance=0.5,           # ปกติจะเป็น 0.001 ซึ่งละเอียดเกินไป
-                angularTolerance=0.5     # ปกติจะเป็น 0.1
+                self.step_data,
+                temp_stl_path,
+                exportType='STL',
+                tolerance=0.01,
+                angularTolerance=0.05
             )
             
             # 3. ให้ trimesh โหลดตัว Mesh เข้ามา (ทำให้โค้ดที่เหลือของคุณทำงานได้ปกติต่อไป)
