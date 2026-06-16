@@ -17,71 +17,109 @@ class SelectionTab:
     # ------------------------------------------------------------------
     # คำนวณความลึก ณ ตำแหน่ง (mx, my)
     #
-    # Strategy (ลำดับความสำคัญ):
-    #   1. STEP mode  → ใช้ projector.project_point_to_view() กับ
-    #                   step_holes cache โดยตรง แม่นยำ 100%
-    #                   หา hole ที่ใกล้ที่สุด แล้ว interpolate depth
-    #                   ตาม y position ระหว่าง open_3d → deep_3d
-    #   2. STL mode   → ใช้ face_data จาก mesh (เดิม แต่ปรับปรุง)
+    # Strategy (ลำดับความสำคัญ — รอบ 3):
+    #   1. อ่านความลึกจริงจากพื้นผิว mesh ก่อนเสมอ (ตรงกับสีบนจอ 100%)
+    #   2. STEP mode เท่านั้น: ถ้าค่าจากผิวใกล้เคียงพื้นก้นรู (floor) ของ
+    #      STEP hole ที่ใกล้ที่สุด ให้ snap เป็นค่า floor แม่นยำจาก B-Rep
+    #      แทน (กรณีนี้คือกำลังชี้อยู่บนพื้นก้นรูจริง ๆ)
+    #   3. ถ้าไม่เข้าเงื่อนไข floor หรือไม่มี STEP hole เลย → ใช้ค่าจากผิว
+    #      mesh ตรง ๆ (รวมถึงตอนชี้บนขอบ/ผนังรูที่กำลังไล่เฉดสีตามความชัน)
+    #
+    # หมายเหตุประวัติการแก้ไข:
+    #   v1: คืนค่าคงที่ hole.depth ทันทีที่อยู่ในรัศมีรู (ผิดตอนชี้บนขอบ/ผนัง)
+    #   v2: ลด tolerance รัศมีลง (ยังพังถ้า silhouette ใหญ่กว่ารัศมีจริง)
+    #   v3 (ปัจจุบัน): เลิกใช้รัศมีตัดสิน floor/wall เปลี่ยนไปเทียบค่าจริงจาก
+    #       พื้นผิว mesh กับค่า floor จาก B-Rep โดยตรง — แม่นยำไม่ว่า silhouette
+    #       จะมีรูปร่างซับซ้อนแค่ไหน
     # ------------------------------------------------------------------
     def _get_depth_at_step(self, mx, my):
-        """คำนวณความลึกจาก STEP B-Rep geometry โดยตรง"""
+        """คำนวณความลึก ณ จุดที่ชี้ สำหรับไฟล์ STEP
+
+        หมายเหตุการแก้ไข (รอบ 3 — เลิกใช้ radius fudge-factor ตัดสิน floor/wall):
+        วิธีเดิมเช็คว่า "อยู่ในรัศมีรู (บวก tolerance)" แล้วถือว่าคือพื้นก้นรู
+        เป็นปัญหาเพราะรัศมีที่ใช้ตัดสิน (radius_open ของรูใน B-Rep) ไม่ได้
+        ตรงกับ "ขนาดจริงของพื้นที่ราบก้นรูบนจอ" เสมอไป (เช่น fillet, มุมโค้ง,
+        หรือมุมมองที่ทำให้ silhouette ใหญ่กว่ารัศมีจริง) ทำให้จุดที่อยู่บน
+        ขอบ/ผนังรู (ซึ่งควรไล่เฉดสีตามความชัน) ถูกตัดสินผิดว่าเป็นพื้นก้นรู
+        แล้วคืนค่าคงที่ทับไป
+
+        แนวทางใหม่: อ่านความลึกจริงจากพื้นผิว mesh ณ จุดนั้นก่อนเสมอ (ค่า
+        เดียวกับสีที่วาดบนจอ) แล้วเทียบกับความลึกพื้นก้นรูของ STEP hole ที่
+        ใกล้ที่สุด — ถ้าค่าจากพื้นผิวเองก็ใกล้เคียงพื้นก้นรูอยู่แล้ว (เผื่อ
+        ความหยาบของ tessellation) ค่อย snap เป็นค่า floor ที่แม่นยำ 100%
+        จาก B-Rep แทนค่าประมาณจาก mesh ส่วนจุดที่อยู่บนขอบ/ผนัง (ค่าจากผิว
+        ไม่ใกล้ floor) จะใช้ค่าจากผิวจริงตามที่ควรเป็น
+        """
         app = self.app
         geo = app.geo
 
-        # ดึง step holes cache จาก extractor โดยตรง
+        # 1) อ่านความลึกจริงจากพื้นผิว mesh ก่อนเสมอ — ค่านี้ตรงกับสีบนจอ 100%
+        surface_depth = self._get_depth_surface(mx, my)
+        if surface_depth is None:
+            return None
+
         step_holes = getattr(geo.extractor, '_step_holes_cache', [])
         if not step_holes:
-            return None
+            return surface_depth
 
         view_name = app.current_view
         projector = geo.projector
+        total_depth = projector.get_view_params(view_name)['total_depth']
+        OPEN_THRESHOLD = max(total_depth * 0.03, 1.5)
+        FLOOR_TOLERANCE = max(total_depth * 0.04, 1.0)
 
-        best_depth = None
+        best_floor_depth = None
         best_dist  = float('inf')
 
         for sh in step_holes:
-            # Project ปลายทั้งสองของรูลงระนาบ 2D
             ox, oy, od = projector.project_point_to_view(*sh.open_3d, view_name)
             dx, dy, dd = projector.project_point_to_view(*sh.deep_3d, view_name)
 
-            # เลือกว่าด้านไหนคือ "ปากรู" (depth น้อยกว่า = ใกล้กล้องกว่า)
             if od <= dd:
                 open_x, open_y, open_d = ox, oy, od
-                deep_x, deep_y, deep_d = dx, dy, dd
+                deep_d = dd
             else:
                 open_x, open_y, open_d = dx, dy, dd
-                deep_x, deep_y, deep_d = ox, oy, od
+                deep_d = od
 
-            # ตรวจสอบว่ารูนี้มองเห็นจาก view นี้ไหม
-            total_depth = geo.projector.get_view_params(view_name)['total_depth']
-            OPEN_THRESHOLD = max(total_depth * 0.03, 1.5)
             if open_d > OPEN_THRESHOLD:
                 continue
 
-            # ระยะห่างแนวราบจากเมาส์ถึงแกนกลางรู (ใช้ตำแหน่ง open เป็นตัวแทน)
             r = sh.radius_open
             dist_2d = np.hypot(mx - open_x, my - open_y)
 
-            # เมาส์ต้องอยู่ภายในรัศมีของรูนี้ (บวก tolerance 20%)
-            if dist_2d > r * 1.2:
+            # ยังต้องอยู่ในรัศมีปากรู (กว้างพอสมควร เพราะแค่ใช้คัดเลือก "รูที่
+            # เกี่ยวข้อง" ไม่ใช่ตัดสิน floor/wall อีกต่อไป)
+            if dist_2d > r * 1.3:
                 continue
 
-            # คำนวณความลึกจริงของรูนี้
-            hole_depth = deep_d - open_d
-
+            hole_floor_depth = deep_d - open_d
             if dist_2d < best_dist:
-                best_dist  = dist_2d
-                best_depth = hole_depth
+                best_dist = dist_2d
+                best_floor_depth = hole_floor_depth
 
-        # ถ้าไม่โดนรูไหนเลย ให้ query ความลึก surface จาก projector
-        if best_depth is None:
-            return self._get_depth_surface(mx, my)
+        if best_floor_depth is None:
+            return surface_depth
 
-        return max(0.0, best_depth)
+        # 2) Snap เป็นค่า floor แม่นยำจาก B-Rep เฉพาะตอนค่าจากพื้นผิว mesh เอง
+        #    ก็ใกล้เคียงค่า floor อยู่แล้ว (แสดงว่าจุดนี้อยู่บนพื้นก้นรูจริง)
+        if abs(surface_depth - best_floor_depth) <= FLOOR_TOLERANCE:
+            return max(0.0, best_floor_depth)
+
+        # ไม่ใกล้พอ → จุดนี้อยู่บนขอบ/ผนังรูหรือพื้นผิวทั่วไป ใช้ค่าจากผิวจริง
+        return surface_depth
 
     def _get_depth_surface(self, mx, my):
-        """Fallback: อ่านความลึกจาก face_data ของ mesh (ใช้กับ STL หรือพื้นผิวทั่วไป)"""
+        """อ่านความลึก ณ จุด (mx, my) — คืนค่าที่ "ตรงกับสีที่วาดจริงบนจอ"
+
+        สำคัญ: `ax.tripcolor(x, y, triangles, facecolors=face_data)` วาดสีแบบ
+        FLAT ต่อ "หน้าสามเหลี่ยม" (1 ค่าต่อ 1 triangle จาก face_data ทั้งรูป
+        ไม่ได้ไล่เฉดสีในแนวภายในสามเหลี่ยม) ดังนั้นค่าตัวเลขที่ hover/pin ต้อง
+        ใช้ "ค่าเดียวกัน" กับ face_data ของ triangle ที่ cursor อยู่ใน ไม่ใช่
+        การ interpolate ข้าม vertex (ซึ่งเป็นคนละค่ากับสีที่เห็นจริง และทำให้
+        ตัวเลขกับสีไม่ตรงกัน เช่น ชี้บนพื้นที่สีเหลือง/ขาว แต่ตัวเลขกลับขึ้น
+        ค่าระดับสีแดงลึกสุด)
+        """
         app = self.app
         if not hasattr(app, 'current_x') or app.current_x is None: return None
         if not hasattr(app, 'current_triangles') or app.current_triangles is None: return None
@@ -89,32 +127,44 @@ class SelectionTab:
 
         x, y    = app.current_x, app.current_y
         tris    = app.current_triangles
-        fdata   = app.current_face_data
+        fdata   = app.current_face_data   # ค่าเดียวกับที่ส่งให้ tripcolor(facecolors=...)
 
         x0, y0 = x[tris[:, 0]], y[tris[:, 0]]
         x1, y1 = x[tris[:, 1]], y[tris[:, 1]]
         x2, y2 = x[tris[:, 2]], y[tris[:, 2]]
 
-        dX, dY   = mx - x2, my - y2
-        det      = (y0 - y2) * (x1 - x2) - (x0 - x2) * (y1 - y2)
-        valid    = np.abs(det) > 1e-10
-        det_safe = np.where(valid, det, 1.0)
+        # หมายเหตุการแก้ไข (รอบ 4 — root cause จริง):
+        # denom ตัวนี้คือ "ตัวหารบารีเซนทริก" มาตรฐาน (canonical):
+        #   denom = (x0-x2)*(y1-y2) - (x1-x2)*(y0-y2)
+        # โค้ดเดิมตั้งแต่ไฟล์แรกที่ได้รับมา ใช้ตัวแปรชื่อ det ที่มีค่าเป็น
+        # "ค่าลบ" ของ denom มาตรฐานนี้ (det = -denom) แต่ตัวเศษ (l0, l1) ยัง
+        # เขียนตามสัญญะของ denom มาตรฐาน ทำให้ผลลัพธ์ l0, l1 ติดเครื่องหมาย
+        # ลบสลับกัน ส่งผลให้เงื่อนไข "inside triangle" (l0,l1,l2 >= 0) เพี้ยน
+        # และจุดส่วนใหญ่ไม่ถูกจับว่าอยู่ใน triangle ไหนเลย หรือจับผิด triangle
+        # — นี่คือสาเหตุจริงของค่าความลึกที่ผิดทุกภาพที่ผ่านมา ไม่ใช่แค่เรื่อง
+        # threshold/fudge-factor ตามที่แก้ไปก่อนหน้า
+        denom      = (x0 - x2) * (y1 - y2) - (x1 - x2) * (y0 - y2)
+        valid      = np.abs(denom) > 1e-10
+        denom_safe = np.where(valid, denom, 1.0)
 
-        l0 = ((y1 - y2) * dX + (x2 - x1) * dY) / det_safe
-        l1 = ((y2 - y0) * dX + (x0 - x2) * dY) / det_safe
+        dX, dY = mx - x2, my - y2
+        l0 = ((dX) * (y1 - y2) - (x1 - x2) * (dY)) / denom_safe
+        l1 = ((x0 - x2) * (dY) - (dX) * (y0 - y2)) / denom_safe
         l2 = 1.0 - l0 - l1
 
         inside = valid & (l0 >= -1e-6) & (l1 >= -1e-6) & (l2 >= -1e-6)
         if not np.any(inside): return None
 
-        depths_here = fdata[inside]
-        total_depth = float(np.max(fdata)) if len(fdata) > 0 else 1.0
-        threshold   = total_depth * 0.05
-
-        deep_mask = depths_here > threshold
-        depth = float(np.max(depths_here[deep_mask])) if np.any(deep_mask) \
-                else float(np.max(depths_here))
-        return max(0.0, depth)
+        # ใช้ triangle แรกที่ cursor อยู่ใน แล้วอ่านค่าความลึกของ "หน้านั้น
+        # ทั้งหน้า" ตรง ๆ — เป็นค่าเดียวกับที่ ax.tripcolor(facecolors=fdata)
+        # ใช้วาดสีจริงบนจอ จึงตรงกับสีที่เห็นเสมอ (ไม่ใช้ argmin/argmax แบบ
+        # เลือกตามค่าความลึก เพราะนั่นจะ bias ไปทาง shallow/deep โดยไม่มีเหตุผล
+        # เกี่ยวกับว่าจุดไหนคือผิวที่มองเห็นจริง — เมื่อ inside มีได้มากกว่า 1
+        # แทบทุกครั้งคือ floating point ติดกันที่ขอบ triangle ไม่ใช่การซ้อนทับ
+        # ของผิวหน้า/หลังจริง)
+        ti = np.where(inside)[0][0]
+        depth_here = fdata[ti]
+        return max(0.0, float(depth_here))
 
     def _get_depth_at(self, mx, my):
         """Entry point: เลือก STEP หรือ STL อัตโนมัติ"""

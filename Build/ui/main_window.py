@@ -8,7 +8,7 @@ from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 from core.models import HoleFeature
 # Import หน้าต่าง Tabs ต่างๆ (ต้องเช็คชื่อโฟลเดอร์ให้ตรงกับของคุณ ตัว T พิมพ์ใหญ่)
-from ui.tabs.selection_tab import SelectionTab
+from Build.ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 
