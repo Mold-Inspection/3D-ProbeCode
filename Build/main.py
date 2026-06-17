@@ -1,6 +1,6 @@
 # main.py
 from core.geometry_engine import MoldGeometry
-from ui.main_window001 import UIManager
+from ui.main_window import UIManager
 
 def main():
     print("Starting 3D Laser Scanner Simulator...")
