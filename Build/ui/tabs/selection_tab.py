@@ -8,7 +8,8 @@ class SelectionTab:
         self._pinned_annotations = []
         self._pin_markers = []
         # เก็บข้อมูลดิบของ pin (x, y, depth) แยกจาก matplotlib artist
-        # เพื่อให้ reset_position() สามารถ restore pin กลับมาได้หลัง ax.clear()
+        # เพื่อให้ reset_position() / on_generate_holes() / on_clear_holes()
+        # สามารถ restore pin กลับมาได้หลัง ax.clear()
         self._pinned_pin_data = []
         self.MAX_PINS = 10
 
@@ -21,6 +22,28 @@ class SelectionTab:
     # ------------------------------------------------------------------
     # Pin Management
     # ------------------------------------------------------------------
+    def clear_pins(self):
+        """
+        ล้าง pin ทั้งหมดออกจากระบบ (ทั้ง artist บน canvas และข้อมูลดิบ)
+        เรียกใช้เมื่อ: เปลี่ยนมุมมอง (view), เปลี่ยนไฟล์ (load ใหม่), Rotate
+        ไม่เรียกใช้เมื่อ: Generate Holes / Clear Holes / Reset Position
+        (กรณีเหล่านั้นต้องการ "คงค่า pin เดิมไว้" ผ่าน _restore_pins())
+        """
+        for ann in self._pinned_annotations:
+            try:
+                ann.remove()
+            except Exception:
+                pass
+        for marker in self._pin_markers:
+            try:
+                marker.remove()
+            except Exception:
+                pass
+
+        self._pinned_annotations = []
+        self._pin_markers = []
+        self._pinned_pin_data = []
+
     def _draw_single_pin(self, px, py, depth):
         """วาด pin ใหม่ 1 จุดลงบน ax ปัจจุบัน และเก็บ artist ไว้"""
         marker = self.app.ax.plot(
@@ -44,7 +67,8 @@ class SelectionTab:
     def _restore_pins(self, saved_pins):
         """
         วาด pin ทั้งหมดจาก saved_pins กลับบน ax ใหม่หลัง redraw
-        เรียกจาก main_window.reset_position() หลัง show_view() เสร็จ
+        เรียกจาก main_window.reset_position() / on_generate_holes() /
+        on_clear_holes() หลัง show_view() เสร็จ
         """
         # ล้าง artist list เก่า (ถูก clear ไปแล้วตอน ax.clear())
         self._pinned_annotations = []
@@ -234,12 +258,13 @@ class SelectionTab:
         if app.current_tab != "Selection": return
 
         # ล้าง artist list (ax.clear() ด้านล่างทำให้ artist เดิม invalid แล้ว)
-        # ข้อมูลดิบ (_pinned_pin_data) ยังคงอยู่ใน SelectionTab ตามปกติ
-        # reset_position() จะ save/restore ข้อมูลดิบนั้นเอง
+        # ข้อมูลดิบ (_pinned_pin_data) ไม่ได้ถูกล้างที่นี่ — การล้างข้อมูลดิบ
+        # เป็นหน้าที่ของ clear_pins() ซึ่งจะถูกเรียกอย่างชัดเจนจาก main_window
+        # ตอนเปลี่ยน view / เปลี่ยนไฟล์ / Rotate เท่านั้น ส่วน reset_position(),
+        # on_generate_holes(), on_clear_holes() จะ save ข้อมูลดิบไว้ก่อน
+        # เรียก show_view() แล้ว restore กลับด้วย _restore_pins() ทีหลัง
         self._pinned_annotations = []
         self._pin_markers = []
-        # หมายเหตุ: ไม่ล้าง _pinned_pin_data ที่นี่ เพราะ reset_position()
-        # ต้องอ่านก่อน call show_view() → update_plot() และ restore ทีหลัง
 
         app.ax.clear()
         if hasattr(app, 'cax') and app.cax is not None:
@@ -310,8 +335,8 @@ class SelectionTab:
                     transform=app.ax.transAxes,
                     fontsize=8, color='#666666', va='bottom', ha='left', zorder=15)
 
-        # หมายเหตุ: ไม่ draw pins ที่นี่ — reset_position() จะเรียก _restore_pins()
-        # ทีหลัง และ normal flow (click ใหม่) ก็ไม่ต้องการ restore อะไร
+        # หมายเหตุ: ไม่ draw pins ที่นี่ — ผู้เรียก (main_window) เป็นผู้กำหนดว่า
+        # จะ clear_pins() หรือ _restore_pins() หลัง update_plot() เสร็จ
 
         app.canvas.draw()
 

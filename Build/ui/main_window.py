@@ -8,7 +8,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 from core.models import HoleFeature
-from ui.tabs.selection_tab001 import SelectionTab
+from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 
@@ -180,6 +180,9 @@ class UIManager:
     # Core Functions
     # ---------------------------------------------------------
     def on_nav_change(self, selected_tab):
+        # เปลี่ยนหน้า (Selection / Customization / Path Mapper) → ล้าง pin ทั้งหมด
+        self.selection_tab.clear_pins()
+
         self.current_tab = selected_tab
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
 
@@ -213,6 +216,9 @@ class UIManager:
             filetypes=[("STEP Files", "*.stp *.step"), ("All Files", "*.*")]
         )
         if filepath:
+            # โหลดไฟล์ใหม่ → ล้าง pin ทั้งหมด (พิกัดเดิมไม่มีความหมายกับโมเดลใหม่)
+            self.selection_tab.clear_pins()
+
             self.geo.load_file(filepath)
             self.screen_rotation = 0
             self.holes_detected = False 
@@ -232,6 +238,15 @@ class UIManager:
 
     def show_view(self, view_name):
         if self.geo.mesh is None: return
+
+        # เปลี่ยนมุมมอง (Top -> Bottom, Front -> Left, ฯลฯ) → ล้าง pin ทั้งหมด
+        # เช็คก่อนเปลี่ยน self.current_view เพื่อแยกแยะ "เปลี่ยนมุมมองจริง" ออกจาก
+        # การเรียก show_view(self.current_view) ซ้ำมุมมองเดิม ซึ่งใช้ใน
+        # on_generate_holes() / on_clear_holes() / reset_position() ที่ต้องการ
+        # คง pin เดิมไว้ (caller เหล่านั้นจะ save/restore pin ของตัวเองอยู่แล้ว)
+        if view_name != self.current_view:
+            self.selection_tab.clear_pins()
+
         self.current_view = view_name
         
         if view_name == 'Top':
@@ -286,18 +301,29 @@ class UIManager:
         self.holes_detected = True
         self._set_view_controls_locked(True) 
         if self.current_tab == "Selection":
+            # บันทึก pin เดิมไว้ก่อน redraw แล้ว restore กลับหลัง show_view()
+            # (Generate Holes ไม่ควรทำให้ pin ที่ติดไว้หายไป)
+            saved_pins = list(self.selection_tab._pinned_pin_data)
             self.show_view(self.current_view)
+            self.selection_tab._restore_pins(saved_pins)
         
     def on_clear_holes(self):
         self.holes_detected = False
         self.current_holes = []
         self.selected_hole_idx = None
         self._set_view_controls_locked(False)
+
+        # บันทึก pin เดิมไว้ก่อน redraw แล้ว restore กลับหลัง on_nav_change()
+        # (Clear Holes ควรล้างแค่ข้อมูลรู ไม่ใช่ pin ที่ผู้ใช้ติดไว้)
+        saved_pins = list(self.selection_tab._pinned_pin_data)
         self.nav_selector.set("Selection")
         self.on_nav_change("Selection")
+        self.selection_tab._restore_pins(saved_pins)
 
     def rotate_screen(self):
         if self.geo.mesh is None: return
+        # Rotate มุมมอง → ล้าง pin ทั้งหมด (พิกัด 2D เดิมใช้ไม่ได้กับมุมที่หมุนใหม่)
+        self.selection_tab.clear_pins()
         self.screen_rotation = (self.screen_rotation + 90) % 360
         self.show_view(self.current_view)
 

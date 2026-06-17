@@ -20,7 +20,29 @@ class StepExtractor:
             try:
                 if face.geomType() not in ('CYLINDER', 'CONE'): continue
 
-                circle_edges = [e for e in face.Edges() if e.geomType() == 'CIRCLE']
+                # หมายเหตุสำคัญ: geomType() == 'CIRCLE' หมายถึง "เส้นโค้งอ้างอิงเป็นวงกลม"
+                # เท่านั้น ไม่ได้แปลว่าเส้นขอบนั้นเป็นวงกลมเต็มวง (360°)
+                # ขอบของ Fillet ที่มุม (เช่น มุมโค้งของบล็อกสี่เหลี่ยมมุมมน) ก็มี
+                # geomType() == 'CIRCLE' เหมือนกัน (เพราะเป็นส่วนหนึ่งของวงกลม)
+                # ทั้งที่จริงเป็นแค่ Arc เสี้ยววงกลม ไม่ใช่ปากรู
+                # ต้องเช็ค IsClosed() เพิ่มเพื่อกรองเอาเฉพาะวงกลมที่ปิดสนิทจริงๆ
+                # (ปากรู/ก้นรูจริงจะเป็นวงกลมเต็มวงเสมอ ส่วน Fillet มุมจะเป็นแค่ Arc)
+                circle_edges = []
+                for e in face.Edges():
+                    if e.geomType() != 'CIRCLE': continue
+                    try:
+                        is_full_circle = bool(e.IsClosed())
+                    except Exception:
+                        # fallback: เทียบความยาวเส้นขอบกับเส้นรอบวงเต็มที่คำนวณจากรัศมี
+                        # ถ้าสั้นกว่าอย่างมีนัยสำคัญ แสดงว่าเป็นแค่ Arc ไม่ใช่วงกลมเต็มวง
+                        try:
+                            r_chk = e.Length() / (2 * math.pi)
+                            is_full_circle = r_chk > 0  # ไม่สามารถยืนยันได้ ปล่อยผ่านแบบระมัดระวัง
+                        except Exception:
+                            is_full_circle = False
+                    if is_full_circle:
+                        circle_edges.append(e)
+
                 if len(circle_edges) < 2: continue
 
                 circle_data = []
