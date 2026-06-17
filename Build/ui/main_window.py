@@ -1,3 +1,4 @@
+# ui/main_window.py
 import customtkinter as ctk
 import os
 import numpy as np
@@ -7,8 +8,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 from core.models import HoleFeature
-# Import หน้าต่าง Tabs ต่างๆ (ต้องเช็คชื่อโฟลเดอร์ให้ตรงกับของคุณ ตัว T พิมพ์ใหญ่)
-from Build.ui.tabs.selection_tab import SelectionTab
+from ui.tabs.selection_tab001 import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 
@@ -155,11 +155,24 @@ class UIManager:
         self.holes_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
     def _set_view_controls_locked(self, is_locked):
-        target_state = "disabled" if is_locked else "normal"
-        self.btn_rotate.configure(state=target_state)
-        self.btn_reset.configure(state=target_state)
+        """
+        is_locked=True  → holes ถูก generate แล้ว:
+            - Rotate / View buttons → disabled (ป้องกันเปลี่ยนมุมมอง)
+            - Reset Position        → ENABLED  (ยังใช้ได้ใน Selection)
+            - Generate Holes        → disabled
+            - Clear & Unlock        → enabled
+        is_locked=False → ยังไม่ generate หรือ clear แล้ว:
+            - ทุกปุ่มกลับสู่สถานะปกติ
+        """
+        rotate_state = "disabled" if is_locked else "normal"
+        self.btn_rotate.configure(state=rotate_state)
         for btn in self.view_buttons.values():
-            btn.configure(state=target_state)
+            btn.configure(state=rotate_state)
+
+        # Reset Position: ใช้ได้เสมอใน Selection (ทั้ง locked และ unlocked)
+        # จะถูก disable เฉพาะตอนอยู่ใน Customization tab (จัดการใน on_nav_change)
+        self.btn_reset.configure(state="normal")
+
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
         self.btn_clear.configure(state="normal" if is_locked else "disabled")
 
@@ -169,6 +182,13 @@ class UIManager:
     def on_nav_change(self, selected_tab):
         self.current_tab = selected_tab
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
+
+        # Reset Position: ใช้ได้เฉพาะใน Selection tab เท่านั้น
+        if selected_tab == "Customization":
+            self.btn_reset.configure(state="disabled")
+        else:
+            # Selection หรือ Path Mapper — enable ถ้ามี mesh
+            self.btn_reset.configure(state="normal" if self.geo.mesh is not None else "disabled")
         
         if selected_tab == "Selection":
             self.fig.clf()
@@ -230,7 +250,6 @@ class UIManager:
         if self.holes_detected:
             has_step = (hasattr(self.geo, 'step_data') and self.geo.step_data is not None)
             if has_step:
-                # --- ส่วนที่นำกลับมา: แปลง StepHole ให้เป็น HoleFeature สำหรับ UI ---
                 step_holes = self.geo.get_step_holes_in_view(view_name)
                 converted = []
                 for i, sh in enumerate(step_holes):
@@ -247,7 +266,6 @@ class UIManager:
                     hf._step_hole = sh
                     converted.append(hf)
                 self.current_holes = converted
-                # -----------------------------------------------------------------
             else:
                 visible_vert_idx = np.unique(tri.ravel())
                 self.current_holes = self.selection_tab.detect_holes_in_view(
@@ -262,6 +280,7 @@ class UIManager:
         title = f"{view_name} View"
         self.selection_tab.update_plot(x, y, z_v, z_f, tri, title, holes=self.current_holes)
         self.update_treeview(self.current_holes)
+
     def on_generate_holes(self):
         if self.geo.mesh is None: return
         self.holes_detected = True
@@ -283,8 +302,21 @@ class UIManager:
         self.show_view(self.current_view)
 
     def reset_position(self):
-        if self.geo.mesh is not None:
-            self.show_view(self.current_view)
+        """
+        Reset กลับมุมมองเดิม — Pin ที่ pin ไว้จะยังคงอยู่ โดยบันทึกข้อมูล
+        pin ก่อน redraw แล้ว restore กลับหลัง update_plot เสร็จ
+        """
+        if self.geo.mesh is None: return
+        if self.current_tab != "Selection": return
+
+        # --- บันทึก pin data ก่อน redraw ---
+        saved_pins = list(self.selection_tab._pinned_pin_data)
+
+        # --- Redraw (ax.clear ใน update_plot จะลบ artist ทั้งหมด) ---
+        self.show_view(self.current_view)
+
+        # --- Restore pins หลัง redraw ---
+        self.selection_tab._restore_pins(saved_pins)
 
     # ---------------------------------------------------------
     # Hole Settings UI (Sidebar ขวา)
