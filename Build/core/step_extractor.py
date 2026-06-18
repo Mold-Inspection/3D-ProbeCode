@@ -2,7 +2,7 @@
 import numpy as np
 import math
 import copy
-from core.models import StepHole
+from core.models03 import StepHole
 
 class StepExtractor:
     """แกะข้อมูลทางเรขาคณิต (รู/ทรงกระบอก) ออกจากไฟล์ STEP"""
