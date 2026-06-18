@@ -10,11 +10,16 @@ class HoleFeature:
         self.surface_z = surface_z
         self.bottom_z = bottom_z
         self.depth = depth
-        self.radius = radius 
+        self.radius = radius
         self.layers = 3              # ค่า Default ขั้นต่ำ 3 ชั้น
         self.points_per_layer = 4    # ค่า Default ขั้นต่ำ 4 จุด
         self.hole_top_z = surface_z  # ขอบปากรูจริง
         self._step_hole = None       # ลิงก์กลับไปยัง StepHole (ถ้ามาจากไฟล์ STEP)
+
+        # --- Feature: Inspection Selection & Zigzag ---
+        self.selected_for_inspection = False  # ✅ Checkbox: เลือกรูนี้เพื่อ inspect
+        self.zigzag_inspection = False        # ↕ Checkbox: ใช้รูปแบบ zigzag ในการ probe
+        self.zigzag_degree = 45.0             # องศาหมุนสะสมต่อ layer (ค่า default 45°)
 
 class StepHole:
     """โครงสร้างข้อมูลรูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP"""
