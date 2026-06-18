@@ -5,7 +5,7 @@ import numpy as np
 from core.cad_loader import CADLoader
 from core.projector import Projector
 from core.step_extractor import StepExtractor
-from core.path_planner import PathPlanner
+from core.path_planner03 import PathPlanner
 
 class MoldGeometry:
     """แกนกลางระบบเรขาคณิต (Facade Manager) ประสานงานโมดูลย่อยทั้งหมด"""
