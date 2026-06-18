@@ -5,7 +5,7 @@ import numpy as np
 from core.cad_loader import CADLoader
 from core.projector import Projector
 from core.step_extractor import StepExtractor
-from core.path_planner03 import PathPlanner
+from Build.core.path_planner import PathPlanner
 
 class MoldGeometry:
     """แกนกลางระบบเรขาคณิต (Facade Manager) ประสานงานโมดูลย่อยทั้งหมด"""
@@ -57,5 +57,14 @@ class MoldGeometry:
     def get_step_holes_in_view(self, view_name: str):
         return self.extractor.get_step_holes_in_view(self.projector, view_name)
 
-    def get_probe_path_layers(self, hole, n_layers: int, view_name: str):
-        return self.planner.get_probe_path_layers(hole, n_layers, self.projector, view_name)
+    def get_probe_path_layers(self, hole, n_layers: int, view_name: str,
+                               zigzag_inspection: bool = False, zigzag_degree: float = 45.0):
+        """
+        หมายเหตุ: zigzag_inspection / zigzag_degree ต้องส่งเข้ามาจากผู้เรียก (เช่น
+        customization_tab03.py) โดยอ่านค่ามาจาก HoleFeature ที่ผู้ใช้กำลังเลือกอยู่
+        เนื่องจาก `hole` ที่ส่งเข้ามาที่นี่อาจเป็น StepHole (ไม่มี attribute เหล่านี้)
+        ก็ได้ — ดูคำอธิบายเพิ่มเติมใน core/path_planner03.py
+        """
+        return self.planner.get_probe_path_layers(
+            hole, n_layers, self.projector, view_name,
+            zigzag_inspection=zigzag_inspection, zigzag_degree=zigzag_degree)
