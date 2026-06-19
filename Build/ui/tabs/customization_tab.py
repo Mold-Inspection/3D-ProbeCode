@@ -80,7 +80,9 @@ class CustomizationTab:
         seg_x = np.hstack([tx_m[:, [0,1,2,0]], nan_col]).ravel()
         seg_y = np.hstack([ty_m[:, [0,1,2,0]], nan_col]).ravel()
         seg_z = np.hstack([tz_m[:, [0,1,2,0]], nan_col]).ravel()
-        ax3d.plot(seg_x, seg_y, seg_z, color="#1f538d", linewidth=0.8, alpha=0.6)
+        # ซ่อน wireframe โมเดลทั้งชิ้นเมื่อเลือกรูแล้ว (โหมด Focus)
+        if not has_hole:
+            ax3d.plot(seg_x, seg_y, seg_z, color="#1f538d", linewidth=0.8, alpha=0.6)
 
         tri_cx = x3[tris].mean(axis=1)
         tri_cy = y3[tris].mean(axis=1)
@@ -103,6 +105,12 @@ class CustomizationTab:
                       str(h.id), color='white', fontsize=7,
                       ha='center', va='bottom')
 
+            # ── Focus mode: ถ้ามีรูถูกเลือกอยู่ (has_hole) ให้ซ่อน wall mesh
+            # ของรูอื่นที่ไม่ได้ถูกเลือกทั้งหมด (ยังคงแสดงเลข ID ไว้ด้านบน
+            # เพื่อให้กดเลือกรูอื่นจากแถบขวาได้ตามปกติ) ── ดู step 2 ──────────
+            if has_hole and not is_sel:
+                continue
+
             dist_h = np.hypot(tri_cx - h.x, tri_cy - h.y)
             z_lo_h = min(h.bottom_z, r_z)
             z_hi_h = max(h.bottom_z, r_z) + 0.5
@@ -121,7 +129,7 @@ class CustomizationTab:
                 hys = np.hstack([hty[:,[0,1,2,0]], nan_h]).ravel()
                 hzs = np.hstack([htz[:,[0,1,2,0]], nan_h]).ravel()
                 if is_sel:
-                    ax3d.plot(hxs, hys, hzs, color="white",   linewidth=1.6, alpha=0.95, label='Selected Hole Mesh')
+                    ax3d.plot(hxs, hys, hzs, color="white",   linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
                 else:
                     ax3d.plot(hxs, hys, hzs, color='#1f538d', linewidth=0.9, alpha=0.5)
 
@@ -323,13 +331,28 @@ class CustomizationTab:
                 + zigzag_tag
             )
             ax3d.view_init(elev=-135, azim=30)
+
+            # ── Zoom into the selected hole ──────────────────────────────────
+            # ศูนย์กลาง: ตำแหน่ง XY ของรู, Z = กึ่งกลางระหว่างปากรูกับก้นรู
+            # half_zoom: ใหญ่พอให้เห็นผนังรูทั้งหมด + padding รอบๆ
+            hole_z_mid = (z_start + star_z) / 2.0
+            half_zoom  = max(hole.radius * 2.8, abs(star_z - z_start)) * 0.72
+            # คงค่า half_zoom ขั้นต่ำไว้ที่ 10% ของ half ของโมเดล เพื่อป้องกัน
+            # กรณีรูเล็กมากจนแกนหดเกินไปจนอ่านค่าไม่ออก
+            half_zoom  = max(half_zoom, half * 0.10)
+
+            ax3d.set_xlim([hole.x - half_zoom, hole.x + half_zoom])
+            ax3d.set_ylim([hole.y - half_zoom, hole.y + half_zoom])
+            ax3d.set_zlim([hole_z_mid - half_zoom, hole_z_mid + half_zoom])
+
         else:
             title_str = "Customization — Select a hole to show probing path"
             ax3d.view_init(elev=-135, azim=30)
 
-        ax3d.set_xlim([cx - half, cx + half])
-        ax3d.set_ylim([cy - half, cy + half])
-        ax3d.set_zlim([cz - half, cz + half])
+            # ── Full-model view when nothing is selected ──────────────────────
+            ax3d.set_xlim([cx - half, cx + half])
+            ax3d.set_ylim([cy - half, cy + half])
+            ax3d.set_zlim([cz - half, cz + half])
 
         ax3d.set_title(title_str, color='white', fontsize=11, pad=10)
         for spine in [ax3d.xaxis, ax3d.yaxis, ax3d.zaxis]:
