@@ -7,9 +7,9 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
-from Build.core.models import HoleFeature
+from core.models import HoleFeature
 from ui.tabs.selection_tab import SelectionTab
-from Build.ui.tabs.customization_tab import CustomizationTab
+from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 
 class UIManager:
@@ -580,6 +580,11 @@ class UIManager:
     # Hole Selection / Config
     # ------------------------------------------------------------------
     def on_hole_select(self, idx):
+        # ── Toggle-off: คลิกซ้ำที่รูที่ถูกเลือกอยู่แล้ว → ยกเลิกการเลือก ──────
+        # (ใช้สำหรับ Customization tab: ยกเลิกเลือกแล้วทำให้ mesh รูอื่นที่ถูกซ่อน
+        # กลับมามองเห็นทั้งหมดอีกครั้ง)
+        is_deselecting = (self.selected_hole_idx == idx)
+
         for i, widgets in self.hole_widgets.items():
             # คืนสีปุ่มกลับ: ถ้าถูก select for inspection ให้ใช้สีน้ำเงินเข้ม
             # มิฉะนั้นใช้สีเริ่มต้น
@@ -591,17 +596,27 @@ class UIManager:
                 widgets['settings_frame'].pack_forget()
                 widgets['is_expanded'] = False
 
-        sel = self.hole_widgets[idx]
-        sel['btn'].configure(fg_color="#1f538d")
-        if not sel['is_expanded']:
-            sel['settings_frame'].pack(fill="x", pady=(0, 2))
-            sel['is_expanded'] = True
+        if is_deselecting:
+            # ยุบ settings panel ของรูที่เพิ่งถูกยกเลิกเลือกด้วย
+            sel = self.hole_widgets[idx]
+            if sel['is_expanded']:
+                sel['settings_frame'].pack_forget()
+                sel['is_expanded'] = False
 
-        self.selected_hole_idx = idx
+            self.selected_hole_idx = None
+        else:
+            sel = self.hole_widgets[idx]
+            sel['btn'].configure(fg_color="#1f538d")
+            if not sel['is_expanded']:
+                sel['settings_frame'].pack(fill="x", pady=(0, 2))
+                sel['is_expanded'] = True
+
+            self.selected_hole_idx = idx
 
         if self.current_tab == "Selection" and self.scatter_holes:
             colors = ['white'] * self.current_holes_count
-            colors[idx] = 'yellow'
+            if self.selected_hole_idx is not None:
+                colors[self.selected_hole_idx] = 'yellow'
             self.scatter_holes.set_facecolors(colors)
             self.canvas.draw_idle()
         elif self.current_tab == "Customization":
