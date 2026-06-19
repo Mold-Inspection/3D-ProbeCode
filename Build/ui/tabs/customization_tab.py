@@ -2,19 +2,35 @@ import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
 
-# สีประจำแต่ละ Layer สำหรับโหมด Zigzag — เลือกมาให้ตัดกับสีเหลืองของ
-# Tool Path / Bottom Depth Point (★) อย่างชัดเจน จึงไม่ใช้ colormap ที่ปลายสเกล
-# เป็นสีเหลือง (เช่น 'plasma', 'viridis') เพราะ layer สุดท้ายจะกลืนกับเส้น/ดาวสีเหลือง
+# สีประจำแต่ละ Layer สำหรับโหมด Zigzag — ขยายเป็น 24 สี
+# เลือกมาให้ตัดกับสีเหลืองของ Tool Path / Bottom Depth Point (★) อย่างชัดเจน
+# จึงหลีกเลี่ยงสีเหลือง/ทองทุกเฉด (เช่น #ffea00, #ffd700, #ffe066)
 # วนซ้ำ (cycle) ถ้าจำนวน layer มากกว่าจำนวนสีในลิสต์
 ZIGZAG_LAYER_COLORS = [
-    '#00bcd4',  # cyan
-    '#ff4d6d',  # rose red
-    '#7c4dff',  # violet
-    '#69f0ae',  # mint green
-    '#ff9100',  # amber orange
-    '#40c4ff',  # sky blue
-    '#f06292',  # pink
-    '#aeea00',  # lime (still far from pure yellow #ffea00)
+    '#00bcd4',  # 01 cyan
+    '#ff4d6d',  # 02 rose red
+    '#7c4dff',  # 03 violet
+    '#69f0ae',  # 04 mint green
+    '#ff9100',  # 05 amber orange
+    '#40c4ff',  # 06 sky blue
+    '#f06292',  # 07 pink
+    '#aeea00',  # 08 lime
+    '#ea80fc',  # 09 lavender purple
+    '#ff6e40',  # 10 deep orange
+    '#18ffff',  # 11 bright cyan
+    '#b9f6ca',  # 12 pale mint
+    '#ff4081',  # 13 hot pink
+    '#b388ff',  # 14 soft violet
+    '#00e676',  # 15 vivid green
+    '#ff6d00',  # 16 burnt orange
+    '#82b1ff',  # 17 periwinkle blue
+    '#f48fb1',  # 18 dusty rose
+    '#1de9b6',  # 19 teal
+    '#ff8a65',  # 20 salmon
+    '#ce93d8',  # 21 lilac
+    '#80d8ff',  # 22 ice blue
+    '#a5d6a7',  # 23 sage green
+    '#ef9a9a',  # 24 blush red
 ]
 
 
@@ -121,17 +137,16 @@ class CustomizationTab:
                          (tri_cz >= SURF_Z_GLOBAL - 0.5) & (tri_cz < z_lo_h + 0.3))
             htris = tris[mask_wall | mask_rim]
 
-            if len(htris) > 0:
+            # วาดเฉพาะ mesh ของรูที่ถูกเลือก (is_sel == True) เท่านั้น
+            # รูที่ไม่ได้เลือกให้ซ่อนทั้งหมด — ไม่ dim, ไม่วาดเลย
+            if len(htris) > 0 and is_sel:
                 htx = x3[htris]; hty = y3[htris]
                 htz = z3[htris] - SURF_Z_GLOBAL
                 nan_h = np.full((len(htris), 1), np.nan)
                 hxs = np.hstack([htx[:,[0,1,2,0]], nan_h]).ravel()
                 hys = np.hstack([hty[:,[0,1,2,0]], nan_h]).ravel()
                 hzs = np.hstack([htz[:,[0,1,2,0]], nan_h]).ravel()
-                if is_sel:
-                    ax3d.plot(hxs, hys, hzs, color="white",   linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
-                else:
-                    ax3d.plot(hxs, hys, hzs, color='#1f538d', linewidth=0.9, alpha=0.5)
+                ax3d.plot(hxs, hys, hzs, color="white", linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
 
         if has_hole:
             hole       = app.current_holes[app.selected_hole_idx]
@@ -160,7 +175,7 @@ class CustomizationTab:
             # ------------------------------------------------------------------
             # px_list / py_list / pz_list  → ใช้วาดเส้น Tool Path (เส้นประเหลือง)
             # wall_pts                     → list[(x, y, z, layer_idx)] จุดบนผนัง
-            # layer_centers                → dict[layer_idx] = (cx_lyr, cy_lyr, z_disp)
+            # layer_centers                → dict[layer_idx] = (cx_lyr, cy_lyr, z_disp, angle_offset, radius)
             #                                 ใช้วาด "เข็มชี้มุมหมุน" ต่อ layer
             # star_x/y/z                   → จุดก้นรู (★) แยกต่างหาก ไม่รวมใน wall_pts
             # ------------------------------------------------------------------
@@ -276,10 +291,7 @@ class CustomizationTab:
                       label='Tool Path', alpha=0.85)
 
             # ── จุดบนผนัง (Wall Contact) ──────────────────────────────────────
-            # ถ้า zigzag เปิด → แต่ละ layer ใช้สีต่างกันตามการหมุนสะสม
-            # หมายเหตุ: ใช้ ZIGZAG_LAYER_COLORS (ไม่ใช่ colormap แบบ 'plasma') เพราะ
-            # 'plasma'/'viridis' จะลงท้ายด้วยสีเหลือง ซ้ำกับสี Tool Path (#ffea00 / 'yellow')
-            # ทำให้ layer สุดท้ายมองไม่เห็นว่าต่างจากเส้น/ดาว
+            # ถ้า zigzag เปิด → แต่ละ layer ใช้สีต่างกันตามการหมุนสะสม (24 สี)
             if wall_pts:
                 if use_zigzag:
                     for lidx in range(layers):
@@ -295,10 +307,6 @@ class CustomizationTab:
                                      edgecolors='white', linewidths=0.4, label=lbl)
 
                         # ── เข็มชี้มุมหมุน (rotation indicator spoke) ──────────
-                        # วาดเส้นทึบสั้นๆ จากศูนย์กลาง layer ไปยังมุม angle_offset
-                        # เพื่อให้เห็นการหมุนชัดเจนเสมอ แม้ตำแหน่งจุดจะไป "ทับ" กับ
-                        # layer อื่นพอดี (กรณี points_per_layer หาร 360° ลงตัวกับ
-                        # มุมที่หมุนสะสม เช่น 4 จุด หมุน 90° จะตกตำแหน่งเดิม)
                         if lidx in layer_centers:
                             cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z = layer_centers[lidx]
                             spoke_x = cx_lyr + r_at_z * np.cos(ang_offset)
@@ -333,13 +341,11 @@ class CustomizationTab:
             ax3d.view_init(elev=-135, azim=30)
 
             # ── Zoom into the selected hole ──────────────────────────────────
-            # ศูนย์กลาง: ตำแหน่ง XY ของรู, Z = กึ่งกลางระหว่างปากรูกับก้นรู
-            # half_zoom: ใหญ่พอให้เห็นผนังรูทั้งหมด + padding รอบๆ
+            # ลด multiplier จาก 2.8×0.72 → 1.6×0.55 เพื่อให้ zoom เข้าใกล้รูมากขึ้น
+            # ค่าขั้นต่ำ 5% ของโมเดล (ลดจาก 10%) เพื่อป้องกันรูเล็กมากจนอ่านค่าไม่ออก
             hole_z_mid = (z_start + star_z) / 2.0
-            half_zoom  = max(hole.radius * 2.8, abs(star_z - z_start)) * 0.72
-            # คงค่า half_zoom ขั้นต่ำไว้ที่ 10% ของ half ของโมเดล เพื่อป้องกัน
-            # กรณีรูเล็กมากจนแกนหดเกินไปจนอ่านค่าไม่ออก
-            half_zoom  = max(half_zoom, half * 0.10)
+            half_zoom  = max(hole.radius * 1.6, abs(star_z - z_start)) * 0.55
+            half_zoom  = max(half_zoom, half * 0.05)
 
             ax3d.set_xlim([hole.x - half_zoom, hole.x + half_zoom])
             ax3d.set_ylim([hole.y - half_zoom, hole.y + half_zoom])
