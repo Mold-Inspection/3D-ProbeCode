@@ -192,6 +192,19 @@ class UIManager:
     # Core Functions
     # ---------------------------------------------------------
     def on_nav_change(self, selected_tab):
+        # ── Guard: ห้าม switch ไป Customization ถ้ายังไม่มีรูถูกตรวจพบ ──────────
+        if selected_tab == "Customization":
+            if not self.holes_detected or len(self.current_holes) == 0:
+                _mb.showwarning(
+                    "ไม่พบรูในโมเดล",
+                    "กรุณากด 'Generate Holes' และตรวจสอบให้แน่ใจว่ามีรูถูกตรวจพบก่อน\n"
+                    "จึงจะสามารถเข้าใช้งานแท็บ Customization ได้"
+                )
+                # Reset segmented button กลับไปที่ tab เดิม
+                self.nav_selector.set(self.current_tab)
+                return
+        # ─────────────────────────────────────────────────────────────────────────
+
         self.selection_tab.clear_pins()
 
         self.current_tab = selected_tab
@@ -581,13 +594,9 @@ class UIManager:
     # ------------------------------------------------------------------
     def on_hole_select(self, idx):
         # ── Toggle-off: คลิกซ้ำที่รูที่ถูกเลือกอยู่แล้ว → ยกเลิกการเลือก ──────
-        # (ใช้สำหรับ Customization tab: ยกเลิกเลือกแล้วทำให้ mesh รูอื่นที่ถูกซ่อน
-        # กลับมามองเห็นทั้งหมดอีกครั้ง)
         is_deselecting = (self.selected_hole_idx == idx)
 
         for i, widgets in self.hole_widgets.items():
-            # คืนสีปุ่มกลับ: ถ้าถูก select for inspection ให้ใช้สีน้ำเงินเข้ม
-            # มิฉะนั้นใช้สีเริ่มต้น
             hole_i = self.current_holes[i] if i < len(self.current_holes) else None
             default_color = "#1a3a5c" if (hole_i and hole_i.selected_for_inspection) else "#1f1f1f"
             widgets['btn'].configure(fg_color=default_color)
@@ -597,7 +606,6 @@ class UIManager:
                 widgets['is_expanded'] = False
 
         if is_deselecting:
-            # ยุบ settings panel ของรูที่เพิ่งถูกยกเลิกเลือกด้วย
             sel = self.hole_widgets[idx]
             if sel['is_expanded']:
                 sel['settings_frame'].pack_forget()
