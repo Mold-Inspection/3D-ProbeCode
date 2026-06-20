@@ -148,6 +148,22 @@ class CustomizationTab:
                 hzs = np.hstack([htz[:,[0,1,2,0]], nan_h]).ravel()
                 ax3d.plot(hxs, hys, hzs, color="white", linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
 
+        # ── ตรวจสอบ Probe Profile (ถ้ามี) ──────────────────────────────────────
+        # probe_profile อยู่บน app (UIManager) ซึ่ง CustomizationTab เข้าถึงได้ผ่าน self.app
+        probe_warn_lines = []   # list[str] สำหรับแสดงใน title / annotation
+        probe_ok = True
+
+        if has_hole:
+            hole_for_check = app.current_holes[app.selected_hole_idx]
+            if hasattr(app, 'probe_profile') and app.probe_profile is not None:
+                chk = app.probe_profile.check_hole(
+                    hole_for_check.depth, hole_for_check.radius)
+                probe_ok = chk['ok']
+                if chk['depth_warning']:
+                    probe_warn_lines.append(chk['depth_warning'])
+                if chk['fit_warning']:
+                    probe_warn_lines.append(chk['fit_warning'])
+
         if has_hole:
             hole       = app.current_holes[app.selected_hole_idx]
             layers     = hole.layers
@@ -291,7 +307,6 @@ class CustomizationTab:
                       label='Tool Path', alpha=0.85)
 
             # ── จุดบนผนัง (Wall Contact) ──────────────────────────────────────
-            # ถ้า zigzag เปิด → แต่ละ layer ใช้สีต่างกันตามการหมุนสะสม (24 สี)
             if wall_pts:
                 if use_zigzag:
                     for lidx in range(layers):
@@ -331,18 +346,42 @@ class CustomizationTab:
                       f" ★{source_tag} X={star_x:.2f}, Y={star_y:.2f}\n   Depth={hole.depth:.2f} mm",
                       color=text_color, fontsize=7, zorder=11)
 
+            # ── Probe Warning Annotation ในมุมมอง 3D ─────────────────────────
+            # แสดงเมื่อ probe ไม่ผ่านการตรวจสอบ — วาดบน axes ใน 2D transform space
+            # เพื่อให้ข้อความอยู่คงที่ไม่หมุนตามโมเดล
+            if probe_warn_lines:
+                warn_text = "\n".join(probe_warn_lines)
+                ax3d.text2D(
+                    0.01, 0.01,           # ตำแหน่ง axes fraction (ล่างซ้าย)
+                    warn_text,
+                    transform=ax3d.transAxes,
+                    fontsize=9,
+                    color='#ef5350',      # สีแดงชัดเจน
+                    fontweight='bold',
+                    va='bottom',
+                    ha='left',
+                    bbox=dict(
+                        boxstyle='round,pad=0.4',
+                        facecolor='#1a0000',
+                        edgecolor='#ef5350',
+                        alpha=0.88,
+                    ),
+                    zorder=20,
+                )
+
             zigzag_tag = f' ↕Zigzag({step_deg}°/layer)' if use_zigzag else ''
+            # ── เพิ่ม [⚠ PROBE] tag ใน title ถ้า probe ไม่ผ่าน ──────────────
+            probe_tag  = '  ⚠ PROBE' if not probe_ok else ''
             title_str  = (
                 f"Customization — Hole {hole.id}  |  R={hole.radius:.1f} mm  "
                 f"Depth={hole.depth:.2f} mm  |  {layers}L × {points}P = {layers*points} pts"
                 + (' [STEP]' if has_step_hole else ' [Mesh]')
                 + zigzag_tag
+                + probe_tag
             )
             ax3d.view_init(elev=-135, azim=30)
 
             # ── Zoom into the selected hole ──────────────────────────────────
-            # ลด multiplier จาก 2.8×0.72 → 1.6×0.55 เพื่อให้ zoom เข้าใกล้รูมากขึ้น
-            # ค่าขั้นต่ำ 5% ของโมเดล (ลดจาก 10%) เพื่อป้องกันรูเล็กมากจนอ่านค่าไม่ออก
             hole_z_mid = (z_start + star_z) / 2.0
             half_zoom  = max(hole.radius * 1.6, abs(star_z - z_start)) * 0.55
             half_zoom  = max(half_zoom, half * 0.05)
@@ -360,7 +399,8 @@ class CustomizationTab:
             ax3d.set_ylim([cy - half, cy + half])
             ax3d.set_zlim([cz - half, cz + half])
 
-        ax3d.set_title(title_str, color='white', fontsize=11, pad=10)
+        ax3d.set_title(title_str, color='#ef5350' if not probe_ok else 'white',
+                       fontsize=11, pad=10)
         for spine in [ax3d.xaxis, ax3d.yaxis, ax3d.zaxis]:
             spine.set_pane_color((0.10, 0.10, 0.10, 1.0))
             spine.line.set_color('gray')
