@@ -16,6 +16,40 @@ def _layer_color(lidx: int) -> str:
     return ZIGZAG_LAYER_COLORS[lidx % len(ZIGZAG_LAYER_COLORS)]
 
 
+# -----------------------------------------------------------------------
+# View rotation table — mirrors projector.py _VIEW_ROTATIONS exactly.
+# After applying _VIEW_ROTATIONS, the observer looks down −Z, so an
+# additional screen_rotation is a pure Z-axis spin on top of that.
+# -----------------------------------------------------------------------
+_VIEW_ROTATIONS = {
+    'Top':    (  180,    0,   0),
+    'Bottom': (0,    0,   0),
+    'Front':  (-90,    0,   0),
+    'Back':   (-90,  180,   0),
+    'Left':   (-90,  -90,   0),
+    'Right':  (-90,   90,   0),
+}
+
+
+def _build_combined_matrix(view_name: str, screen_rot: int):
+    """
+    Return the combined 4×4 transform that matches what the Projector applies:
+      1. Apply the view rotation (object rotated so the named face points up).
+      2. Apply an additional Z-axis spin of `screen_rot` degrees (on-screen rotation).
+
+    This ensures the Customization 3-D scene is oriented identically to the
+    Selection 2-D canvas at all four rotation steps (0 / 90 / 180 / 270°).
+    """
+    rx, ry, rz = _VIEW_ROTATIONS.get(view_name, (0, 0, 0))
+    m_view = euler_matrix(*np.radians([rx, ry, rz]))          # sxyz order
+
+    if screen_rot != 0:
+        # Pure Z rotation (right-hand, counter-clockwise when viewed from +Z)
+        m_scrn = euler_matrix(0, 0, np.radians(screen_rot))   # Z only
+        return m_scrn @ m_view   # screen rotation applied AFTER view rotation
+    return m_view
+
+
 class CustomizationTab:
     def __init__(self, app):
         self.app = app
@@ -42,17 +76,13 @@ class CustomizationTab:
         ax3d     = app.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
         app.ax   = ax3d
 
-        _view_rotations = {
-            'Top':    (180,  0,   0),
-            'Bottom': (  0,  0,   0),
-            'Front':  (-90,  0,   0),
-            'Back':   ( 90,  0, 180),
-            'Left':   (-90,  0,  90),
-            'Right':  (-90,  0, -90),
-        }
-        rx_deg, ry_deg, rz_deg = _view_rotations.get(app.current_view, (0, 0, 0))
-        _matrix  = euler_matrix(np.radians(rx_deg), np.radians(ry_deg),
-                                np.radians(rz_deg))
+        # ------------------------------------------------------------------
+        # Build the combined rotation matrix that matches Selection canvas
+        # (view rotation  +  on-screen rotation around Z)
+        # ------------------------------------------------------------------
+        screen_rot = app.screen_rotation
+        _matrix    = _build_combined_matrix(app.current_view, screen_rot)
+
         _rotated = trimesh.transformations.transform_points(
             app.geo.mesh.vertices, _matrix)
 
@@ -150,7 +180,6 @@ class CustomizationTab:
             points     = hole.points_per_layer
             use_zigzag = getattr(hole, 'zigzag_inspection', False)
             step_deg   = getattr(hole, 'zigzag_degree', 45.0)
-            screen_rot = app.screen_rotation   # ← carry current rotation
 
             rim_z = getattr(hole, 'hole_top_z', hole.surface_z)
             bot_z = hole.bottom_z
@@ -179,7 +208,6 @@ class CustomizationTab:
                 star_x  = hole.x
                 star_y  = hole.y
 
-                # ← screen_rot forwarded so layer positions match the canvas
                 step_layers = app.geo.get_probe_path_layers(
                     sh, layers, app.current_view,
                     screen_rot=screen_rot,
@@ -345,6 +373,7 @@ class CustomizationTab:
                               edgecolor='#ef5350', alpha=0.88),
                     zorder=20)
 
+            rot_tag    = f' [rot={screen_rot}°]' if screen_rot != 0 else ''
             zigzag_tag = f' ↕Zigzag({step_deg}°/layer)' if use_zigzag else ''
             probe_tag  = '  ⚠ PROBE' if not probe_ok else ''
             title_str  = (
@@ -352,9 +381,9 @@ class CustomizationTab:
                 f"Depth={hole.depth:.2f} mm  |  "
                 f"{layers}L × {points}P = {layers*points} pts"
                 + (' [STEP]' if has_step_hole else ' [Mesh]')
-                + zigzag_tag + probe_tag
+                + rot_tag + zigzag_tag + probe_tag
             )
-            ax3d.view_init(elev=-135, azim=30)
+            ax3d.view_init(elev=-130, azim=67.5)
 
             hole_z_mid = (z_start + star_z) / 2.0
             half_zoom  = max(hole.radius * 1.6,
@@ -367,7 +396,7 @@ class CustomizationTab:
 
         else:
             title_str = "Customization — Select a hole to show probing path"
-            ax3d.view_init(elev=-135, azim=30)
+            ax3d.view_init(elev=-130, azim=67.5)
             ax3d.set_xlim([cx - half, cx + half])
             ax3d.set_ylim([cy - half, cy + half])
             ax3d.set_zlim([cz - half, cz + half])
