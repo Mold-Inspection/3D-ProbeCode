@@ -1,40 +1,34 @@
 # core/geometry_engine.py
 import numpy as np
 
-# เรียกใช้แผนกต่างๆ ที่เราเพิ่งสร้าง
 from core.cad_loader import CADLoader
 from core.projector import Projector
 from core.step_extractor import StepExtractor
 from core.path_planner import PathPlanner
 
+
 class MoldGeometry:
-    """แกนกลางระบบเรขาคณิต (Facade Manager) ประสานงานโมดูลย่อยทั้งหมด"""
+    """Facade Manager — coordinates all sub-modules."""
+
     def __init__(self, filepath=None):
-        # สร้างผู้ช่วยของแต่ละระบบ
-        self.loader = CADLoader()
+        self.loader    = CADLoader()
         self.projector = Projector()
         self.extractor = StepExtractor()
-        self.planner = PathPlanner()
+        self.planner   = PathPlanner()
 
-        # ตัวแปรสถานะหลัก
-        self.mesh = None
-        self.triangles = None
-        self.step_data = None
-        self._mesh_centroid = np.zeros(3)
+        self.mesh             = None
+        self.triangles        = None
+        self.step_data        = None
+        self._mesh_centroid   = np.zeros(3)
         self._step_holes_cache = []
 
         if filepath:
             self.load_file(filepath)
 
     def load_file(self, filepath):
-        """โหลดไฟล์และอัปเดตข้อมูลไปยังแผนกที่เกี่ยวข้อง"""
         self.mesh, self.step_data, self._mesh_centroid = self.loader.load(filepath)
         self.triangles = self.mesh.faces
-        
-        # ส่งต่อ Mesh ให้แผนก Projector จัดการพล็อต
         self.projector.update_mesh(self.mesh)
-        
-        # ส่งต่อ Step Data ให้แผนก Extractor หารู
         if self.step_data:
             self._step_holes_cache = self.extractor.extract(self.step_data, self._mesh_centroid)
         else:
@@ -43,28 +37,26 @@ class MoldGeometry:
     def get_physical_dimensions(self):
         return self.mesh.extents if self.mesh is not None else (0, 0, 0)
 
-    # ------------------------------------------------------------------------
-    # Routing Request: ส่งคำสั่งจาก UI ไปให้แผนกเฉพาะทางคำนวณ
-    # ทำให้ UI พิมพ์โค้ดเหมือนเดิมเป๊ะๆ แต่หลังบ้านถูกแยกระบบแล้ว
-    # ------------------------------------------------------------------------
-    def get_top_view(self, rot=0):    return self.projector.get_view('Top', rot)
+    # ------------------------------------------------------------------
+    # View routing — screen_rot forwarded so projector cache stays consistent
+    # ------------------------------------------------------------------
+    def get_top_view(self,    rot=0): return self.projector.get_view('Top',    rot)
     def get_bottom_view(self, rot=0): return self.projector.get_view('Bottom', rot)
-    def get_front_view(self, rot=0):  return self.projector.get_view('Front', rot)
-    def get_back_view(self, rot=0):   return self.projector.get_view('Back', rot)
-    def get_left_view(self, rot=0):   return self.projector.get_view('Left', rot)
-    def get_right_view(self, rot=0):  return self.projector.get_view('Right', rot)
+    def get_front_view(self,  rot=0): return self.projector.get_view('Front',  rot)
+    def get_back_view(self,   rot=0): return self.projector.get_view('Back',   rot)
+    def get_left_view(self,   rot=0): return self.projector.get_view('Left',   rot)
+    def get_right_view(self,  rot=0): return self.projector.get_view('Right',  rot)
 
-    def get_step_holes_in_view(self, view_name: str):
-        return self.extractor.get_step_holes_in_view(self.projector, view_name)
+    def get_step_holes_in_view(self, view_name: str, screen_rot: int = 0):
+        """screen_rot must be passed so hole display positions match the canvas."""
+        return self.extractor.get_step_holes_in_view(self.projector, view_name, screen_rot)
 
     def get_probe_path_layers(self, hole, n_layers: int, view_name: str,
-                               zigzag_inspection: bool = False, zigzag_degree: float = 45.0):
-        """
-        หมายเหตุ: zigzag_inspection / zigzag_degree ต้องส่งเข้ามาจากผู้เรียก (เช่น
-        customization_tab03.py) โดยอ่านค่ามาจาก HoleFeature ที่ผู้ใช้กำลังเลือกอยู่
-        เนื่องจาก `hole` ที่ส่งเข้ามาที่นี่อาจเป็น StepHole (ไม่มี attribute เหล่านี้)
-        ก็ได้ — ดูคำอธิบายเพิ่มเติมใน core/path_planner03.py
-        """
+                               screen_rot: int = 0,
+                               zigzag_inspection: bool = False,
+                               zigzag_degree: float = 45.0):
         return self.planner.get_probe_path_layers(
             hole, n_layers, self.projector, view_name,
-            zigzag_inspection=zigzag_inspection, zigzag_degree=zigzag_degree)
+            screen_rot=screen_rot,
+            zigzag_inspection=zigzag_inspection,
+            zigzag_degree=zigzag_degree)
