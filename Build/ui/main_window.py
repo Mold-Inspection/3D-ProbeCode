@@ -506,6 +506,38 @@ class UIManager:
     def on_generate_holes(self):
         if self.geo.mesh is None:
             return
+
+        # --- Run a dry detection first to check if any holes exist ---
+        rot = self.screen_rotation
+        view_name = self.current_view
+
+        has_step = (hasattr(self.geo, 'step_data') and
+                    self.geo.step_data is not None)
+
+        if has_step:
+            candidate_holes = self.geo.get_step_holes_in_view(view_name, rot)
+        else:
+            if   view_name == 'Top':    x, y, z_v, z_f, tri = self.geo.get_top_view(rot)
+            elif view_name == 'Bottom': x, y, z_v, z_f, tri = self.geo.get_bottom_view(rot)
+            elif view_name == 'Front':  x, y, z_v, z_f, tri = self.geo.get_front_view(rot)
+            elif view_name == 'Back':   x, y, z_v, z_f, tri = self.geo.get_back_view(rot)
+            elif view_name == 'Left':   x, y, z_v, z_f, tri = self.geo.get_left_view(rot)
+            elif view_name == 'Right':  x, y, z_v, z_f, tri = self.geo.get_right_view(rot)
+            visible_vert_idx = np.unique(tri.ravel())
+            candidate_holes  = self.selection_tab.detect_holes_in_view(
+                x[visible_vert_idx], y[visible_vert_idx],
+                z_v[visible_vert_idx], view_name)
+
+        # If no holes found, notify user and keep controls unlocked
+        if len(candidate_holes) == 0:
+            _mb.showinfo(
+                "No Holes Found",
+                f"ไม่พบรูในมุมมอง {view_name}\n"
+                "ลองเปลี่ยน View หรือหมุนโมเดลแล้วลองใหม่อีกครั้ง"
+            )
+            return
+
+        # Holes found — proceed with locking and rendering
         self.holes_detected = True
         self._set_view_controls_locked(True)
         if self.current_tab == "Selection":
