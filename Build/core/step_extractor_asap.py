@@ -318,6 +318,35 @@ class StepExtractor:
                                 screen_rot: int = 0):
         """
         Return the subset of cached STEP holes visible from *view_name*.
+
+        Visibility rule (replaces the old hard OPEN_THRESHOLD):
+        A hole is visible when its open end faces toward the observer AND
+        no solid mesh wall covers the hole opening.  Concretely:
+
+          1. The hole must have a meaningful internal depth
+             (actual_depth >= MIN_DEPTH).
+
+          2. The open end must be closer to the observer than the deep end
+             (open_depth < deep_depth) — this is the axis-direction test.
+
+          3. The open end must not be buried behind the far wall of the part.
+             We require open_depth < total_depth * _BURIED_FRAC.
+
+          4. Occlusion check — no solid surface sits in front of the hole
+             opening.  We sample the mesh depth at the hole's display (X, Y)
+             position using the projector's face-depth grid and require that
+             the nearest mesh surface depth at that location is NOT
+             significantly shallower than open_depth.  If it is, the hole is
+             covered by solid material and must not be shown.
+
+             This correctly handles both failure modes from the images:
+               • Image 1 (partial detection): holes on the left/centre of the
+                 part were rejected because OPEN_THRESHOLD was too tight.
+                 Now every exposed hole passes regardless of its XY position.
+               • Image 2 (recessed holes): holes that start inside a pocket
+                 have open_depth >> 0 but are still genuinely open to the
+                 observer because the pocket has been cut away.  The occlusion
+                 check confirms no mesh covers their opening, so they pass.
         """
         if not self._step_holes_cache:
             return []
@@ -325,9 +354,54 @@ class StepExtractor:
         p                = projector.get_view_params(view_name, screen_rot)
         part_total_depth = p['total_depth']
 
-        # Bug Fix C (preserved): OPEN_THRESHOLD uses 0.08 multiplier.
-        OPEN_THRESHOLD = max(part_total_depth * 0.08, 2.0)
-        MIN_DEPTH      = max(part_total_depth * 0.05, 0.5)
+        # --- tuneable constants -----------------------------------------
+        # Minimum hole depth to bother showing (absolute + relative guard).
+        MIN_DEPTH      = max(part_total_depth * 0.02, 0.3)
+
+        # A hole whose open end is deeper than this fraction of total part
+        # depth is considered buried inside the far wall and is hidden.
+        # 0.95 is intentionally generous — it only rejects holes whose open
+        # end is within 5 % of the back wall, i.e. genuinely inaccessible.
+        _BURIED_FRAC   = 0.95
+
+        # When comparing the hole-opening depth to the nearest mesh surface
+        # depth at the same XY: if the mesh is shallower by more than
+        # _OCCLUSION_TOL the hole is considered covered (occluded).
+        # A positive tolerance lets slightly recessed pocket-floor holes
+        # still be detected even if the mesh triangulation is not perfectly
+        # flush with the STEP circle plane.
+        _OCCLUSION_TOL = max(part_total_depth * 0.06, 1.5)   # mm
+
+        # Build a fast mesh-depth lookup from the 2-D projection.
+        # get_view() returns (x2d, y2d, z_depth_verts, z_depth_faces, vis_tri).
+        # z_depth_faces[i] = depth of face i from the observer (0 = surface).
+        # We store triangle centroids + face depths for the lookup.
+        try:
+            x2d, y2d, z_vert, z_face, vis_tri = projector.get_view(
+                view_name, screen_rot)
+            _has_mesh = (len(vis_tri) > 0)
+        except Exception:
+            _has_mesh = False
+
+        if _has_mesh:
+            # Pre-compute triangle centroids in 2-D display space
+            tri_cx = (x2d[vis_tri[:, 0]] + x2d[vis_tri[:, 1]] + x2d[vis_tri[:, 2]]) / 3.0
+            tri_cy = (y2d[vis_tri[:, 0]] + y2d[vis_tri[:, 1]] + y2d[vis_tri[:, 2]]) / 3.0
+            tri_dz = z_face   # depth of each visible face
+
+        def _nearest_mesh_depth(cx, cy, search_r):
+            """
+            Return the minimum (shallowest) mesh surface depth within
+            search_r display-units of (cx, cy).  Returns None if no
+            triangles are found nearby.
+            """
+            if not _has_mesh:
+                return None
+            dists = np.hypot(tri_cx - cx, tri_cy - cy)
+            mask  = dists < search_r
+            if not np.any(mask):
+                return None
+            return float(np.min(tri_dz[mask]))
 
         result = []
         for h in self._step_holes_cache:
@@ -336,6 +410,7 @@ class StepExtractor:
             dx_b, dy_b, d_b = projector.project_point_to_view(
                 *h.deep_3d, view_name, screen_rot)
 
+            # Orient so that open end is the one closer to the observer.
             if d_a <= d_b:
                 open_depth, deep_depth = d_a, d_b
                 display_x, display_y   = dx_a, dy_a
@@ -348,8 +423,27 @@ class StepExtractor:
                 open_3d, deep_3d       = h.deep_3d, h.open_3d
 
             actual_depth = deep_depth - open_depth
-            if open_depth > OPEN_THRESHOLD or actual_depth < MIN_DEPTH:
+
+            # --- filter 1: meaningful depth ---
+            if actual_depth < MIN_DEPTH:
                 continue
+
+            # --- filter 2: open end must face observer (not behind far wall) ---
+            if open_depth >= part_total_depth * _BURIED_FRAC:
+                continue
+
+            # --- filter 3: occlusion check ---
+            # Sample the mesh depth at the hole centre with a search radius
+            # of r_open (display units ≈ mm in orthographic projection).
+            # If the nearest mesh surface is shallower than the hole opening
+            # by more than _OCCLUSION_TOL, solid material covers the hole.
+            search_r       = max(r_open * 0.8, 2.0)
+            mesh_depth_min = _nearest_mesh_depth(display_x, display_y, search_r)
+
+            if mesh_depth_min is not None:
+                # mesh_depth_min < open_depth − tol  →  surface covers hole
+                if mesh_depth_min < open_depth - _OCCLUSION_TOL:
+                    continue
 
             hc             = copy.copy(h)
             hc.open_3d     = open_3d
