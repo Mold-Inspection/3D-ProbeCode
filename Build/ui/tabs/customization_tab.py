@@ -24,10 +24,10 @@ def _layer_color(lidx: int) -> str:
 _VIEW_ROTATIONS = {
     'Top':    (  180,    0,   0),
     'Bottom': (0,    0,   0),
-    'Front':  (-90,    0,   0),
-    'Back':   (-90,  180,   0),
-    'Left':   (-90,  -90,   0),
-    'Right':  (-90,   90,   0),
+    'Front':  (-90,    180,   0),
+    'Back':   (-90,  0,   0),
+    'Left':   (-90,  90,   0),
+    'Right':  (-90,   -90,   0),
 }
 
 
