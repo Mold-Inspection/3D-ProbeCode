@@ -22,12 +22,12 @@ def _layer_color(lidx: int) -> str:
 # additional screen_rotation is a pure Z-axis spin on top of that.
 # -----------------------------------------------------------------------
 _VIEW_ROTATIONS = {
-    'Top':    (  180,    0,   0),
-    'Bottom': (0,    0,   0),
-    'Front':  (-90,    180,   0),
-    'Back':   (-90,  0,   0),
-    'Left':   (-90,  90,   0),
-    'Right':  (-90,   -90,   0),
+    'Top':    (  0,  0,   0),
+    'Bottom': (180,  0,   0),
+    'Front':  (-90,  0,   0),
+    'Back':   (-90,  180, 0),
+    'Left':   (-90,  -90, 0),
+    'Right':  (-90,  90,  0),
 }
 
 
@@ -89,7 +89,7 @@ class CustomizationTab:
         faces = app.geo.mesh.faces
         x3    = _rotated[:, 0]
         y3    = _rotated[:, 1]
-        z3    = _rotated[:, 2]
+        z3    = -_rotated[:, 2]
         tris  = faces
 
         x3 = x3 - (float(np.min(x3)) + float(np.max(x3))) / 2.0
@@ -383,6 +383,7 @@ class CustomizationTab:
                 + (' [STEP]' if has_step_hole else ' [Mesh]')
                 + rot_tag + zigzag_tag + probe_tag
             )
+            # ax3d.view_init(elev=90, azim=-90)
             ax3d.view_init(elev=-130, azim=67.5)
 
             hole_z_mid = (z_start + star_z) / 2.0
@@ -396,7 +397,9 @@ class CustomizationTab:
 
         else:
             title_str = "Customization — Select a hole to show probing path"
+            # ax3d.view_init(elev=90, azim=-90)
             ax3d.view_init(elev=-130, azim=67.5)
+
             ax3d.set_xlim([cx - half, cx + half])
             ax3d.set_ylim([cy - half, cy + half])
             ax3d.set_zlim([cz - half, cz + half])
@@ -414,5 +417,5 @@ class CustomizationTab:
         if has_hole:
             ax3d.legend(facecolor='#1e1e1e', edgecolor='gray',
                         labelcolor='white', loc='upper right', fontsize=7)
-
+        ax3d.invert_xaxis()
         app.canvas.draw()
