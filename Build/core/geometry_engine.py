@@ -49,7 +49,7 @@ class MoldGeometry:
 
     def get_step_holes_in_view(self, view_name: str, screen_rot: int = 0):
         """screen_rot must be passed so hole display positions match the canvas."""
-        return self.extractor.get_step_holes_in_view(self.projector, view_name, screen_rot)
+        return self.extractor.get_step_holes_in_view(self.projector, view_name, screen_rot, mesh=self.mesh)
 
     def get_probe_path_layers(self, hole, n_layers: int, view_name: str,
                                screen_rot: int = 0,

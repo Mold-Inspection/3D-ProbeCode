@@ -126,7 +126,7 @@ class SelectionTab:
 
     def _get_depth_surface(self, mx, my):
         app = self.app
-        if not hasattr(app, 'current_x')         or app.current_x is None:         return None
+        if not hasattr(app, 'current_x')         or app.current_x is None:          return None
         if not hasattr(app, 'current_triangles') or app.current_triangles is None:  return None
         if not hasattr(app, 'current_face_data') or app.current_face_data is None:  return None
 
@@ -264,6 +264,37 @@ class SelectionTab:
         app.current_triangles = triangles
         app.current_face_data = face_data
 
+        # ---------------------------------------------------------
+        # 🟢 โค้ดที่เพิ่มใหม่: กรองรูเจาะที่ถูกชิ้นงานบัง (Occlusion Filter)
+        # ---------------------------------------------------------
+        if holes:
+            visible_holes = []
+            for h in holes:
+                # 1. เช็คความลึกของพื้นผิว Mesh บริเวณจุดกึ่งกลางรู
+                mx, my = h.x, h.y
+                mesh_depth = self._get_depth_surface(mx, my)
+                
+                # 2. ดึงค่าความลึกของปากรู (ถ้ามาจาก STEP โมเดล)
+                depth_top = getattr(h, 'depth_top', None)
+                
+                if depth_top is not None:
+                    # 3. ถ้าเนื้อ Mesh อยู่ตื้นกว่าปากรู (> 1.5mm) แปลว่าโดนบัง!
+                    if mesh_depth is not None and mesh_depth < depth_top - 1.5:
+                        continue # ข้ามรูนี้ไปเลย ไม่นำมานับ
+                
+                visible_holes.append(h)
+                
+            holes = visible_holes
+            
+            # 4. จัดเรียงหมายเลข ID รูใหม่ ให้รันตามลำดับอย่างถูกต้อง
+            holes.sort(key=lambda h: (-round(h.y / 5.0), h.x))
+            for i, h in enumerate(holes):
+                h.id = i + 1
+            
+            # 5. ซิงค์ข้อมูลรูที่มองเห็นได้กลับไปที่ app
+            app.current_holes = holes
+        # ---------------------------------------------------------
+
         vmin, vmax = np.min(face_data), np.max(face_data)
         if vmin == vmax:
             vmax = vmin + 0.1
@@ -295,15 +326,15 @@ class SelectionTab:
             app.scatter_holes       = None
             app.current_holes_count = 0
 
-        lock_text = " [LOCKED]" if app.holes_detected else ""
-        rot_text  = f" (Rotated {app.screen_rotation}°)" if app.screen_rotation > 0 else ""
+        lock_text = " [LOCKED]" if getattr(app, 'holes_detected', False) else ""
+        rot_text  = f" (Rotated {app.screen_rotation}°)" if getattr(app, 'screen_rotation', 0) > 0 else ""
         app.ax.set_title(title + rot_text + lock_text, fontsize=16, color="white")
 
         app.ax.grid(True, linestyle='--', alpha=0.3, color='#444444')
         app.ax.set_xlabel("X-Axis (mm)", fontsize=12, fontweight='bold', color="white")
         app.ax.set_ylabel("Y-Axis (mm)", fontsize=12, fontweight='bold', color="white")
 
-        if app.max_physical_dim is not None and len(app.current_x) > 0:
+        if getattr(app, 'max_physical_dim', None) is not None and len(app.current_x) > 0:
             cx        = (np.min(app.current_x) + np.max(app.current_x)) / 2.0
             cy        = (np.min(app.current_y) + np.max(app.current_y)) / 2.0
             half_span = (app.max_physical_dim / 2.0) * 1.15

@@ -83,21 +83,6 @@ def _arc_radius(edge) -> float:
 def _merge_half_faces(holes: list) -> list:
     """
     Merge left/right half-face pairs into single holes with correct centres.
-
-    Root cause:
-        STEP exporters split each cylindrical hole into two 180° half-face
-        patches.  edge.Center() on a 180° arc returns the arc centroid, which
-        is offset from the TRUE circle centre by 2r/π along the perpendicular
-        direction.  The two half-faces therefore produce centroids that are
-        4r/π apart, and their deduplication keys never match.
-
-    Fix:
-        For each pair of holes with:
-          • parallel axes
-          • same radius (within 0.1 mm)
-          • same axial extent (open and deep positions match within _EXTENT_TOL)
-          • perpendicular centroid separation ≈ 4r/π  (±_PERP_FRAC_TOL)
-        → average their open_3d and deep_3d to recover the true circle centre.
     """
     if not holes:
         return holes
@@ -156,15 +141,6 @@ def _merge_half_faces(holes: list) -> list:
 def _merge_counterbores(holes: list) -> list:
     """
     Collapse counterbore pairs (outer wide bore + inner narrow bore) into one.
-
-    A counterbore pair satisfies:
-      1. Parallel axes.
-      2. Inner hole centre lies inside outer hole radius (perp_dist + r_inner
-         < r_outer).
-      3. The two cylinders are axially adjacent (gap ≤ _DEPTH_TOL).
-
-    The inner hole is kept; its open_3d is extended to the outer hole's open
-    end so the depth covers the full counterbore stack.
     """
     if not holes:
         return holes
@@ -240,8 +216,6 @@ class StepExtractor:
                 if face.geomType() not in ('CYLINDER', 'CONE'):
                     continue
 
-                # Bug Fix A (preserved): accept ALL CIRCLE edges.
-                # Problem 1 filter: drop arcs with sweep < π (180°).
                 raw_circle_edges = [e for e in face.Edges()
                                     if e.geomType() == 'CIRCLE']
 
@@ -251,7 +225,6 @@ class StepExtractor:
                 if len(circle_edges) < 2:
                     continue
 
-                # Problem 2 fix: use _arc_radius() for correct geometric radius.
                 circle_data = []
                 for edge in circle_edges:
                     c  = edge.Center()
@@ -279,8 +252,6 @@ class StepExtractor:
                 end_a, end_b = tuple(circle_data[0][:3]), tuple(circle_data[-1][:3])
                 r_a,   r_b   = circle_data[0][3],         circle_data[-1][3]
 
-                # Bug Fix B (preserved): Z-axis filter removed.
-
                 face_depth = float(np.linalg.norm(np.array(end_b) - np.array(end_a)))
                 if face_depth < 0.1:
                     continue
@@ -302,10 +273,6 @@ class StepExtractor:
             except Exception:
                 continue
 
-        # ------------------------------------------------------------------
-        # Post-pass 1: merge left/right half-face pairs → true circle centres.
-        # Post-pass 2: merge counterbore outer+inner → single hole entry.
-        # ------------------------------------------------------------------
         holes = _merge_half_faces(holes)
         holes = _merge_counterbores(holes)
 
@@ -315,19 +282,26 @@ class StepExtractor:
 
     # ------------------------------------------------------------------
     def get_step_holes_in_view(self, projector, view_name: str,
-                                screen_rot: int = 0):
+                                screen_rot: int = 0, mesh=None):
         """
         Return the subset of cached STEP holes visible from *view_name*.
+        Uses exact 3D ray-casting to determine if a hole is occluded by the mesh.
         """
         if not self._step_holes_cache:
             return []
 
-        p                = projector.get_view_params(view_name, screen_rot)
-        part_total_depth = p['total_depth']
+        p      = projector.get_view_params(view_name, screen_rot)
+        matrix = p['matrix']
 
-        # Bug Fix C (preserved): OPEN_THRESHOLD uses 0.08 multiplier.
-        OPEN_THRESHOLD = max(part_total_depth * 0.08, 2.0)
-        MIN_DEPTH      = max(part_total_depth * 0.05, 0.5)
+        # ------------------------------------------------------------------
+        # คำนวณหาทิศทางที่พุ่งตรงเข้าหาผู้ใช้ (Viewer Direction) ในพิกัด 3D ดั้งเดิม
+        # กล้องมองลงไปที่แนวแกน -Z ดังนั้นผู้ใช้จึงอยู่ที่ +Z 
+        # การคูณ Matrix Transpose คือการแปลงเวกเตอร์ [0, 0, 1] กลับไปยังพิกัดต้นฉบับ
+        # ------------------------------------------------------------------
+        dir_to_viewer = matrix[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+        dir_to_viewer = dir_to_viewer / np.linalg.norm(dir_to_viewer) # Normalize
+
+        MIN_DEPTH = 0.1  # ใช้เช็คแค่ความลึกจริงขั้นต่ำ (ปัดตกรูที่ตื้นจน Error)
 
         result = []
         for h in self._step_holes_cache:
@@ -336,6 +310,7 @@ class StepExtractor:
             dx_b, dy_b, d_b = projector.project_point_to_view(
                 *h.deep_3d, view_name, screen_rot)
 
+            # เลือกฝั่งที่ตื้นกว่าให้เป็น "ปากรู (Mouth)" จากมุมมองปัจจุบัน
             if d_a <= d_b:
                 open_depth, deep_depth = d_a, d_b
                 display_x, display_y   = dx_a, dy_a
@@ -348,8 +323,27 @@ class StepExtractor:
                 open_3d, deep_3d       = h.deep_3d, h.open_3d
 
             actual_depth = deep_depth - open_depth
-            if open_depth > OPEN_THRESHOLD or actual_depth < MIN_DEPTH:
+            if actual_depth < MIN_DEPTH:
                 continue
+
+            # ------------------------------------------------------------------
+            # OCCLUSION RAY-CAST TEST (ยิงเลเซอร์เช็คว่าโดนเนื้อชิ้นงานบังไหม)
+            # ------------------------------------------------------------------
+            if mesh is not None:
+                # ดันจุดกำเนิดเลเซอร์ (Ray Origin) ลอยขึ้นมาจากปากรู 0.1 มม. 
+                # ป้องกันไม่ให้เลเซอร์ชนขอบตัวเอง (Self-intersection)
+                ray_origin = np.array(open_3d) + (dir_to_viewer * 0.1)
+                
+                # ยิงเลเซอร์พุ่งเข้าหาจอ 1 เส้น
+                hit = mesh.ray.intersects_any(
+                    ray_origins=[ray_origin],
+                    ray_directions=[dir_to_viewer]
+                )
+                
+                if hit[0]:
+                    # ถ้าชน (True) แปลว่ามีเนื้อ Mesh ขวางทางอยู่ = รูโดนบัง (ข้ามรูนี้ไป)
+                    continue
+            # ------------------------------------------------------------------
 
             hc             = copy.copy(h)
             hc.open_3d     = open_3d
@@ -364,6 +358,7 @@ class StepExtractor:
             hc.depth       = actual_depth
             result.append(hc)
 
+        # จัดเรียง ID รูให้สวยงาม
         result.sort(key=lambda h: (-round(h.display_y / 5.0), h.display_x))
         for i, h in enumerate(result):
             h._id = i + 1
