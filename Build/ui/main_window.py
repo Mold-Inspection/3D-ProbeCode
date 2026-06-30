@@ -9,7 +9,7 @@ from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 from core.models import HoleFeature
 from core.probe_profile import ProbeProfile
-from ui.tabs.selection_tab import SelectionTab
+from ui.tabs.selection_tab01 import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 
