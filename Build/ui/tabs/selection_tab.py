@@ -1,4 +1,17 @@
 # ui/tabs/selection_tab.py
+# VERSION: 01
+# CHANGE LOG:
+#   v01: BUG FIX — removed the duplicate mesh-depth occlusion filter that
+#        had been added inside update_plot(). True hole visibility is now
+#        determined ONCE, correctly, via ray-cast occlusion in
+#        step_extractor.py's get_step_holes_in_view() (see step_extractor08.py).
+#        Re-filtering the already-correct hole list here using a separate
+#        2D depth-buffer heuristic (mesh_depth vs depth_top, 1.5mm tolerance)
+#        caused two independent occlusion checks to disagree, which is what
+#        produced "phantom" hole circles in the plot (drawn by tripcolor from
+#        raw mesh depth) with no number/marker on them — the marker/list data
+#        had been silently stripped here even though the hole was already
+#        confirmed visible upstream.
 import numpy as np
 from core.models import HoleFeature
 
@@ -264,36 +277,13 @@ class SelectionTab:
         app.current_triangles = triangles
         app.current_face_data = face_data
 
-        # ---------------------------------------------------------
-        # 🟢 โค้ดที่เพิ่มใหม่: กรองรูเจาะที่ถูกชิ้นงานบัง (Occlusion Filter)
-        # ---------------------------------------------------------
-        if holes:
-            visible_holes = []
-            for h in holes:
-                # 1. เช็คความลึกของพื้นผิว Mesh บริเวณจุดกึ่งกลางรู
-                mx, my = h.x, h.y
-                mesh_depth = self._get_depth_surface(mx, my)
-                
-                # 2. ดึงค่าความลึกของปากรู (ถ้ามาจาก STEP โมเดล)
-                depth_top = getattr(h, 'depth_top', None)
-                
-                if depth_top is not None:
-                    # 3. ถ้าเนื้อ Mesh อยู่ตื้นกว่าปากรู (> 1.5mm) แปลว่าโดนบัง!
-                    if mesh_depth is not None and mesh_depth < depth_top - 1.5:
-                        continue # ข้ามรูนี้ไปเลย ไม่นำมานับ
-                
-                visible_holes.append(h)
-                
-            holes = visible_holes
-            
-            # 4. จัดเรียงหมายเลข ID รูใหม่ ให้รันตามลำดับอย่างถูกต้อง
-            holes.sort(key=lambda h: (-round(h.y / 5.0), h.x))
-            for i, h in enumerate(holes):
-                h.id = i + 1
-            
-            # 5. ซิงค์ข้อมูลรูที่มองเห็นได้กลับไปที่ app
-            app.current_holes = holes
-        # ---------------------------------------------------------
+        # NOTE (v01): the duplicate mesh-depth occlusion filter that used to
+        # live here has been removed. `holes` passed in is already the
+        # correct, fully-occlusion-tested list from
+        # geometry_engine.get_step_holes_in_view() (ray-cast based, see
+        # step_extractor.py v08) — re-filtering it again here with a
+        # different heuristic only introduced inconsistencies between what
+        # was drawn and what was listed/numbered.
 
         vmin, vmax = np.min(face_data), np.max(face_data)
         if vmin == vmax:
