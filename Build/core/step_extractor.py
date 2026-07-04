@@ -1,10 +1,29 @@
 # Build/core/step_extractor10.py
-# VERSION: 12
-# Based on step_extractor09.py (v11). Only the side-hole surface-raycast
-# fallback was changed — everything else (extraction, half-face merge,
-# v10 coaxial counterbore merge, occlusion ray-cast) is untouched.
+# VERSION: 13
+# Based on step_extractor09.py (v12). Only get_step_holes_in_view() changed
+# — extract(), _merge_half_faces(), _merge_counterbores(), and
+# _sample_side_hole_breach() are all untouched from v12.
 #
-# CHANGE LOG (v11 -> v12):
+# CHANGE LOG (v12 -> v13):
+#   FEATURE (not a bug fix): get_step_holes_in_view() previously discarded
+#   candidates that failed the depth/occlusion/no-breach checks via
+#   `continue`, silently losing them forever. This version keeps every
+#   candidate: rejected ones are now returned as a copy tagged
+#   is_rejected=True with a short human-readable reject_reason, plus a
+#   best-effort fallback screen position built by straight-projecting the
+#   hole's 3D midpoint (NOT raycast-validated — that's exactly what
+#   failed for these). If even that fallback isn't finite,
+#   position_unknown=True and display_x/y stay None.
+#
+#   This lets the UI surface a full "Unselected Holes" list (every
+#   candidate the pipeline ever considered, however marginal) instead of
+#   hiding rejected geometry outright — per Chanon's request to detect
+#   every possible hole and let the user inspect/override manually.
+#
+#   Geometry extraction, merges, and the accept-path logic for holes that
+#   DO pass validation are 100% unchanged from v12.
+#
+# --- retained from v12 header (unchanged content below) ---
 #   BUG CONFIRMED from Log_2026-07-03_09-21-35.txt: the hole reported
 #   missing is cache[8] — a horizontal (Y-axis) pin bore at mesh
 #   (-150, -54, -54.96), the same near-corner side-bore case documented in
@@ -39,49 +58,6 @@
 #   get_step_holes_in_view()'s side-hole branch now calls this new method
 #   instead of the single-point one; the occlusion ray-cast for
 #   axis-aligned holes further down is untouched.
-#
-# --- retained from v11 header (unchanged content below) ---
-#   BUG (reported): a hole visible on the model (near the mirror position of
-#   the side-bored pin hole documented in v09, e.g. displayed around
-#   X≈-150) never appears in Selection/Customization at all — no marker,
-#   no list entry, no phantom outline. Its symmetric twin (Hole 8,
-#   X:150 Y:-54 D:43.00) IS detected correctly.
-#
-#   Root cause investigation: the attached debug log
-#   (Log_2026-07-03_09-11-02.txt) shows extract() found 22 raw B-Rep faces,
-#   22 after half-face merge, 17 after counterbore merge — and the ONLY
-#   hole anywhere near X=+/-150 mentioned in the whole log is the single
-#   side-bored pin hole at mesh (-150, -54, -54.96) (displayed as Hole 8).
-#   Its mirror partner never appears in a single log line — not even as a
-#   rejected counterbore candidate. That means it is being dropped
-#   somewhere INSIDE extract()'s raw face scan, before
-#   _merge_counterbores() (and its debug logging) ever runs — or it is
-#   being dropped later during get_step_holes_in_view()'s occlusion test.
-#
-#   We can't currently see which, because step_extractor08.py (v10) quietly
-#   dropped the per-face rejection counters/lines that step_extractor05.py-
-#   step_extractor07.py had (rejected_geomtype / rejected_edges /
-#   rejected_sweep / rejected_dist / rejected_depth / rejected_dup, plus
-#   ACCEPTED/REJECTED lines per face), AND dropped the per-hole
-#   VIEW-REJECTED / SIDE-HOLE RECOVERED / occluded lines inside
-#   get_step_holes_in_view(). That is exactly the blind spot this bug is
-#   hiding in.
-#
-#   Fix in this version: PURELY ADDITIVE. Restored both sets of
-#   instrumentation verbatim (same format as v05/v07/v09) on top of v10's
-#   code, unchanged otherwise:
-#     - extract(): per-face ACCEPTED/REJECTED lines + rejection-reason
-#       counters + RAW FACE SCAN SUMMARY + pre-merge/FINAL hole dumps.
-#     - get_step_holes_in_view(): per-hole VIEW-REJECTED (depth/occluded)
-#       and SIDE-HOLE RECOVERED lines, plus a final rejection-count summary.
-#   _merge_counterbores() (the v10 coaxial-override logic) is untouched —
-#   it is confirmed working correctly for the pin hole that DOES get
-#   detected, and this bug is upstream/downstream of it, not inside it.
-#
-#   NEXT STEP: run with this version, reproduce the missing hole, and
-#   search the new log for the mirror hole's expected coordinates (mesh
-#   X near +150). The REJECTED line (with its reason) or the
-#   VIEW-REJECTED line will tell us exactly which check to relax/fix next.
 import numpy as np
 import math
 import copy
@@ -180,7 +156,7 @@ def _arc_radius(edge) -> float:
 
 
 def _merge_half_faces(holes: list) -> list:
-    """Unchanged from v05-v10."""
+    """Unchanged from v05-v12."""
     if not holes:
         return holes
 
@@ -240,8 +216,8 @@ def _merge_half_faces(holes: list) -> list:
 
 def _merge_counterbores(holes: list) -> list:
     """
-    v10 logic, UNCHANGED in v11 — see step_extractor08.py header for the
-    coaxial-override rationale. Debug logging already present here was
+    v10 logic, UNCHANGED in v11/v12/v13 — see step_extractor08.py header for
+    the coaxial-override rationale. Debug logging already present here was
     kept exactly as-is.
     """
     if not holes:
@@ -344,9 +320,11 @@ def _merge_counterbores(holes: list) -> list:
 class StepExtractor:
     """Extract cylindrical hole geometry from STEP B-Rep data.
 
-    v11: extract() and get_step_holes_in_view() regain the full per-face /
-    per-hole diagnostic logging that v08/v10 had silently dropped. No
-    geometry, merge, or occlusion decision logic changed from v10.
+    v13: get_step_holes_in_view() no longer discards depth/occlusion/
+    no-breach-found candidates. They are returned tagged is_rejected=True
+    with a reject_reason and a best-effort (non-raycast-validated)
+    fallback screen position, so the UI can surface a full "Unselected
+    Holes" list. extract() and the merge stages are unchanged from v12.
     """
 
     def __init__(self):
@@ -616,9 +594,16 @@ class StepExtractor:
     def get_step_holes_in_view(self, projector, view_name: str,
                                 screen_rot: int = 0, mesh=None):
         """
-        v11: same geometry/occlusion logic as v09/v10, with per-hole
-        VIEW-REJECTED / SIDE-HOLE RECOVERED debug lines restored (these
-        were present in step_extractor07.py's v09 but dropped in v10).
+        v13: candidates previously discarded (too-shallow / occluded /
+        no-breach-found) are no longer dropped. Each is now returned as a
+        copy tagged is_rejected=True with a short reject_reason and a
+        best-effort fallback screen position (straight projection of the
+        hole's 3D midpoint — NOT raycast-validated, since raycast is
+        exactly what failed). If even that fallback projection is not
+        finite, position_unknown=True and display_x/y are left as None.
+
+        Geometry extraction, merge logic, and the accept-path for holes
+        that DO pass validation are UNCHANGED from v12.
         """
         if not self._step_holes_cache:
             return []
@@ -657,30 +642,65 @@ class StepExtractor:
 
             actual_depth = deep_depth - open_depth
 
+            # ---- v13: shared fallback-position builder for rejected holes ----
+            def _make_rejected(reason: str):
+                mid_3d = (np.array(open_3d) + np.array(deep_3d)) / 2.0
+                try:
+                    fx, fy, fdepth = projector.project_point_to_view(
+                        *mid_3d, view_name, screen_rot)
+                    pos_ok = (math.isfinite(fx) and math.isfinite(fy)
+                              and math.isfinite(fdepth))
+                except Exception:
+                    fx = fy = fdepth = None
+                    pos_ok = False
+
+                hc                   = copy.copy(h)
+                hc.open_3d           = open_3d
+                hc.deep_3d           = deep_3d
+                hc.radius_open       = r_open
+                hc.radius_deep       = r_deep
+                hc.radius            = r_open
+                hc.is_rejected       = True
+                hc.reject_reason     = reason
+                hc.position_unknown  = not pos_ok
+
+                if pos_ok:
+                    hc.display_x = fx
+                    hc.display_y = fy
+                    hc.depth_top = max(0.0, fdepth - r_open)
+                    hc.depth_bot = fdepth
+                    hc.depth     = max(0.0, hc.depth_bot - hc.depth_top)
+                else:
+                    hc.display_x = None
+                    hc.display_y = None
+                    hc.depth_top = 0.0
+                    hc.depth_bot = 0.0
+                    hc.depth     = 0.0
+                return hc
+            # --------------------------------------------------------------
+
             if actual_depth < MIN_DEPTH:
                 axis_align = abs(float(np.dot(np.array(h.axis), dir_to_viewer)))
                 if mesh is not None and axis_align < SIDE_HOLE_AXIS_THRESHOLD:
-                    # v12: multi-sample search across the bore's own
-                    # circular footprint, instead of a single ray at its
-                    # axis-midpoint (see _sample_side_hole_breach docstring
-                    # for why the single-point probe was unreliable for
-                    # near-corner bores).
                     r_ref = max(h.radius_open, h.radius_deep)
                     best  = self._sample_side_hole_breach(
                         h, dir_to_viewer, mesh, projector, view_name, screen_rot)
                     if best is not None:
                         fb_x, fb_y, fb_depth, fb_hit, perp_dist = best
-                        hc             = copy.copy(h)
-                        hc.open_3d     = open_3d
-                        hc.deep_3d     = deep_3d
-                        hc.radius_open = r_open
-                        hc.radius_deep = r_deep
-                        hc.radius      = r_open
-                        hc.display_x   = fb_x
-                        hc.display_y   = fb_y
-                        hc.depth_top   = max(0.0, fb_depth - r_ref)
-                        hc.depth_bot   = fb_depth
-                        hc.depth       = max(MIN_DEPTH, hc.depth_bot - hc.depth_top)
+                        hc                   = copy.copy(h)
+                        hc.open_3d           = open_3d
+                        hc.deep_3d           = deep_3d
+                        hc.radius_open       = r_open
+                        hc.radius_deep       = r_deep
+                        hc.radius            = r_open
+                        hc.display_x         = fb_x
+                        hc.display_y         = fb_y
+                        hc.depth_top         = max(0.0, fb_depth - r_ref)
+                        hc.depth_bot         = fb_depth
+                        hc.depth             = max(MIN_DEPTH, hc.depth_bot - hc.depth_top)
+                        hc.is_rejected       = False
+                        hc.reject_reason     = ""
+                        hc.position_unknown  = False
                         result.append(hc)
                         side_hole_recovered += 1
                         _dbg(f"  cache[{cache_idx}] SIDE-HOLE RECOVERED via multi-sample "
@@ -693,12 +713,14 @@ class StepExtractor:
                              f"no valid breach point (axis_align={axis_align:.3f}, "
                              f"r_ref={r_ref:.2f})")
 
-                _dbg(f"  cache[{cache_idx}] VIEW-REJECTED (actual_depth too small): "
+                _dbg(f"  cache[{cache_idx}] REJECTED->kept as unselected "
+                     f"(actual_depth too small): "
                      f"actual_depth={actual_depth:.3f} < {MIN_DEPTH}  "
                      f"open_3d={tuple(np.round(h.open_3d,2))}  "
                      f"deep_3d={tuple(np.round(h.deep_3d,2))}  "
                      f"axis={tuple(np.round(h.axis,3))}")
                 view_rejected_depth += 1
+                result.append(_make_rejected("Too shallow / no breach found"))
                 continue
 
             if mesh is not None:
@@ -706,32 +728,48 @@ class StepExtractor:
                 hit = mesh.ray.intersects_any(
                     ray_origins=[ray_origin], ray_directions=[dir_to_viewer])
                 if hit[0]:
-                    _dbg(f"  cache[{cache_idx}] VIEW-REJECTED (occluded by mesh): "
+                    _dbg(f"  cache[{cache_idx}] REJECTED->kept as unselected "
+                         f"(occluded by mesh): "
                          f"display=({display_x:.2f},{display_y:.2f})  "
                          f"mouth={tuple(np.round(open_3d,2))}")
                     view_rejected_occluded += 1
+                    result.append(_make_rejected("Occluded by mesh from this view"))
                     continue
 
-            hc             = copy.copy(h)
-            hc.open_3d     = open_3d
-            hc.deep_3d     = deep_3d
-            hc.radius_open = r_open
-            hc.radius_deep = r_deep
-            hc.radius      = r_open
-            hc.display_x   = display_x
-            hc.display_y   = display_y
-            hc.depth_top   = open_depth
-            hc.depth_bot   = deep_depth
-            hc.depth       = actual_depth
+            hc                   = copy.copy(h)
+            hc.open_3d           = open_3d
+            hc.deep_3d           = deep_3d
+            hc.radius_open       = r_open
+            hc.radius_deep       = r_deep
+            hc.radius            = r_open
+            hc.display_x         = display_x
+            hc.display_y         = display_y
+            hc.depth_top         = open_depth
+            hc.depth_bot         = deep_depth
+            hc.depth             = actual_depth
+            hc.is_rejected       = False
+            hc.reject_reason     = ""
+            hc.position_unknown  = False
             result.append(hc)
 
-        result.sort(key=lambda h: (-round(h.display_y / 5.0), h.display_x))
+        # v13: rejected-with-known-position sort alongside visible holes using
+        # the same top-to-bottom/left-to-right key; position-unknown ones sort
+        # last (they have no meaningful screen coordinate anyway).
+        def _sort_key(hh):
+            if hh.display_x is None or hh.display_y is None:
+                return (1, 0, 0)
+            return (0, -round(hh.display_y / 5.0), hh.display_x)
+
+        result.sort(key=_sort_key)
         for i, h in enumerate(result):
             h._id = i + 1
 
+        n_rejected = sum(1 for h in result if getattr(h, 'is_rejected', False))
         _dbg(f"  view_rejected_depth={view_rejected_depth}  "
              f"view_rejected_occluded={view_rejected_occluded}  "
              f"side_hole_recovered={side_hole_recovered}  "
-             f"visible_result={len(result)}")
-        print(f"[geo] {view_name} view (rot={screen_rot}°) — visible holes: {len(result)}")
+             f"total_result={len(result)}  (visible={len(result)-n_rejected}, "
+             f"unselected={n_rejected})")
+        print(f"[geo] {view_name} view (rot={screen_rot}°) — "
+              f"visible: {len(result)-n_rejected}  unselected: {n_rejected}")
         return result

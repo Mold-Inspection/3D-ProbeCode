@@ -1,5 +1,5 @@
 # ui/tabs/selection_tab.py
-# VERSION: 01
+# VERSION: 02
 # CHANGE LOG:
 #   v01: BUG FIX — removed the duplicate mesh-depth occlusion filter that
 #        had been added inside update_plot(). True hole visibility is now
@@ -12,6 +12,19 @@
 #        raw mesh depth) with no number/marker on them — the marker/list data
 #        had been silently stripped here even though the hole was already
 #        confirmed visible upstream.
+#   v02: Added hover-driven visual feedback for the split sidebar
+#        (see main_window.py v01):
+#          - highlight_hole()/clear_hole_highlight(): yellow-highlights a
+#            Selected-Hole item's canvas marker on hover (same color used
+#            for click-selection). Uses app._visible_hole_map since the
+#            scatter array only contains non-rejected holes.
+#          - show_unselected_marker()/clear_unselected_marker(): draws/
+#            removes a temporary white-fill / red-edge / red "U" marker
+#            for an Unselected-Hole item on hover (these holes are not
+#            drawn normally on the canvas).
+#        update_plot()'s initial-color logic now goes through the same
+#        index map for consistency with click-selection, and clears any
+#        stale hover artists left over from before ax.clear().
 import numpy as np
 from core.models import HoleFeature
 
@@ -23,6 +36,10 @@ class SelectionTab:
         self._pin_markers        = []
         self._pinned_pin_data    = []   # [(x, y, depth), …]
         self.MAX_PINS = 10
+
+        # v02: hover-feedback state
+        self._hover_local_idx           = None
+        self._unselected_marker_artists = []
 
     def setup_events(self):
         self.app.canvas.mpl_connect('scroll_event',         self.on_scroll)
@@ -73,6 +90,83 @@ class SelectionTab:
             self._pinned_pin_data.append((px, py, depth))
 
         if saved_pins:
+            self.app.canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # v02: Hover feedback — Selected Hole highlight
+    # ------------------------------------------------------------------
+    def highlight_hole(self, global_idx):
+        """Yellow-highlight the canvas marker for a Selected Hole item on
+        hover. Uses the global->local index map since the scatter array
+        only contains non-rejected holes."""
+        app = self.app
+        if app.current_tab != "Selection" or not app.scatter_holes:
+            return
+        local_idx = getattr(app, '_visible_hole_map', {}).get(global_idx)
+        if local_idx is None:
+            return
+
+        colors = ['white'] * app.current_holes_count
+        if app.selected_hole_idx is not None:
+            sel_local = getattr(app, '_visible_hole_map', {}).get(app.selected_hole_idx)
+            if sel_local is not None:
+                colors[sel_local] = 'yellow'
+        colors[local_idx] = 'yellow'
+        app.scatter_holes.set_facecolors(colors)
+        self._hover_local_idx = local_idx
+        app.canvas.draw_idle()
+
+    def clear_hole_highlight(self):
+        """Revert the hover highlight, keeping the click-selection color
+        (if any) intact."""
+        app = self.app
+        self._hover_local_idx = None
+        if app.current_tab != "Selection" or not app.scatter_holes:
+            return
+
+        colors = ['white'] * app.current_holes_count
+        if app.selected_hole_idx is not None:
+            sel_local = getattr(app, '_visible_hole_map', {}).get(app.selected_hole_idx)
+            if sel_local is not None:
+                colors[sel_local] = 'yellow'
+        app.scatter_holes.set_facecolors(colors)
+        app.canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # v02: Hover feedback — Unselected Hole "U" marker
+    # ------------------------------------------------------------------
+    def show_unselected_marker(self, hole):
+        """Draw a standout white-fill / red-edge / red 'U' marker at a
+        rejected hole's fallback position. Nothing is drawn if the hole's
+        position is unknown (sidebar note already covers that case)."""
+        app = self.app
+        self.clear_unselected_marker()
+        if app.current_tab != "Selection":
+            return
+        if getattr(hole, 'position_unknown', False) or hole.x is None or hole.y is None:
+            return
+
+        marker = app.ax.scatter(
+            [hole.x], [hole.y],
+            s=230, marker='o',
+            facecolors='white', edgecolors='#e53935', linewidths=2.6,
+            zorder=25, clip_on=True)
+        label = app.ax.text(
+            hole.x, hole.y, "U",
+            color='#e53935', fontsize=12, fontweight='bold',
+            ha='center', va='center', zorder=26, clip_on=True)
+
+        self._unselected_marker_artists = [marker, label]
+        app.canvas.draw_idle()
+
+    def clear_unselected_marker(self):
+        for artist in self._unselected_marker_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._unselected_marker_artists = []
+        if hasattr(self, 'app'):
             self.app.canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -264,6 +358,8 @@ class SelectionTab:
 
         self._pinned_annotations = []
         self._pin_markers        = []
+        self._unselected_marker_artists = []   # v02: stale after ax.clear()
+        self._hover_local_idx    = None        # v02: stale after ax.clear()
 
         app.ax.clear()
         if hasattr(app, 'cax') and app.cax is not None:
@@ -284,6 +380,11 @@ class SelectionTab:
         # step_extractor.py v08) — re-filtering it again here with a
         # different heuristic only introduced inconsistencies between what
         # was drawn and what was listed/numbered.
+        #
+        # NOTE (v02): `holes` here is now the CANVAS-ONLY (non-rejected)
+        # list built by main_window.show_view() — rejected/"unselected"
+        # holes are intentionally excluded from this plot and are only
+        # shown transiently via show_unselected_marker() on hover.
 
         vmin, vmax = np.min(face_data), np.max(face_data)
         if vmin == vmax:
@@ -299,9 +400,12 @@ class SelectionTab:
             app.current_holes_count = len(holes)
             initial_colors = ['white'] * app.current_holes_count
 
-            if (app.selected_hole_idx is not None
-                    and 0 <= app.selected_hole_idx < app.current_holes_count):
-                initial_colors[app.selected_hole_idx] = 'yellow'
+            # v02: go through the same global->local index map used by
+            # click-selection and hover-highlight, for consistency.
+            if app.selected_hole_idx is not None:
+                local_idx = getattr(app, '_visible_hole_map', {}).get(app.selected_hole_idx)
+                if local_idx is not None and 0 <= local_idx < app.current_holes_count:
+                    initial_colors[local_idx] = 'yellow'
 
             app.scatter_holes = app.ax.scatter(
                 hole_x, hole_y, facecolors=initial_colors,

@@ -1,4 +1,10 @@
 # core/models.py
+# VERSION: 01
+# CHANGE LOG (v01):
+#   Added is_rejected / reject_reason / position_unknown to HoleFeature so
+#   depth/occlusion-rejected STEP hole candidates (previously silently
+#   dropped in step_extractor.get_step_holes_in_view) can be listed in a
+#   separate "Unselected Holes" section in the UI instead of vanishing.
 import numpy as np
 
 class HoleFeature:
@@ -20,6 +26,11 @@ class HoleFeature:
         self.selected_for_inspection = False  # ✅ Checkbox: เลือกรูนี้เพื่อ inspect
         self.zigzag_inspection = False        # ↕ Checkbox: ใช้รูปแบบ zigzag ในการ probe
         self.zigzag_degree = 45.0             # องศาหมุนสะสมต่อ layer (ค่า default 45°)
+
+        # --- Feature: Unselected/Rejected Hole Tracking (v01) ---
+        self.is_rejected = False        # ⛔ True = ถูก reject โดย depth/occlusion filter
+        self.reject_reason = ""         # เหตุผลสั้น ๆ ที่ถูก reject
+        self.position_unknown = False   # True = ไม่สามารถระบุตำแหน่งบนจอได้เลย
 
 class StepHole:
     """โครงสร้างข้อมูลรูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP"""

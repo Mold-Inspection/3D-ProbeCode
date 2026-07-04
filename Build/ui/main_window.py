@@ -1,4 +1,43 @@
 # ui/main_window.py
+# VERSION: 03
+# CHANGE LOG (v01):
+#   - Right sidebar split into "Selected Holes" / "Unselected Holes"
+#     sections (unselected = rejected STEP candidates, now surfaced by
+#     step_extractor v13 instead of being discarded).
+#   - Canvas now only plots non-rejected holes; a global->local index map
+#     (_visible_hole_map) keeps click-highlight math correct despite the
+#     canvas array being shorter than current_holes.
+#   - Hover bindings added: Selected item -> yellow highlight (via
+#     selection_tab.highlight_hole); Unselected item -> temporary "U"
+#     marker (via selection_tab.show_unselected_marker).
+#   - Unselected-hole list items are lightweight: no Z-Layers/Points
+#     settings, only the "Select for Inspection" checkbox is kept.
+# CHANGE LOG (v02):
+#   - Fix 1: _on_inspection_select_toggle() no longer forces the checkbox
+#     back off or shows an error popup when the probe stylus can't reach a
+#     hole. Checking the box now always sets selected_for_inspection=True.
+#     The red depth/fit warning labels (from probe_profile.check_hole(),
+#     rendered per-item in _build_selected_item) are unchanged and remain
+#     the only feedback for an unreachable hole.
+#   - Fix 2: in show_view()'s "Restore checkbox & config state" loop, a
+#     hole.id with NO entry in prev_states (i.e. its first-ever appearance)
+#     now defaults selected_for_inspection to True if the hole belongs to
+#     the Selected-Holes category (not is_rejected) or False if it belongs
+#     to Unselected-Holes (is_rejected) — instead of always defaulting to
+#     False. A hole.id that already has a recorded state (the user toggled
+#     it, or it existed on a prior render) keeps that recorded value
+#     regardless of category, so manual toggles survive rotations/view
+#     changes/probe-profile edits exactly as before.
+# CHANGE LOG (v03):
+#   - Fix: hover detection for "Unselected Holes" items was only bound to
+#     the outer container frame, so moving the cursor onto the label text
+#     or the "Select for Inspection" checkbox (a separate child widget,
+#     itself built from further internal sub-widgets) fired <Leave> on the
+#     container and dropped the temporary "U" marker. Added
+#     _bind_hover_recursive(), which walks the item's full widget subtree
+#     and binds <Enter>/<Leave> to every descendant, so hovering anywhere
+#     within the item's visible bounds — checkbox included — keeps the
+#     marker shown; it only clears when the cursor truly leaves the item.
 import customtkinter as ctk
 import os
 import numpy as np
@@ -33,6 +72,12 @@ class UIManager:
 
         self.view_buttons  = {}
         self.hole_widgets  = {}
+
+        # --- v01: global(current_holes idx) -> local(canvas/scatter idx) map.
+        # Needed because the canvas only ever plots non-rejected holes, so
+        # the scatter array is shorter than current_holes once "Unselected
+        # Holes" are surfaced.
+        self._visible_hole_map  = {}
 
         # --- Probe Profile ---
         self.probe_profile = ProbeProfile()
@@ -471,6 +516,10 @@ class UIManager:
                     )
                     hf.hole_top_z = sh.depth_top
                     hf._step_hole = sh
+                    # v01: carry rejection info across from StepHole
+                    hf.is_rejected      = getattr(sh, 'is_rejected', False)
+                    hf.reject_reason    = getattr(sh, 'reject_reason', "")
+                    hf.position_unknown = getattr(sh, 'position_unknown', False)
                     converted.append(hf)
                 self.current_holes = converted
             else:
@@ -482,14 +531,28 @@ class UIManager:
             if len(self.current_holes) == 0:
                 _mb.showinfo("No Holes", f"ไม่พบรูในมุมมอง {view_name}")
 
-            # Restore checkbox & config state
+            # v02: Restore checkbox & config state.
+            # A hole.id with a recorded entry in prev_states keeps that
+            # exact value (this is what preserves a manual toggle across
+            # rotations / view switches / probe-profile edits). A hole.id
+            # with NO entry (first time this hole has ever appeared) gets
+            # the category default instead of a blanket False: True for
+            # Selected-Holes (not rejected), False for Unselected-Holes
+            # (rejected).
             for h in self.current_holes:
-                state = prev_states.get(h.id, {})
-                h.selected_for_inspection = state.get('selected',    False)
-                h.zigzag_inspection       = state.get('zigzag',      False)
-                h.zigzag_degree           = state.get('zigzag_deg',  45.0)
-                h.layers                  = state.get('layers',      3)
-                h.points_per_layer        = state.get('points',      4)
+                state = prev_states.get(h.id)
+                if state is not None:
+                    h.selected_for_inspection = state.get('selected',    False)
+                    h.zigzag_inspection       = state.get('zigzag',      False)
+                    h.zigzag_degree           = state.get('zigzag_deg',  45.0)
+                    h.layers                  = state.get('layers',      3)
+                    h.points_per_layer        = state.get('points',      4)
+                else:
+                    h.selected_for_inspection = not getattr(h, 'is_rejected', False)
+                    h.zigzag_inspection       = False
+                    h.zigzag_degree           = 45.0
+                    h.layers                  = 3
+                    h.points_per_layer        = 4
 
             self.inspection_selected_holes = [
                 i for i, h in enumerate(self.current_holes)
@@ -498,9 +561,18 @@ class UIManager:
         else:
             self.current_holes = []
 
+        # v01: canvas only shows non-rejected holes; build the global->local
+        # index map so click/hover highlighting stays correctly aligned.
+        visible_holes = []
+        self._visible_hole_map = {}
+        for gi, h in enumerate(self.current_holes):
+            if not getattr(h, 'is_rejected', False):
+                self._visible_hole_map[gi] = len(visible_holes)
+                visible_holes.append(h)
+
         title = f"{view_name} View"
         self.selection_tab.update_plot(x, y, z_v, z_f, tri, title,
-                                       holes=self.current_holes)
+                                       holes=visible_holes)
         self.update_treeview(self.current_holes)
 
     def on_generate_holes(self):
@@ -576,6 +648,12 @@ class UIManager:
     # Hole Settings UI (right sidebar)
     # ---------------------------------------------------------
     def update_treeview(self, holes):
+        # v01: clear any stray hover state before destroying widgets — the
+        # old widgets won't fire <Leave>, so without this a highlight/marker
+        # could get stuck on the canvas after regenerating holes.
+        self.selection_tab.clear_hole_highlight()
+        self.selection_tab.clear_unselected_marker()
+
         for widget in self.holes_list_frame.winfo_children():
             widget.destroy()
         self.hole_widgets = {}
@@ -593,157 +671,245 @@ class UIManager:
             self._refresh_selected_count_label()
             return
 
-        for i, hole in enumerate(holes):
-            probe_check = self.probe_profile.check_hole(hole.depth, hole.radius)
-            has_warning = not probe_check['ok']
+        # v01: split into Selected / Unselected sections
+        n_selected   = sum(1 for h in holes if not getattr(h, 'is_rejected', False))
+        n_unselected = len(holes) - n_selected
 
-            container = ctk.CTkFrame(self.holes_list_frame, fg_color="transparent")
-            container.pack(fill="x", pady=2)
+        ctk.CTkLabel(self.holes_list_frame,
+                     text=f"🟢 Selected Holes ({n_selected})",
+                     font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color="#66bb6a", anchor="w").pack(fill="x", pady=(2, 4))
+        selected_frame = ctk.CTkFrame(self.holes_list_frame, fg_color="transparent")
+        selected_frame.pack(fill="x")
 
-            btn_text   = (f"🎯 Hole {hole.id} "
-                          f"[X: {hole.x:.2f}, Y: {hole.y:.2f}] "
-                          f"D: {hole.depth:.2f}")
-            btn_border = "#c62828" if has_warning else None
-            btn = ctk.CTkButton(
-                container, text=btn_text, anchor="w",
-                fg_color="#1f1f1f", hover_color="#2c2c2c", corner_radius=4,
-                border_color=btn_border,
-                border_width=1 if has_warning else 0,
-                command=lambda idx=i: self.on_hole_select(idx))
-            btn.pack(fill="x")
+        divider = ctk.CTkFrame(self.holes_list_frame, height=1, fg_color="#3a3a3a")
+        unselected_header = ctk.CTkLabel(
+            self.holes_list_frame,
+            text=f"⚪ Unselected Holes ({n_unselected})",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#9e9e9e", anchor="w")
+        unselected_frame = ctk.CTkFrame(self.holes_list_frame, fg_color="transparent")
 
-            warning_labels = []
-            for warn_text in [probe_check['depth_warning'], probe_check['fit_warning']]:
-                if warn_text:
-                    lbl_warn = ctk.CTkLabel(
-                        container, text=warn_text,
-                        text_color="#ef5350",
-                        font=ctk.CTkFont(size=10, weight="bold"),
-                        anchor="w", wraplength=290)
-                    lbl_warn.pack(fill="x", padx=6, pady=(1, 0))
-                    warning_labels.append(lbl_warn)
+        for gi, hole in enumerate(holes):
+            if getattr(hole, 'is_rejected', False):
+                self._build_unselected_item(unselected_frame, gi, hole)
+            else:
+                self._build_selected_item(selected_frame, gi, hole)
 
-            settings_frame = ctk.CTkFrame(container, fg_color="#2b2b2b",
-                                          corner_radius=4)
-
-            # Z-Layers
-            layer_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
-            layer_frame.pack(fill="x", padx=15, pady=(10, 5))
-            ctk.CTkLabel(layer_frame, text="Z-Layers:").pack(side="left")
-            opt_layers = ctk.CTkOptionMenu(
-                layer_frame, values=["3", "4", "5", "6", "8", "10"],
-                command=lambda val, idx=i: self.on_config_change_for_hole(idx),
-                width=60, height=25)
-            opt_layers.set(str(hole.layers))
-            opt_layers.pack(side="right")
-
-            # Points / Layer
-            points_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
-            points_frame.pack(fill="x", padx=15, pady=(0, 5))
-            ctk.CTkLabel(points_frame, text="Points/Layer:").pack(side="left")
-            opt_points = ctk.CTkOptionMenu(
-                points_frame, values=["4", "6", "8", "12", "16"],
-                command=lambda val, idx=i: self.on_config_change_for_hole(idx),
-                width=60, height=25)
-            opt_points.set(str(hole.points_per_layer))
-            opt_points.pack(side="right")
-
-            ctk.CTkFrame(settings_frame, height=1,
-                         fg_color="#444444").pack(fill="x", padx=15, pady=(4, 6))
-
-            # Select for Inspection
-            chk_selected_var = ctk.BooleanVar(value=hole.selected_for_inspection)
-            chk_selected = ctk.CTkCheckBox(
-                settings_frame,
-                text="✅  Select for Inspection",
-                variable=chk_selected_var,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                text_color="#4fc3f7", fg_color="#1f538d", hover_color="#2979ff",
-                command=lambda idx=i, var=chk_selected_var:
-                    self._on_inspection_select_toggle(idx, var))
-            chk_selected.pack(anchor="w", padx=15, pady=(0, 4))
-
-            # Zigzag
-            chk_zigzag_var = ctk.BooleanVar(value=hole.zigzag_inspection)
-            chk_zigzag = ctk.CTkCheckBox(
-                settings_frame,
-                text="↕  Zigzag Inspection",
-                variable=chk_zigzag_var,
-                font=ctk.CTkFont(size=12),
-                text_color="#a5d6a7", fg_color="#2e7d32", hover_color="#43a047",
-                command=lambda idx=i, var=chk_zigzag_var:
-                    self._on_zigzag_toggle(idx, var))
-            chk_zigzag.pack(anchor="w", padx=15, pady=(0, 4))
-
-            # Zigzag degree entry
-            degree_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
-            ctk.CTkLabel(degree_frame, text="Rotation/Layer (°):",
-                         font=ctk.CTkFont(size=11),
-                         text_color="#a5d6a7").pack(side="left")
-            degree_entry = ctk.CTkEntry(
-                degree_frame, width=58, height=25,
-                placeholder_text="45", font=ctk.CTkFont(size=12))
-            degree_entry.insert(
-                0, str(int(hole.zigzag_degree))
-                   if hole.zigzag_degree == int(hole.zigzag_degree)
-                   else str(hole.zigzag_degree))
-            degree_entry.pack(side="right", padx=(6, 0))
-            degree_entry.bind("<Return>",
-                              lambda e, idx=i: self._on_zigzag_degree_change(idx))
-            degree_entry.bind("<FocusOut>",
-                              lambda e, idx=i: self._on_zigzag_degree_change(idx))
-            degree_frame.pack(fill="x", padx=15, pady=(0, 8))
-
-            if not hole.zigzag_inspection:
-                degree_frame.pack_forget()
-
-            ctk.CTkFrame(settings_frame, height=1,
-                         fg_color="#333333").pack(fill="x", padx=15, pady=(0, 6))
-
-            self.hole_widgets[i] = {
-                'container':        container,
-                'btn':              btn,
-                'warning_labels':   warning_labels,
-                'settings_frame':   settings_frame,
-                'opt_layers':       opt_layers,
-                'opt_points':       opt_points,
-                'chk_selected':     chk_selected,
-                'chk_selected_var': chk_selected_var,
-                'chk_zigzag':       chk_zigzag,
-                'chk_zigzag_var':   chk_zigzag_var,
-                'degree_frame':     degree_frame,
-                'degree_entry':     degree_entry,
-                'is_expanded':      False,
-                'probe_check':      probe_check,
-            }
+        divider.pack(fill="x", padx=4, pady=(10, 6))
+        unselected_header.pack(fill="x", pady=(0, 4))
+        unselected_frame.pack(fill="x")
 
         self._refresh_selected_count_label()
+
+    def _build_selected_item(self, parent, idx, hole):
+        """v01: the original full hole-item body — unchanged except it now
+        packs into `parent` (the Selected Holes section) instead of
+        self.holes_list_frame directly, and gains hover-highlight
+        bindings at the end."""
+        probe_check = self.probe_profile.check_hole(hole.depth, hole.radius)
+        has_warning = not probe_check['ok']
+
+        container = ctk.CTkFrame(parent, fg_color="transparent")
+        container.pack(fill="x", pady=2)
+
+        btn_text   = (f"🎯 Hole {hole.id} "
+                      f"[X: {hole.x:.2f}, Y: {hole.y:.2f}] "
+                      f"D: {hole.depth:.2f}")
+        btn_border = "#c62828" if has_warning else None
+        btn = ctk.CTkButton(
+            container, text=btn_text, anchor="w",
+            fg_color="#1f1f1f", hover_color="#2c2c2c", corner_radius=4,
+            border_color=btn_border,
+            border_width=1 if has_warning else 0,
+            command=lambda idx=idx: self.on_hole_select(idx))
+        btn.pack(fill="x")
+
+        warning_labels = []
+        for warn_text in [probe_check['depth_warning'], probe_check['fit_warning']]:
+            if warn_text:
+                lbl_warn = ctk.CTkLabel(
+                    container, text=warn_text,
+                    text_color="#ef5350",
+                    font=ctk.CTkFont(size=10, weight="bold"),
+                    anchor="w", wraplength=290)
+                lbl_warn.pack(fill="x", padx=6, pady=(1, 0))
+                warning_labels.append(lbl_warn)
+
+        settings_frame = ctk.CTkFrame(container, fg_color="#2b2b2b", corner_radius=4)
+
+        # Z-Layers
+        layer_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        layer_frame.pack(fill="x", padx=15, pady=(10, 5))
+        ctk.CTkLabel(layer_frame, text="Z-Layers:").pack(side="left")
+        opt_layers = ctk.CTkOptionMenu(
+            layer_frame, values=["3", "4", "5", "6", "8", "10"],
+            command=lambda val, idx=idx: self.on_config_change_for_hole(idx),
+            width=60, height=25)
+        opt_layers.set(str(hole.layers))
+        opt_layers.pack(side="right")
+
+        # Points / Layer
+        points_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        points_frame.pack(fill="x", padx=15, pady=(0, 5))
+        ctk.CTkLabel(points_frame, text="Points/Layer:").pack(side="left")
+        opt_points = ctk.CTkOptionMenu(
+            points_frame, values=["4", "6", "8", "12", "16"],
+            command=lambda val, idx=idx: self.on_config_change_for_hole(idx),
+            width=60, height=25)
+        opt_points.set(str(hole.points_per_layer))
+        opt_points.pack(side="right")
+
+        ctk.CTkFrame(settings_frame, height=1,
+                     fg_color="#444444").pack(fill="x", padx=15, pady=(4, 6))
+
+        # Select for Inspection
+        chk_selected_var = ctk.BooleanVar(value=hole.selected_for_inspection)
+        chk_selected = ctk.CTkCheckBox(
+            settings_frame,
+            text="✅  Select for Inspection",
+            variable=chk_selected_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#4fc3f7", fg_color="#1f538d", hover_color="#2979ff",
+            command=lambda idx=idx, var=chk_selected_var:
+                self._on_inspection_select_toggle(idx, var))
+        chk_selected.pack(anchor="w", padx=15, pady=(0, 4))
+
+        # Zigzag
+        chk_zigzag_var = ctk.BooleanVar(value=hole.zigzag_inspection)
+        chk_zigzag = ctk.CTkCheckBox(
+            settings_frame,
+            text="↕  Zigzag Inspection",
+            variable=chk_zigzag_var,
+            font=ctk.CTkFont(size=12),
+            text_color="#a5d6a7", fg_color="#2e7d32", hover_color="#43a047",
+            command=lambda idx=idx, var=chk_zigzag_var:
+                self._on_zigzag_toggle(idx, var))
+        chk_zigzag.pack(anchor="w", padx=15, pady=(0, 4))
+
+        # Zigzag degree entry
+        degree_frame = ctk.CTkFrame(settings_frame, fg_color="transparent")
+        ctk.CTkLabel(degree_frame, text="Rotation/Layer (°):",
+                     font=ctk.CTkFont(size=11),
+                     text_color="#a5d6a7").pack(side="left")
+        degree_entry = ctk.CTkEntry(
+            degree_frame, width=58, height=25,
+            placeholder_text="45", font=ctk.CTkFont(size=12))
+        degree_entry.insert(
+            0, str(int(hole.zigzag_degree))
+               if hole.zigzag_degree == int(hole.zigzag_degree)
+               else str(hole.zigzag_degree))
+        degree_entry.pack(side="right", padx=(6, 0))
+        degree_entry.bind("<Return>",
+                          lambda e, idx=idx: self._on_zigzag_degree_change(idx))
+        degree_entry.bind("<FocusOut>",
+                          lambda e, idx=idx: self._on_zigzag_degree_change(idx))
+        degree_frame.pack(fill="x", padx=15, pady=(0, 8))
+
+        if not hole.zigzag_inspection:
+            degree_frame.pack_forget()
+
+        ctk.CTkFrame(settings_frame, height=1,
+                     fg_color="#333333").pack(fill="x", padx=15, pady=(0, 6))
+
+        self.hole_widgets[idx] = {
+            'container':        container,
+            'btn':              btn,
+            'warning_labels':   warning_labels,
+            'settings_frame':   settings_frame,
+            'opt_layers':       opt_layers,
+            'opt_points':       opt_points,
+            'chk_selected':     chk_selected,
+            'chk_selected_var': chk_selected_var,
+            'chk_zigzag':       chk_zigzag,
+            'chk_zigzag_var':   chk_zigzag_var,
+            'degree_frame':     degree_frame,
+            'degree_entry':     degree_entry,
+            'is_expanded':      False,
+            'probe_check':      probe_check,
+        }
+
+        # v01: hover -> yellow highlight on the canvas marker
+        container.bind("<Enter>", lambda e, gi=idx: self.selection_tab.highlight_hole(gi))
+        container.bind("<Leave>", lambda e: self.selection_tab.clear_hole_highlight())
+
+    def _bind_hover_recursive(self, widget, on_enter, on_leave):
+        """v03: bind <Enter>/<Leave> to `widget` AND every widget in its
+        subtree, so hovering anywhere inside a composite item (labels,
+        checkboxes, and whatever internal sub-widgets those are built
+        from) counts as hovering the item as a whole. Tkinter's
+        <Enter>/<Leave> events are per-widget and do not bubble to
+        parents, so without this, crossing from a container's background
+        onto a child widget looks like "the cursor left the container"
+        even though it's still visually inside the same row."""
+        widget.bind("<Enter>", on_enter)
+        widget.bind("<Leave>", on_leave)
+        for child in widget.winfo_children():
+            self._bind_hover_recursive(child, on_enter, on_leave)
+
+    def _build_unselected_item(self, parent, idx, hole):
+        """v01: lightweight item for rejected candidates. Per spec: no
+        Z-Layers/Points settings — only the Select-for-Inspection checkbox
+        is kept. Hover draws a temporary 'U' marker instead of a highlight,
+        since these holes are hidden from the normal canvas plot."""
+        container = ctk.CTkFrame(parent, fg_color="#1a1a1a", corner_radius=4)
+        container.pack(fill="x", pady=2)
+
+        pos_text = ("position unknown" if getattr(hole, 'position_unknown', False)
+                    else f"X: {hole.x:.2f}, Y: {hole.y:.2f}")
+        reason = getattr(hole, 'reject_reason', "") or "Rejected"
+
+        ctk.CTkLabel(
+            container, anchor="w", justify="left",
+            text=f"⬚ Hole {hole.id}  [{pos_text}]\n   ↳ {reason}",
+            text_color="#8a8a8a", font=ctk.CTkFont(size=11)
+        ).pack(fill="x", padx=10, pady=(6, 2))
+
+        settings_frame = ctk.CTkFrame(container, fg_color="#232323", corner_radius=4)
+        settings_frame.pack(fill="x", padx=10, pady=(0, 8))
+
+        chk_selected_var = ctk.BooleanVar(value=hole.selected_for_inspection)
+        chk_selected = ctk.CTkCheckBox(
+            settings_frame,
+            text="✅  Select for Inspection",
+            variable=chk_selected_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#4fc3f7", fg_color="#1f538d", hover_color="#2979ff",
+            command=lambda idx=idx, var=chk_selected_var:
+                self._on_inspection_select_toggle(idx, var))
+        chk_selected.pack(anchor="w", padx=10, pady=8)
+
+        self.hole_widgets[idx] = {
+            'container':        container,
+            'chk_selected':     chk_selected,
+            'chk_selected_var': chk_selected_var,
+            'is_expanded':      False,
+        }
+
+        # v03: hover -> temporary "U" marker on the canvas. Bound
+        # recursively over the whole item (container + label + settings
+        # frame + checkbox + checkbox internals) so hovering anywhere
+        # inside the item's visible area — including the checkbox —
+        # keeps the marker shown; see _bind_hover_recursive().
+        self._bind_hover_recursive(
+            container,
+            on_enter=lambda e, h=hole: self.selection_tab.show_unselected_marker(h),
+            on_leave=lambda e: self.selection_tab.clear_unselected_marker())
 
     # ------------------------------------------------------------------
     # Checkbox Callbacks
     # ------------------------------------------------------------------
     def _on_inspection_select_toggle(self, idx: int, var: ctk.BooleanVar):
+        # v02: the probe-reach gate that used to snap the checkbox back to
+        # False and pop up an error dialog has been removed. Checking the
+        # box now always sets selected_for_inspection = True, even when the
+        # stylus can't reach the hole. The red depth/fit warning labels
+        # rendered per-item (driven independently by
+        # probe_profile.check_hole() in _build_selected_item) are the only
+        # remaining feedback for that case — no interrupting popup.
         if idx >= len(self.current_holes):
             return
         hole = self.current_holes[idx]
-
-        if var.get():
-            probe_check = self.probe_profile.check_hole(hole.depth, hole.radius)
-            if not probe_check['ok']:
-                var.set(False)
-                error_lines = []
-                if probe_check['depth_warning']:
-                    error_lines.append(probe_check['depth_warning'])
-                if probe_check['fit_warning']:
-                    error_lines.append(probe_check['fit_warning'])
-                error_lines.append(
-                    f"\nPlease update the Probe Stylus Profile\n"
-                    f"(current: length={self.probe_profile.stylus_length:.1f} mm, "
-                    f"tip⌀={self.probe_profile.tip_diameter:.1f} mm)"
-                )
-                _mb.showerror("Probe Cannot Reach This Hole",
-                              "\n".join(error_lines))
-                return
 
         hole.selected_for_inspection = var.get()
 
@@ -757,7 +923,7 @@ class UIManager:
 
         self._refresh_selected_count_label()
 
-        if idx in self.hole_widgets:
+        if idx in self.hole_widgets and 'btn' in self.hole_widgets[idx]:
             btn = self.hole_widgets[idx]['btn']
             if hole.selected_for_inspection:
                 btn.configure(fg_color="#1a3a5c")
@@ -773,7 +939,7 @@ class UIManager:
         hole = self.current_holes[idx]
         hole.zigzag_inspection = var.get()
 
-        if idx in self.hole_widgets:
+        if idx in self.hole_widgets and 'degree_frame' in self.hole_widgets[idx]:
             df = self.hole_widgets[idx]['degree_frame']
             sf = self.hole_widgets[idx]['settings_frame']
             if hole.zigzag_inspection:
@@ -791,6 +957,7 @@ class UIManager:
     def _on_zigzag_degree_change(self, idx: int):
         if idx >= len(self.current_holes): return
         if idx not in self.hole_widgets:   return
+        if 'degree_entry' not in self.hole_widgets[idx]: return
 
         hole  = self.current_holes[idx]
         entry = self.hole_widgets[idx]['degree_entry']
@@ -818,14 +985,19 @@ class UIManager:
         is_deselecting = (self.selected_hole_idx == idx)
 
         for i, widgets in self.hole_widgets.items():
+            if 'btn' not in widgets:
+                continue
             hole_i        = self.current_holes[i] if i < len(self.current_holes) else None
             default_color = ("#1a3a5c"
                              if (hole_i and hole_i.selected_for_inspection)
                              else "#1f1f1f")
             widgets['btn'].configure(fg_color=default_color)
-            if widgets['is_expanded'] and i != idx:
+            if widgets.get('is_expanded') and i != idx:
                 widgets['settings_frame'].pack_forget()
                 widgets['is_expanded'] = False
+
+        if idx not in self.hole_widgets or 'btn' not in self.hole_widgets[idx]:
+            return  # v01: unselected-hole items have no click-expand behavior
 
         if is_deselecting:
             sel = self.hole_widgets[idx]
@@ -844,7 +1016,9 @@ class UIManager:
         if self.current_tab == "Selection" and self.scatter_holes:
             colors = ['white'] * self.current_holes_count
             if self.selected_hole_idx is not None:
-                colors[self.selected_hole_idx] = 'yellow'
+                local_idx = self._visible_hole_map.get(self.selected_hole_idx)
+                if local_idx is not None:
+                    colors[local_idx] = 'yellow'
             self.scatter_holes.set_facecolors(colors)
             self.canvas.draw_idle()
         elif self.current_tab == "Customization":
