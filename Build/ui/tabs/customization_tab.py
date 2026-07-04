@@ -1,3 +1,26 @@
+# ui/tabs/customization_tab.py
+# v01
+#
+# CHANGELOG (v01):
+#   Bug Fix #1 (main) — Hole-wall mask coordinate-frame mismatch.
+#     `tri_cz` (triangle-centroid Z) stayed in RAW rotated-Z space, while
+#     `h.bottom_z` / `r_z` (hole_top_z) are DEPTH-from-surface values — both
+#     STEP holes (sh.depth_top/depth_bot) and mesh-detected holes (fed from
+#     Projector's z_depth = surface_z - raw_z) already live in depth-space.
+#     Comparing a depth-space range against a raw-Z array silently mixed two
+#     coordinate frames. For Top view the raw-Z extent is just the part
+#     thickness so the bug was barely visible; for Front/Right views (e.g.
+#     Y-axis holes) the raw-Z extent becomes the part's full length, so the
+#     mask matched almost every triangle in the model → the chaotic
+#     wireframe seen in Customization.
+#     Fix: shift `tri_cz` into depth-space once (`- SURF_Z_GLOBAL`), and
+#     update the one boundary constant that referenced the old raw frame.
+#
+#   Bug Fix #2 (related, same bug family) — hole-number label Z position.
+#     `r_z` is already depth-space; subtracting SURF_Z_GLOBAL a second time
+#     pushed the label far outside the rendered model. Removed the extra
+#     subtraction so labels sit at the correct height.
+
 import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
@@ -116,7 +139,12 @@ class CustomizationTab:
 
         tri_cx = x3[tris].mean(axis=1)
         tri_cy = y3[tris].mean(axis=1)
-        tri_cz = z3[tris].mean(axis=1)
+        # v01 FIX (Bug #1): shift into depth-space so this matches the same
+        # frame as h.bottom_z / r_z (both already "depth from surface").
+        # Previously this stayed in raw rotated-Z space, which only happened
+        # to look OK for Top view (small Z-extent) and broke badly for
+        # Front/Right views where the raw-Z extent is the part's full length.
+        tri_cz = z3[tris].mean(axis=1) - SURF_Z_GLOBAL
 
         xmin, xmax = float(np.min(x3)), float(np.max(x3))
         ymin, ymax = float(np.min(y3)), float(np.max(y3))
@@ -131,7 +159,10 @@ class CustomizationTab:
             r_z    = getattr(h, 'hole_top_z', h.surface_z)
             is_sel = (i == app.selected_hole_idx)
 
-            ax3d.text(h.x, h.y, (r_z - SURF_Z_GLOBAL) + half * 0.02,
+            # v01 FIX (Bug #2): r_z is already depth-space — no need to
+            # subtract SURF_Z_GLOBAL again. The previous double-subtraction
+            # pushed hole-number labels far outside the rendered model.
+            ax3d.text(h.x, h.y, r_z + half * 0.02,
                       str(h.id), color='white', fontsize=7,
                       ha='center', va='bottom')
 
@@ -144,8 +175,11 @@ class CustomizationTab:
 
             mask_wall = ((dist_h <= h.radius * 1.2) &
                          (tri_cz >= z_lo_h - 0.3) & (tri_cz <= z_hi_h))
+            # v01 FIX (Bug #1, cont.): lower bound was `SURF_Z_GLOBAL - 0.5`,
+            # which was correct for the OLD raw-Z tri_cz. Now that tri_cz is
+            # depth-space, "near the surface" is simply depth ≈ 0.
             mask_rim  = ((dist_h <= h.radius * 1.3) &
-                         (tri_cz >= SURF_Z_GLOBAL - 0.5) & (tri_cz < z_lo_h + 0.3))
+                         (tri_cz >= -0.5) & (tri_cz < z_lo_h + 0.3))
             htris = tris[mask_wall | mask_rim]
 
             if len(htris) > 0 and is_sel:

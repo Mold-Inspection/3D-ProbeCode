@@ -5,3 +5,6 @@ __pycache__/
 
 # Temp files
 temp_ui_mesh.stl
+
+# Log files
+*.txt
