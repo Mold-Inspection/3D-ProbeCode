@@ -1,5 +1,5 @@
 # ui/main_window.py
-# VERSION: 03
+# VERSION: 05
 # CHANGE LOG (v01):
 #   - Right sidebar split into "Selected Holes" / "Unselected Holes"
 #     sections (unselected = rejected STEP candidates, now surfaced by
@@ -38,6 +38,63 @@
 #     and binds <Enter>/<Leave> to every descendant, so hovering anywhere
 #     within the item's visible bounds — checkbox included — keeps the
 #     marker shown; it only clears when the cursor truly leaves the item.
+# CHANGE LOG (v04):
+#   - Task 3: toggling "Select for Inspection" now moves the hole between
+#     the Selected Holes / Unselected Holes sections instead of just
+#     recoloring its button in place. Section membership (and item style:
+#     full settings vs checkbox-only) is now driven by
+#     hole.selected_for_inspection instead of hole.is_rejected.
+#   - Method (a) (confirmed by Chanon): canvas visibility follows the same
+#     flag — a hole gets a permanent numbered marker on the canvas exactly
+#     when selected_for_inspection is True (and its position is known);
+#     unchecking it removes the marker, leaving only the hover "U" marker
+#     from the Unselected Holes section. _visible_hole_map in show_view()
+#     now keys off selected_for_inspection instead of "not is_rejected".
+#   - is_rejected / reject_reason are preserved as metadata, not discarded:
+#     a promoted (originally-rejected) hole shown under Selected Holes now
+#     carries a small "⚠ Originally rejected — <reason>" note so the user
+#     still knows it was an edge case; a manually-deselected (but
+#     geometrically valid) hole shown under Unselected Holes shows
+#     "Not selected for inspection" instead of a reject reason.
+#   - _build_selected_item() now guards hole.x/hole.y being None (possible
+#     for a promoted hole whose position_unknown is True) instead of
+#     assuming a numeric position is always available.
+#   - New _on_inspection_select_toggle() calls a new
+#     _refresh_after_inspection_toggle() helper, which rebuilds the
+#     canvas-visible hole list + _visible_hole_map and calls
+#     update_treeview() so the toggled hole's item immediately reappears
+#     in the correct section. Pinned depth markers are saved/restored
+#     around this, same pattern already used by on_generate_holes(),
+#     rotate_screen(), and reset_position().
+#   - Per Chanon's "keep them isolated from each other" instruction: this
+#     does NOT touch renumbering/sort order — hole.id stays exactly as-is
+#     when a hole switches sections. Full top-to-bottom/left-to-right
+#     renumbering on toggle is deferred entirely to Task 4.
+# CHANGE LOG (v05):
+#   - Task 4: added _renumber_holes_by_category(), which assigns every
+#     hole a NEW attribute, display_id — a running count that resets to 1
+#     independently for each sidebar section, in the existing
+#     top-to-bottom/left-to-right order of self.current_holes (a stable
+#     filter into two subsets preserves that order within each subset, no
+#     extra sort needed): Selected Holes -> display_id 1, 2, 3, ...;
+#     Unselected Holes -> display_id 1, 2, 3, ... (shown with a "U" prefix
+#     in the sidebar text, and matched by selection_tab.py's canvas marker
+#     text — see that file's v03 changelog).
+#   - hole.id itself is INTENTIONALLY left untouched by this — it remains
+#     the internal, globally-unique identity that show_view()'s
+#     prev_states dict is keyed on (Fix 2's rotation/view-switch toggle
+#     persistence). Repurposing hole.id itself for category-local
+#     numbering would let a Selected hole and an Unselected hole collide
+#     on the same prev_states key (e.g. both "id == 3"), silently
+#     corrupting each other's saved settings on the next re-render.
+#   - _renumber_holes_by_category() is called in two places: at the end of
+#     show_view()'s hole-building block (covers Generate Holes, Rotate,
+#     View switch, Reset Position, Clear — everything already funnels
+#     through show_view()), and at the top of
+#     _refresh_after_inspection_toggle() (the literal "checkbox changed"
+#     trigger this task describes).
+#   - _build_selected_item()'s button text and _build_unselected_item()'s
+#     label now read hole.display_id instead of hole.id.
 import customtkinter as ctk
 import os
 import numpy as np
@@ -561,12 +618,21 @@ class UIManager:
         else:
             self.current_holes = []
 
-        # v01: canvas only shows non-rejected holes; build the global->local
+        # v05 (Task 4): recompute category-local display numbers (1..N for
+        # Selected, U1..UM for Unselected) before building the canvas list
+        # and sidebar, so both are already in sync when rendered below.
+        self._renumber_holes_by_category()
+
+        # v04: canvas visibility now follows selected_for_inspection
+        # (method (a)) instead of "not is_rejected" — a hole gets a
+        # permanent numbered marker exactly when it's checked for
+        # inspection AND its position is known. Build the global->local
         # index map so click/hover highlighting stays correctly aligned.
         visible_holes = []
         self._visible_hole_map = {}
         for gi, h in enumerate(self.current_holes):
-            if not getattr(h, 'is_rejected', False):
+            if (getattr(h, 'selected_for_inspection', False)
+                    and h.x is not None and h.y is not None):
                 self._visible_hole_map[gi] = len(visible_holes)
                 visible_holes.append(h)
 
@@ -671,8 +737,13 @@ class UIManager:
             self._refresh_selected_count_label()
             return
 
-        # v01: split into Selected / Unselected sections
-        n_selected   = sum(1 for h in holes if not getattr(h, 'is_rejected', False))
+        # v04: split into Selected / Unselected sections based on
+        # selected_for_inspection (the checkbox), not is_rejected. This is
+        # what lets toggling the checkbox move a hole's item between the
+        # two sections. is_rejected is still preserved as metadata for the
+        # note/reason text inside each item builder.
+        n_selected   = sum(1 for h in holes
+                           if getattr(h, 'selected_for_inspection', False))
         n_unselected = len(holes) - n_selected
 
         ctk.CTkLabel(self.holes_list_frame,
@@ -691,10 +762,10 @@ class UIManager:
         unselected_frame = ctk.CTkFrame(self.holes_list_frame, fg_color="transparent")
 
         for gi, hole in enumerate(holes):
-            if getattr(hole, 'is_rejected', False):
-                self._build_unselected_item(unselected_frame, gi, hole)
-            else:
+            if getattr(hole, 'selected_for_inspection', False):
                 self._build_selected_item(selected_frame, gi, hole)
+            else:
+                self._build_unselected_item(unselected_frame, gi, hole)
 
         divider.pack(fill="x", padx=4, pady=(10, 6))
         unselected_header.pack(fill="x", pady=(0, 4))
@@ -706,16 +777,24 @@ class UIManager:
         """v01: the original full hole-item body — unchanged except it now
         packs into `parent` (the Selected Holes section) instead of
         self.holes_list_frame directly, and gains hover-highlight
-        bindings at the end."""
+        bindings at the end.
+        v04: this builder is now used for ANY hole with
+        selected_for_inspection == True, including holes originally tagged
+        is_rejected that the user has manually promoted. Two additions:
+          - pos_text guards hole.x/hole.y being None (position_unknown can
+            still be True for a promoted hole even after it's selected).
+          - an "⚠ Originally rejected — <reason>" note is shown for
+            promoted holes so the user isn't misled into thinking this was
+            always a clean, high-confidence detection."""
         probe_check = self.probe_profile.check_hole(hole.depth, hole.radius)
         has_warning = not probe_check['ok']
 
         container = ctk.CTkFrame(parent, fg_color="transparent")
         container.pack(fill="x", pady=2)
 
-        btn_text   = (f"🎯 Hole {hole.id} "
-                      f"[X: {hole.x:.2f}, Y: {hole.y:.2f}] "
-                      f"D: {hole.depth:.2f}")
+        pos_text = ("position unknown" if hole.x is None or hole.y is None
+                    else f"X: {hole.x:.2f}, Y: {hole.y:.2f}")
+        btn_text   = f"🎯 Hole {hole.display_id} [{pos_text}] D: {hole.depth:.2f}"
         btn_border = "#c62828" if has_warning else None
         btn = ctk.CTkButton(
             container, text=btn_text, anchor="w",
@@ -726,6 +805,19 @@ class UIManager:
         btn.pack(fill="x")
 
         warning_labels = []
+
+        # v04: flag promoted (originally-rejected) holes so the user still
+        # sees why the geometry pipeline was unsure about this one.
+        if getattr(hole, 'is_rejected', False):
+            promo_reason = getattr(hole, 'reject_reason', "") or "Rejected by detection pipeline"
+            lbl_promo = ctk.CTkLabel(
+                container, text=f"⚠ Originally rejected — {promo_reason}",
+                text_color="#ffb74d",
+                font=ctk.CTkFont(size=10, weight="bold"),
+                anchor="w", wraplength=290)
+            lbl_promo.pack(fill="x", padx=6, pady=(1, 0))
+            warning_labels.append(lbl_promo)
+
         for warn_text in [probe_check['depth_warning'], probe_check['fit_warning']]:
             if warn_text:
                 lbl_warn = ctk.CTkLabel(
@@ -848,20 +940,30 @@ class UIManager:
             self._bind_hover_recursive(child, on_enter, on_leave)
 
     def _build_unselected_item(self, parent, idx, hole):
-        """v01: lightweight item for rejected candidates. Per spec: no
-        Z-Layers/Points settings — only the Select-for-Inspection checkbox
-        is kept. Hover draws a temporary 'U' marker instead of a highlight,
-        since these holes are hidden from the normal canvas plot."""
+        """v01: lightweight item — no Z-Layers/Points settings, only the
+        Select-for-Inspection checkbox is kept. Hover draws a temporary
+        'U' marker instead of a highlight, since these holes have no
+        permanent canvas marker.
+        v04: this builder is now used for ANY hole with
+        selected_for_inspection == False — that now includes
+        geometrically valid holes the user has manually deselected, not
+        just is_rejected candidates. The reason text is adjusted
+        accordingly: a real reject_reason for is_rejected holes, or a
+        plain "Not selected for inspection" note for a manually
+        deselected valid hole."""
         container = ctk.CTkFrame(parent, fg_color="#1a1a1a", corner_radius=4)
         container.pack(fill="x", pady=2)
 
         pos_text = ("position unknown" if getattr(hole, 'position_unknown', False)
                     else f"X: {hole.x:.2f}, Y: {hole.y:.2f}")
-        reason = getattr(hole, 'reject_reason', "") or "Rejected"
+        if getattr(hole, 'is_rejected', False):
+            reason = getattr(hole, 'reject_reason', "") or "Rejected"
+        else:
+            reason = "Not selected for inspection"
 
         ctk.CTkLabel(
             container, anchor="w", justify="left",
-            text=f"⬚ Hole {hole.id}  [{pos_text}]\n   ↳ {reason}",
+            text=f"⬚ Hole U{hole.display_id}  [{pos_text}]\n   ↳ {reason}",
             text_color="#8a8a8a", font=ctk.CTkFont(size=11)
         ).pack(fill="x", padx=10, pady=(6, 2))
 
@@ -907,6 +1009,16 @@ class UIManager:
         # rendered per-item (driven independently by
         # probe_profile.check_hole() in _build_selected_item) are the only
         # remaining feedback for that case — no interrupting popup.
+        #
+        # v04: this checkbox now also decides which sidebar section the
+        # hole belongs to (Selected Holes vs Unselected Holes) and, per
+        # method (a), whether it gets a permanent numbered marker on the
+        # canvas. Both of those require rebuilding the sidebar list and
+        # the canvas plot, so this now delegates to
+        # _refresh_after_inspection_toggle() instead of just recoloring
+        # the button in place — the old in-place button recolor no longer
+        # makes sense since the button itself may not exist anymore after
+        # the hole moves to the lightweight Unselected-Holes item style.
         if idx >= len(self.current_holes):
             return
         hole = self.current_holes[idx]
@@ -921,17 +1033,72 @@ class UIManager:
             if idx in self.inspection_selected_holes:
                 self.inspection_selected_holes.remove(idx)
 
-        self._refresh_selected_count_label()
-
-        if idx in self.hole_widgets and 'btn' in self.hole_widgets[idx]:
-            btn = self.hole_widgets[idx]['btn']
-            if hole.selected_for_inspection:
-                btn.configure(fg_color="#1a3a5c")
-            else:
-                btn.configure(
-                    fg_color="#1f538d" if idx == self.selected_hole_idx else "#1f1f1f")
-
         print(f"[inspect] Selected holes: {self.inspection_selected_holes}")
+
+        self._refresh_after_inspection_toggle()
+
+    def _renumber_holes_by_category(self):
+        """v05 (Task 4): assign every hole in self.current_holes a
+        category-local display number:
+          - Selected Holes   -> display_id = 1, 2, 3, ...
+          - Unselected Holes -> display_id = 1, 2, 3, ... (rendered as
+            "U1", "U2", ... in the sidebar/canvas)
+
+        self.current_holes is already ordered top-to-bottom/left-to-right
+        (that ordering comes from the extractor / detect_holes_in_view
+        sort and is untouched here). Filtering into the two categories
+        while walking it in order is a stable filter, so each category's
+        relative top-to-bottom/left-to-right order is preserved without
+        needing to re-sort.
+
+        display_id is a NEW, purely cosmetic attribute — hole.id is left
+        completely untouched, since it's still needed as the unique key
+        show_view() uses to restore a hole's saved state (selected,
+        zigzag, layers, ...) across rotations/view switches. If
+        display_id were used for that instead, a Selected hole and an
+        Unselected hole could both land on the same number (e.g. both
+        "3") and collide as dict keys, corrupting each other's state."""
+        sel_count   = 0
+        unsel_count = 0
+        for h in self.current_holes:
+            if getattr(h, 'selected_for_inspection', False):
+                sel_count += 1
+                h.display_id = sel_count
+            else:
+                unsel_count += 1
+                h.display_id = unsel_count
+
+    def _refresh_after_inspection_toggle(self):
+        """v04: recompute the canvas-visible hole list + _visible_hole_map
+        (method (a): a hole gets a permanent numbered marker exactly when
+        selected_for_inspection is True and its position is known), then
+        rebuild the sidebar so the toggled hole's item immediately appears
+        in the correct section (Selected Holes <-> Unselected Holes).
+
+        v05 (Task 4): also recomputes the category-local display_id
+        numbering (see _renumber_holes_by_category()) — this is the exact
+        "selected for inspection changed -> renumber everything" trigger
+        the task describes. hole.id itself is still left untouched."""
+        self._renumber_holes_by_category()
+
+        visible_holes = []
+        self._visible_hole_map = {}
+        for gi, h in enumerate(self.current_holes):
+            if (getattr(h, 'selected_for_inspection', False)
+                    and h.x is not None and h.y is not None):
+                self._visible_hole_map[gi] = len(visible_holes)
+                visible_holes.append(h)
+
+        if self.current_tab == "Selection":
+            saved_pins = list(self.selection_tab._pinned_pin_data)
+            title = f"{self.current_view} View"
+            self.selection_tab.update_plot(
+                self.current_x, self.current_y, self.current_z,
+                self.current_face_data, self.current_triangles,
+                title, holes=visible_holes)
+            self.selection_tab._restore_pins(saved_pins)
+
+        self.update_treeview(self.current_holes)
 
     def _on_zigzag_toggle(self, idx: int, var: ctk.BooleanVar):
         if idx >= len(self.current_holes):

@@ -1,5 +1,5 @@
 # ui/tabs/selection_tab.py
-# VERSION: 02
+# VERSION: 03
 # CHANGE LOG:
 #   v01: BUG FIX — removed the duplicate mesh-depth occlusion filter that
 #        had been added inside update_plot(). True hole visibility is now
@@ -25,6 +25,16 @@
 #        update_plot()'s initial-color logic now goes through the same
 #        index map for consistency with click-selection, and clears any
 #        stale hover artists left over from before ax.clear().
+#   v03: Task 4 (see main_window.py v05) — canvas marker numbers now read
+#        h.display_id instead of h.id. main_window.py's
+#        _renumber_holes_by_category() assigns display_id as a
+#        category-local rank (1..N for Selected Holes, independently
+#        renumbered every time a checkbox toggle changes section
+#        membership), while h.id stays an internal, unrelated identity.
+#        Since `holes` passed into update_plot() is always the
+#        Selected-only canvas list, this keeps the number drawn next to
+#        each marker on the canvas identical to that hole's number in the
+#        Selected Holes sidebar section.
 import numpy as np
 from core.models import HoleFeature
 
@@ -412,7 +422,7 @@ class SelectionTab:
                 edgecolors="#3694ED", marker='o', s=150,
                 linewidths=2, zorder=5, clip_on=True)
             for i, h in enumerate(holes):
-                app.ax.text(h.x, h.y, f"{h.id}",
+                app.ax.text(h.x, h.y, f"{h.display_id}",
                             color='black', fontsize=8,
                             weight='bold', ha='center', va='center',
                             zorder=6, clip_on=True)
