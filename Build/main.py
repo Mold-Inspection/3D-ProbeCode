@@ -3,7 +3,7 @@ from core.geometry_engine import MoldGeometry
 from ui.main_window import UIManager
 
 def main():
-    print("Starting 3D Laser Scanner Simulator...")
+    print("Starting 3D ProbeCode...")
     
     # 1. สร้าง Engine คำนวณทางเรขาคณิต (Backend)
     geo = MoldGeometry()
