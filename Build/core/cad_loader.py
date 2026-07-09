@@ -19,7 +19,7 @@ class CADLoader:
             self.step_data = cq.importers.importStep(filepath)
             tmp = "temp_ui_mesh.stl"
             cq.exporters.export(self.step_data, tmp, exportType='STL',
-                                tolerance=0.05, angularTolerance=0.10)
+                                tolerance=0.01, angularTolerance=0.05)
             self.mesh = trimesh.load(tmp)
             if os.path.exists(tmp):
                 os.remove(tmp)
