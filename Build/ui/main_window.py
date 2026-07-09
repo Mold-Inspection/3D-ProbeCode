@@ -1,5 +1,5 @@
 # ui/main_window.py
-# VERSION: 05
+# VERSION: 06
 # CHANGE LOG (v01):
 #   - Right sidebar split into "Selected Holes" / "Unselected Holes"
 #     sections (unselected = rejected STEP candidates, now surfaced by
@@ -95,6 +95,17 @@
 #     trigger this task describes).
 #   - _build_selected_item()'s button text and _build_unselected_item()'s
 #     label now read hole.display_id instead of hole.id.
+# CHANGE LOG (v06):
+#   - Rename: app title changed to "3D ProbeCode" (was "3D Laser Scanner
+#     Simulator" — leftover mislabel; tool has no laser and is STEP/STP
+#     touch-probe path + G-code generation only). Title bar text only, no
+#     behavior change.
+#   - Feature (input validation, isolated from rename above):
+#     open_file_dialog()'s filetypes no longer offers "All Files (*.*)",
+#     restricting the OS picker itself to .step/.stp. Also wraps
+#     geo.load_file() in try/except to catch CADLoader's new
+#     ValueError (cad_loader.py v01) and show a popup instead of
+#     crashing, in case a non-STEP file reaches this call some other way.
 import customtkinter as ctk
 import os
 import numpy as np
@@ -149,7 +160,7 @@ class UIManager:
 
         # --- Main window ---
         self.root = ctk.CTk()
-        self.root.title("3D Laser Scanner Simulator")
+        self.root.title("3D ProbeCode")
         self.root.geometry("1400x800")
 
         # Layout
@@ -218,7 +229,7 @@ class UIManager:
         self._left_scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
         ctk.CTkLabel(
-            self._left_scroll, text="3D CNC Control",
+            self._left_scroll, text="3D ProbeCode Control",
             font=ctk.CTkFont(size=20, weight="bold")
         ).pack(pady=(20, 10))
 
@@ -500,31 +511,38 @@ class UIManager:
 
     def open_file_dialog(self):
         filepath = ctk.filedialog.askopenfilename(
-            title="Select 3D CAD Model",
-            filetypes=[("STEP Files", "*.stp *.step"), ("All Files", "*.*")]
+            title="Select STEP/STP CAD Model",
+            filetypes=[("STEP Files", "*.stp *.step")]
         )
-        if filepath:
-            self.selection_tab.clear_pins()
-            self.geo.load_file(filepath)
-            self.screen_rotation   = 0
-            self.holes_detected    = False
-            self.current_holes     = []
-            self.selected_hole_idx = None
-            self.inspection_selected_holes = []
-            self._set_view_controls_locked(False)
-            self.nav_selector.set("Selection")
-            self.on_nav_change("Selection")
+        if not filepath:
+            return
 
-            if self.geo.mesh is not None:
-                extents = self.geo.get_physical_dimensions()
-                self.max_physical_dim = max(extents)
-                self.lbl_width.configure(
-                    text=f"Width (X): {extents[0]:.2f} mm", text_color="white")
-                self.lbl_length.configure(
-                    text=f"Length (Y): {extents[1]:.2f} mm", text_color="white")
-                self.lbl_thick.configure(
-                    text=f"Thickness (Z): {extents[2]:.2f} mm", text_color="white")
-            self.show_view('Top')
+        self.selection_tab.clear_pins()
+        try:
+            self.geo.load_file(filepath)
+        except ValueError as e:
+            _mb.showerror("Unsupported File", str(e))
+            return
+
+        self.screen_rotation   = 0
+        self.holes_detected    = False
+        self.current_holes     = []
+        self.selected_hole_idx = None
+        self.inspection_selected_holes = []
+        self._set_view_controls_locked(False)
+        self.nav_selector.set("Selection")
+        self.on_nav_change("Selection")
+
+        if self.geo.mesh is not None:
+            extents = self.geo.get_physical_dimensions()
+            self.max_physical_dim = max(extents)
+            self.lbl_width.configure(
+                text=f"Width (X): {extents[0]:.2f} mm", text_color="white")
+            self.lbl_length.configure(
+                text=f"Length (Y): {extents[1]:.2f} mm", text_color="white")
+            self.lbl_thick.configure(
+                text=f"Thickness (Z): {extents[2]:.2f} mm", text_color="white")
+        self.show_view('Top')
 
     def show_view(self, view_name):
         if self.geo.mesh is None:
