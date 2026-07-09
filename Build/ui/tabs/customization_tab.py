@@ -1,7 +1,34 @@
 # ui/tabs/customization_tab.py
-# v01
+# v02
 #
-# CHANGELOG (v01):
+# CHANGELOG (v02):
+#   Bug Fix — 3D view hole numbers didn't match the right-sidebar / 2D
+#   canvas numbers after renumbering.
+#     Root cause: this file labelled holes using `h.id` (the internal,
+#     STABLE identity used only as a dict key in main_window.show_view()
+#     to persist checkbox/zigzag/layer state across view switches —
+#     see main_window.py v05 changelog on why hole.id is intentionally
+#     left untouched). The user-facing number is `h.display_id`, which
+#     is recomputed every time `_renumber_holes_by_category()` runs (on
+#     every "Select for Inspection" toggle). selection_tab.py's 2D
+#     canvas already switched to `h.display_id` in its own v03 — this
+#     file was the one place still showing the stale `id`, so the 3D
+#     view's numbers would drift out of sync with the sidebar and 2D
+#     canvas as soon as any hole was checked/unchecked.
+#     Fix:
+#       1. The per-hole text label drawn in the wireframe loop (this
+#          loop runs over ALL current_holes, selected and unselected,
+#          for spatial context) now reads `h.display_id`, and mirrors
+#          the sidebar's category convention: Selected holes show the
+#          plain number ("3"), Unselected holes show a "U"-prefixed
+#          number ("U3") — matching "Hole 3" / "Hole U3" in the sidebar.
+#       2. The 3D view's title bar ("Customization — Hole {id} ...")
+#          now reads `hole.display_id` instead of `hole.id`.
+#     No other logic changed: hole.id itself, selection indexing, and
+#     all geometry/path-planning code are untouched — this is a
+#     display-text-only fix.
+#
+# --- retained from v01 header (unchanged content below) ---
 #   Bug Fix #1 (main) — Hole-wall mask coordinate-frame mismatch.
 #     `tri_cz` (triangle-centroid Z) stayed in RAW rotated-Z space, while
 #     `h.bottom_z` / `r_z` (hole_top_z) are DEPTH-from-surface values — both
@@ -71,6 +98,16 @@ def _build_combined_matrix(view_name: str, screen_rot: int):
         m_scrn = euler_matrix(0, 0, np.radians(screen_rot))   # Z only
         return m_scrn @ m_view   # screen rotation applied AFTER view rotation
     return m_view
+
+
+def _hole_display_label(h) -> str:
+    """v02: category-local display text matching the sidebar's convention
+    ("Hole 3" for Selected, "Hole U3" for Unselected) — shown compactly
+    here as "3" / "U3" since space is tight on the 3D wireframe."""
+    did = getattr(h, 'display_id', getattr(h, 'id', '?'))
+    if getattr(h, 'selected_for_inspection', False):
+        return str(did)
+    return f"U{did}"
 
 
 class CustomizationTab:
@@ -162,8 +199,14 @@ class CustomizationTab:
             # v01 FIX (Bug #2): r_z is already depth-space — no need to
             # subtract SURF_Z_GLOBAL again. The previous double-subtraction
             # pushed hole-number labels far outside the rendered model.
+            #
+            # v02 FIX: label text now uses the same category-local
+            # display_id the sidebar and 2D canvas use, instead of the
+            # stable-but-user-invisible h.id, so the number next to a hole
+            # here always matches the number shown for that same hole in
+            # the sidebar and Selection tab.
             ax3d.text(h.x, h.y, r_z + half * 0.02,
-                      str(h.id), color='white', fontsize=7,
+                      _hole_display_label(h), color='white', fontsize=7,
                       ha='center', va='bottom')
 
             if has_hole and not is_sel:
@@ -410,8 +453,11 @@ class CustomizationTab:
             rot_tag    = f' [rot={screen_rot}°]' if screen_rot != 0 else ''
             zigzag_tag = f' ↕Zigzag({step_deg}°/layer)' if use_zigzag else ''
             probe_tag  = '  ⚠ PROBE' if not probe_ok else ''
+            # v02 FIX: title now shows hole.display_id (the same
+            # category-local number the sidebar and 2D canvas show) instead
+            # of the internal, invisible-to-the-user hole.id.
             title_str  = (
-                f"Customization — Hole {hole.id}  |  R={hole.radius:.1f} mm  "
+                f"Customization — Hole {hole.display_id}  |  R={hole.radius:.1f} mm  "
                 f"Depth={hole.depth:.2f} mm  |  "
                 f"{layers}L × {points}P = {layers*points} pts"
                 + (' [STEP]' if has_step_hole else ' [Mesh]')
