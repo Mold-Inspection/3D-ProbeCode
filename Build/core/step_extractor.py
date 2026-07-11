@@ -1,5 +1,21 @@
 # core/step_extractor.py
-# VERSION: 17
+# VERSION: 18
+#
+# CHANGE LOG (v17 -> v18):
+#   Dead-code cleanup only, no behavior change:
+#     1. Removed unused constant _DEPTH_TOL (never referenced — the actual
+#        depth-reject check hardcodes 0.1).
+#     2. Removed write-only rejection counters (rejected_geomtype,
+#        rejected_edges, rejected_sweep, rejected_dist, rejected_depth,
+#        rejected_dup, rejected_other) — incremented throughout extract()
+#        but never read, printed, or returned anywhere. total_faces is
+#        KEPT since it's used inside a _dbg() debug message.
+#     3. Removed pre_merge_count / post_half_face_count in extract() —
+#        computed, never used afterward.
+#     4. Removed the `h._id = i + 1` assignment at the end of
+#        get_step_holes_in_view() — nothing in core/* or ui/* reads
+#        StepHole._id; the UI layer uses HoleFeature.id/.display_id
+#        instead, assigned separately in main_window.show_view().
 #
 # CHANGE LOG (v16 -> v17):
 #   1. BUG FIX: Removed the flawed `_geomAdaptor()` branch entirely. Now strictly 
@@ -64,7 +80,6 @@ _MIN_SWEEP_RAD = math.pi
 _AXIS_TOL       = 0.02
 _EXTENT_TOL     = 0.5
 _PERP_FRAC_TOL  = 0.15
-_DEPTH_TOL      = 1.0
 
 _STRICT_GAP_TOL    = 0.05  
 _MAX_RADIUS_RATIO  = 1.2   
@@ -209,20 +224,12 @@ class StepExtractor:
         seen  = {}
 
         total_faces       = 0
-        rejected_geomtype = 0
-        rejected_edges    = 0
-        rejected_sweep    = 0
-        rejected_dist     = 0
-        rejected_depth    = 0
-        rejected_dup      = 0
-        rejected_other    = 0
 
         for face in step_data.faces().vals():
             total_faces += 1
             geom_type = face.geomType()
             
             if geom_type not in ('CYLINDER', 'CONE'):
-                rejected_geomtype += 1
                 continue
 
             analytical_success = False
@@ -287,12 +294,10 @@ class StepExtractor:
             if not analytical_success:
                 raw_circle_edges = [e for e in face.Edges() if e.geomType() == 'CIRCLE']
                 if len(raw_circle_edges) < 1:
-                    rejected_edges += 1
                     continue
 
                 circle_edges = [e for e in raw_circle_edges if _sweep_angle(e) >= _MIN_SWEEP_RAD]
                 if len(circle_edges) < 1:
-                    rejected_sweep += 1
                     continue
 
                 circle_data = []
@@ -301,7 +306,6 @@ class StepExtractor:
                     circle_data.append((c.x - cx_off, c.y - cy_off, c.z - cz_off, _arc_radius(edge), edge))
 
                 if len(circle_data) < 1:
-                    rejected_edges += 1
                     continue
 
                 if len(circle_data) >= 2:
@@ -309,7 +313,6 @@ class StepExtractor:
                     diff = c1 - c0
                     dist = float(np.linalg.norm(diff))
                     if dist < 0.05:
-                        rejected_dist += 1
                         continue
                     axis_vec = diff / dist
                     ax, ay, az = axis_vec
@@ -328,7 +331,6 @@ class StepExtractor:
                         raw_axis = np.cross(p1 - p0, p2 - p0)
                         ax_norm = np.linalg.norm(raw_axis)
                         if ax_norm < 1e-6:
-                            rejected_dist += 1
                             continue
                         axis_vec = raw_axis / ax_norm
                         ax, ay, az = axis_vec
@@ -346,11 +348,9 @@ class StepExtractor:
                         end_a = tuple(c0 + min_p * axis_vec)
                         end_b = tuple(c0 + max_p * axis_vec)
                     except:
-                        rejected_other += 1
                         continue
 
             if face_depth < 0.1:
-                rejected_depth += 1
                 continue
 
             mid = (np.array(end_a) + np.array(end_b)) / 2.0
@@ -358,7 +358,6 @@ class StepExtractor:
 
             if key in seen:
                 idx = seen[key]
-                rejected_dup += 1
                 if face_depth > holes[idx].depth:
                     holes[idx] = StepHole(end_a, end_b, r_a, r_b, (ax, ay, az))
                 continue
@@ -366,9 +365,7 @@ class StepExtractor:
             seen[key] = len(holes)
             holes.append(StepHole(end_a, end_b, r_a, r_b, (ax, ay, az)))
 
-        pre_merge_count = len(holes)
         holes = _merge_half_faces(holes)
-        post_half_face_count = len(holes)
         holes = _merge_counterbores(holes)
         
         self._step_holes_cache = holes
@@ -494,5 +491,4 @@ class StepExtractor:
             return (0, -round(hh.display_y / 5.0), hh.display_x)
 
         result.sort(key=_sort_key)
-        for i, h in enumerate(result): h._id = i + 1
         return result

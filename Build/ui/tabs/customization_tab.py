@@ -1,5 +1,12 @@
 # ui/tabs/customization_tab.py
-# v02
+# v03
+#
+# CHANGELOG (v03 -- dead-code cleanup, no behavior change):
+#   Removed two commented-out `# ax3d.view_init(elev=90, azim=-90)` lines
+#   (one per branch: with-hole and no-hole). These were leftover disabled
+#   code from an earlier camera-angle experiment, never executed, and sat
+#   directly above the active `ax3d.view_init(elev=-130, azim=67.5)` call
+#   with no explanatory value beyond it.
 #
 # CHANGELOG (v02):
 #   Bug Fix — 3D view hole numbers didn't match the right-sidebar / 2D
@@ -463,7 +470,6 @@ class CustomizationTab:
                 + (' [STEP]' if has_step_hole else ' [Mesh]')
                 + rot_tag + zigzag_tag + probe_tag
             )
-            # ax3d.view_init(elev=90, azim=-90)
             ax3d.view_init(elev=-130, azim=67.5)
 
             hole_z_mid = (z_start + star_z) / 2.0
@@ -477,7 +483,6 @@ class CustomizationTab:
 
         else:
             title_str = "Customization — Select a hole to show probing path"
-            # ax3d.view_init(elev=90, azim=-90)
             ax3d.view_init(elev=-130, azim=67.5)
 
             ax3d.set_xlim([cx - half, cx + half])

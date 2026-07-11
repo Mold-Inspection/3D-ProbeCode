@@ -1,5 +1,15 @@
 # ui/main_window.py
-# VERSION: 06
+# VERSION: 07
+# CHANGE LOG (v07 -- dead-code cleanup, no behavior change):
+#   - Removed unused `import os` — never referenced anywhere in this file.
+#   - Removed unused `self.marked_points = []` — initialized in __init__,
+#     never read or appended to anywhere else in the file.
+#   NOTE: get_holes_for_inspection() is left in place even though nothing
+#   in the currently attached files calls it — the Path Mapper tab's
+#   placeholder roadmap ("Import G38.2 Log File", "Deviation Report")
+#   suggests a future G-code export feature is the intended caller.
+#   Removing public API on that assumption alone carries more risk than
+#   leaving it, so it's flagged here rather than deleted.
 # CHANGE LOG (v01):
 #   - Right sidebar split into "Selected Holes" / "Unselected Holes"
 #     sections (unselected = rejected STEP candidates, now surfaced by
@@ -107,7 +117,6 @@
 #     ValueError (cad_loader.py v01) and show a popup instead of
 #     crashing, in case a non-STEP file reaches this call some other way.
 import customtkinter as ctk
-import os
 import numpy as np
 import tkinter.messagebox as _mb
 from matplotlib.figure import Figure
@@ -126,7 +135,6 @@ class UIManager:
         self.geo = geometry_engine
 
         # --- State ---
-        self.marked_points      = []
         self.current_view       = 'Top'
         self.screen_rotation    = 0
         self.scatter_holes      = None
