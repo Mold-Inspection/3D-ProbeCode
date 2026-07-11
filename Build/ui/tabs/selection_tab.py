@@ -1,6 +1,13 @@
 # ui/tabs/selection_tab.py
-# VERSION: 03
-# CHANGE LOG:
+# VERSION: 01
+# CHANGE LOG (v01 -- dead-code cleanup, no behavior change):
+#   - Removed unused import `from core.models import HoleFeature` — never
+#     referenced anywhere in this file.
+#   - Removed `self._hover_local_idx` — set in highlight_hole(), reset to
+#     None in clear_hole_highlight() and update_plot(), but never read
+#     anywhere. Write-only tracking variable with no observable effect.
+#
+# --- retained from prior header (unchanged content below) ---
 #   v01: BUG FIX — removed the duplicate mesh-depth occlusion filter that
 #        had been added inside update_plot(). True hole visibility is now
 #        determined ONCE, correctly, via ray-cast occlusion in
@@ -36,7 +43,6 @@
 #        each marker on the canvas identical to that hole's number in the
 #        Selected Holes sidebar section.
 import numpy as np
-from core.models import HoleFeature
 
 
 class SelectionTab:
@@ -48,7 +54,6 @@ class SelectionTab:
         self.MAX_PINS = 10
 
         # v02: hover-feedback state
-        self._hover_local_idx           = None
         self._unselected_marker_artists = []
 
     def setup_events(self):
@@ -123,14 +128,12 @@ class SelectionTab:
                 colors[sel_local] = 'yellow'
         colors[local_idx] = 'yellow'
         app.scatter_holes.set_facecolors(colors)
-        self._hover_local_idx = local_idx
         app.canvas.draw_idle()
 
     def clear_hole_highlight(self):
         """Revert the hover highlight, keeping the click-selection color
         (if any) intact."""
         app = self.app
-        self._hover_local_idx = None
         if app.current_tab != "Selection" or not app.scatter_holes:
             return
 
@@ -369,7 +372,6 @@ class SelectionTab:
         self._pinned_annotations = []
         self._pin_markers        = []
         self._unselected_marker_artists = []   # v02: stale after ax.clear()
-        self._hover_local_idx    = None        # v02: stale after ax.clear()
 
         app.ax.clear()
         if hasattr(app, 'cax') and app.cax is not None:

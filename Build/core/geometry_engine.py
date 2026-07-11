@@ -1,4 +1,14 @@
 # core/geometry_engine.py
+# VERSION: 01
+# CHANGE LOG (v01):
+#   Dead-code cleanup — removed MoldGeometry.triangles and
+#   MoldGeometry._step_holes_cache. Both were written in load_file() but
+#   never read anywhere: no file in core/* or ui/* accesses geo.triangles
+#   (UI code uses app.current_triangles / view-tuple returns instead), and
+#   nothing reads geo._step_holes_cache (selection_tab.py reads
+#   geo.extractor._step_holes_cache instead, which extractor.extract()
+#   already populates on its own). extractor.extract() is still called for
+#   its side effect of populating that cache.
 import numpy as np
 
 from core.cad_loader import CADLoader
@@ -17,22 +27,17 @@ class MoldGeometry:
         self.planner   = PathPlanner()
 
         self.mesh             = None
-        self.triangles        = None
         self.step_data        = None
         self._mesh_centroid   = np.zeros(3)
-        self._step_holes_cache = []
 
         if filepath:
             self.load_file(filepath)
 
     def load_file(self, filepath):
         self.mesh, self.step_data, self._mesh_centroid = self.loader.load(filepath)
-        self.triangles = self.mesh.faces
         self.projector.update_mesh(self.mesh)
         if self.step_data:
-            self._step_holes_cache = self.extractor.extract(self.step_data, self._mesh_centroid)
-        else:
-            self._step_holes_cache = []
+            self.extractor.extract(self.step_data, self._mesh_centroid)
 
     def get_physical_dimensions(self):
         return self.mesh.extents if self.mesh is not None else (0, 0, 0)

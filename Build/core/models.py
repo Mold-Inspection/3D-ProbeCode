@@ -1,10 +1,10 @@
 # core/models.py
 # VERSION: 01
 # CHANGE LOG (v01):
-#   Added is_rejected / reject_reason / position_unknown to HoleFeature so
-#   depth/occlusion-rejected STEP hole candidates (previously silently
-#   dropped in step_extractor.get_step_holes_in_view) can be listed in a
-#   separate "Unselected Holes" section in the UI instead of vanishing.
+#   Dead-code cleanup — removed StepHole.cx_mesh/cy_mesh/cz_mesh. These were
+#   computed from the open/deep midpoint but never read anywhere in core/*
+#   or ui/*; all position lookups go through display_x/display_y/
+#   depth_top/depth_bot instead.
 import numpy as np
 
 class HoleFeature:
@@ -42,11 +42,6 @@ class StepHole:
         self.radius      = float(radius_open)   # สำหรับใช้งานร่วมกับระบบเดิม
         self.axis        = axis_vec
         self.depth       = float(np.linalg.norm(np.array(deep_3d) - np.array(open_3d)))
-
-        mid = (np.array(open_3d) + np.array(deep_3d)) / 2.0
-        self.cx_mesh = float(mid[0])
-        self.cy_mesh = float(mid[1])
-        self.cz_mesh = float(mid[2])
 
         self.display_x = None
         self.display_y = None
