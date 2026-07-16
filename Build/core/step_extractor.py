@@ -1,5 +1,37 @@
 # core/step_extractor.py
-# VERSION: 18
+# VERSION: 19
+#
+# CHANGE LOG (v18 -> v19):
+#   FEATURE: TORUS faces are now extracted as holes, alongside CYLINDER
+#   and CONE.
+#     - geom_type filter now accepts 'CYLINDER', 'CONE', 'TORUS'.
+#     - New analytical branch for TORUS (mirrors the CYLINDER branch):
+#       pulls gp_Torus from BRepAdaptor_Surface (MajorRadius/MinorRadius/
+#       Axis), then samples the face's edges/vertices and, for EACH
+#       sample point, computes both its axial coordinate (projection onto
+#       the main axis) and its LOCAL radius (perpendicular distance from
+#       the axis). This matters because — unlike a cylinder — a torus
+#       does NOT have a constant radius along its axis: at the "equator"
+#       of the tube the local radius is (R + r), at the innermost point
+#       it's (R - r). Using per-sample local radius instead of one shared
+#       radius keeps radius_open / radius_deep faithful to the actual
+#       surface instead of distorting a cone-like taper onto a torus.
+#     - The two axial extremes (min/max projected sample) become
+#       end_a/end_b exactly as in the CYLINDER branch, each keeping its
+#       own local radius as r_a/r_b. This flows into the existing
+#       StepHole(open_3d, deep_3d, radius_open, radius_deep, axis)
+#       constructor unchanged — no changes needed elsewhere (models.py,
+#       _merge_half_faces, _merge_counterbores, get_step_holes_in_view,
+#       view filtering) since they already tolerate differing
+#       open/deep radii (this path was built for CONE).
+#     - If the analytical gp_Torus path fails for any reason, execution
+#       falls through to the existing generic circle-edge fallback
+#       (unchanged) — same safety net CONE already relies on.
+#   NOTE: no fillet-vs-real-hole filtering was added — a small-tube-radius
+#   TORUS face (typical of a rounded hole mouth) is currently counted the
+#   same as a real toroidal groove/bore. _MIN_TORUS_TUBE_RADIUS is left
+#   as a documented, unused-by-default hook below in case fillets start
+#   showing up as false-positive "holes" in testing.
 #
 # CHANGE LOG (v17 -> v18):
 #   Dead-code cleanup only, no behavior change:
@@ -87,6 +119,12 @@ _MAX_RADIUS_RATIO  = 1.2
 _COAXIAL_PERP_TOL   = 0.3   
 _COAXIAL_PERP_FRAC  = 0.15  
 _COAXIAL_GAP_TOL    = 1.5   
+
+# v19: NOT applied by default — documented hook only. If small-fillet
+# TORUS faces start appearing as false-positive "holes", uncomment the
+# guard inside extract()'s TORUS branch that checks
+# `r_minor < _MIN_TORUS_TUBE_RADIUS` and `continue`s past them.
+_MIN_TORUS_TUBE_RADIUS = 2.0
 
 def _sweep_angle(edge) -> float:
     arc_len = edge.Length()
@@ -228,12 +266,13 @@ class StepExtractor:
         for face in step_data.faces().vals():
             total_faces += 1
             geom_type = face.geomType()
-            
-            if geom_type not in ('CYLINDER', 'CONE'):
+
+            # v19: TORUS added alongside CYLINDER/CONE
+            if geom_type not in ('CYLINDER', 'CONE', 'TORUS'):
                 continue
 
             analytical_success = False
-            
+
             # V17: PURE ANALYTICAL SURFACE EXTRACTION (ดึงสมการจากคณิตศาสตร์ B-Rep)
             if geom_type == 'CYLINDER':
                 try:
@@ -290,7 +329,91 @@ class StepExtractor:
                 except Exception as e:
                     _dbg(f"Analytical extraction failed face#{total_faces}: {e!r}")
 
-            # FALLBACK: ถ้าดึงสมการพลาด (หรือเป็น CONE) จะกลับมาใช้วิธีหาเส้นวงกลม (Edge)
+            # v19: ANALYTICAL TORUS EXTRACTION
+            # A torus does NOT have a constant radius along its axis like a
+            # cylinder does, so we cannot reuse a single r_a=r_b value. For
+            # every sampled point on the face we compute BOTH its axial
+            # position (projection onto the main axis) and its own local
+            # radius (perpendicular distance from the axis). The two axial
+            # extremes become end_a/end_b, each carrying its own local
+            # radius as r_a/r_b — this then flows into the same
+            # StepHole(open, deep, radius_open, radius_deep, axis)
+            # constructor already used for CONE, so no downstream code
+            # (merging, view filtering, UI) needs to change.
+            elif geom_type == 'TORUS':
+                try:
+                    try:
+                        from OCP.BRepAdaptor import BRepAdaptor_Surface
+                        adaptor = BRepAdaptor_Surface(face.wrapped)
+                    except ImportError:
+                        from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
+                        adaptor = BRepAdaptor_Surface(face.wrapped)
+
+                    tor = adaptor.Torus()
+                    ax1 = tor.Axis()          # main revolution axis of the torus
+                    loc = ax1.Location()
+                    d   = ax1.Direction()
+
+                    c0 = np.array([loc.X() - cx_off, loc.Y() - cy_off, loc.Z() - cz_off])
+                    axis_vec = np.array([d.X(), d.Y(), d.Z()])
+                    ax_norm = np.linalg.norm(axis_vec)
+                    if ax_norm < 1e-6: raise ValueError("Degenerate torus axis")
+                    axis_vec = axis_vec / ax_norm
+
+                    R_major = float(tor.MajorRadius())
+                    r_minor = float(tor.MinorRadius())
+
+                    # Optional fillet guard (disabled by default — see
+                    # _MIN_TORUS_TUBE_RADIUS docstring above):
+                    # if r_minor < _MIN_TORUS_TUBE_RADIUS:
+                    #     raise ValueError(f"Tube radius {r_minor:.2f} looks like a fillet, skipping")
+
+                    samples = []  # (axial_coord, local_radius_at_that_point)
+                    for f_edge in face.Edges():
+                        for t in (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0):
+                            try:
+                                pt = f_edge.positionAt(t)
+                                vec = np.array([pt.x - cx_off, pt.y - cy_off, pt.z - cz_off]) - c0
+                                axial    = float(np.dot(vec, axis_vec))
+                                perp_vec = vec - axial * axis_vec
+                                perp_r   = float(np.linalg.norm(perp_vec))
+                                samples.append((axial, perp_r))
+                            except: pass
+
+                    if not samples:
+                        for v in face.Vertices():
+                            try:
+                                pt = v.Center() if hasattr(v, 'Center') else v.toTuple()
+                                if isinstance(pt, tuple):
+                                    vec = np.array([pt[0] - cx_off, pt[1] - cy_off, pt[2] - cz_off]) - c0
+                                else:
+                                    vec = np.array([pt.x - cx_off, pt.y - cy_off, pt.z - cz_off]) - c0
+                                axial    = float(np.dot(vec, axis_vec))
+                                perp_vec = vec - axial * axis_vec
+                                perp_r   = float(np.linalg.norm(perp_vec))
+                                samples.append((axial, perp_r))
+                            except: pass
+
+                    if not samples: raise ValueError("No edge/vertex samples found on torus face")
+
+                    samples.sort(key=lambda s: s[0])
+                    min_axial, r_at_min = samples[0]
+                    max_axial, r_at_max = samples[-1]
+
+                    face_depth = max_axial - min_axial
+                    end_a = tuple(c0 + min_axial * axis_vec)
+                    end_b = tuple(c0 + max_axial * axis_vec)
+                    r_a, r_b = r_at_min, r_at_max
+                    ax, ay, az = axis_vec
+                    analytical_success = True
+                    _dbg(f"TORUS ANALYTICAL SUCCESS face#{total_faces}: "
+                         f"depth={face_depth:.2f} R={R_major:.2f} r_tube={r_minor:.2f} "
+                         f"r_open={r_a:.2f} r_deep={r_b:.2f}")
+                except Exception as e:
+                    _dbg(f"Torus analytical extraction failed face#{total_faces}: {e!r}")
+
+            # FALLBACK: ถ้าดึงสมการพลาด (หรือเป็น CONE, หรือ TORUS ที่ดึงสมการไม่สำเร็จ)
+            # จะกลับมาใช้วิธีหาเส้นวงกลม (Edge) — เหมือนเดิม ไม่แก้
             if not analytical_success:
                 raw_circle_edges = [e for e in face.Edges() if e.geomType() == 'CIRCLE']
                 if len(raw_circle_edges) < 1:
