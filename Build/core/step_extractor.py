@@ -1,5 +1,104 @@
 # core/step_extractor.py
-# VERSION: 19
+# VERSION: 23
+#
+# CHANGE LOG (v22 -> v23):
+#   BUG FIX: SPHERE hole's "open" end (rim/mouth) reported too deep into
+#   the part (e.g. 20.36 mm depth reported vs. the true 30.00 mm).
+#     Root cause: a trimmed spherical face's edge loop contains not only
+#     the real rim boundary edge(s), but also, for periodic (>180° swept)
+#     caps, an internal SEAM_CURVE — CadQuery/OCC's UV-periodicity seam
+#     for the sphere's parametrization. Geometrically this seam is ALSO a
+#     'CIRCLE' edge, but it's a full great circle that runs from the pole
+#     straight out to the rim, with radius == the sphere's own radius R.
+#     The old code sampled `for f_edge in face.Edges(): ...` with no
+#     filter, so seam-edge points (whose perpendicular distance from the
+#     axis ranges from 0 at the pole up to the rim radius) got mixed into
+#     the same average used for BOTH radius_open and the axial height
+#     used to build rim_center (open_3d). That pulled rim_center's height
+#     toward the pole — i.e. deeper into the part — and dragged
+#     radius_open down, below the true rim radius.
+#     Verified directly against smooth_perfect_bowl_mold.step: the face's
+#     edge loop is (#379, #380, #384); #379/#380 are the true rim at
+#     r=67.082mm, #384 is explicitly a SEAM_CURVE at r=90mm (== sphere R).
+#     With the seam excluded, R=90 and r_rim=67.082 give the analytically
+#     exact depth R - sqrt(R^2 - r_rim^2) = 30.00 mm.
+#     Fix: rim sampling now only accepts CIRCLE edges whose radius is
+#     meaningfully smaller than the sphere's own radius R (radius < R -
+#     tolerance). A genuine latitude/rim edge is always strictly smaller
+#     than R (equal only in the degenerate case of an exact hemisphere,
+#     which the old center-offset heuristic couldn't disambiguate either
+#     — not a concern here). A seam/meridian edge, passing through the
+#     sphere's own center, is always exactly radius R and is now skipped.
+#     Falls back to the existing vertex-sampling path if zero qualifying
+#     rim edges are found, same safety net as before.
+#
+# CHANGE LOG (v21 -> v22):
+#   BUG FIX: Total hole depth read too shallow (e.g. 20.36 mm reported vs
+#   30 mm true), with the "open" end of the hole appearing deeper into
+#   the part than the real surface.
+#     Root cause: `_merge_counterbores()` only ran a SINGLE pass over all
+#     hole pairs. This correctly merges a simple 2-segment composite hole
+#     (e.g. one counterbore + one main bore, or a straight cylindrical
+#     shank sitting on a spherical ball-nose bottom), but for a CHAIN of
+#     3+ coaxial segments (e.g. entrance chamfer -> cylindrical shank ->
+#     spherical tip), a single pass only performs one merge: segment A
+#     merges into B, but the newly-combined A+B was never re-checked
+#     against C within that same call — C was silently left behind as
+#     its own separate, too-shallow StepHole. Since the shallowest
+#     surviving segment (e.g. the sphere-to-cylinder transition circle)
+#     then gets reported as the hole's `open_3d`, the tool appeared to
+#     start measuring from partway down the real hole instead of from
+#     the true part surface, undercounting total depth by whatever the
+#     un-merged segment's length was.
+#     Fix: `_merge_counterbores()` now repeats full merge passes until
+#     one pass completes with zero merges (fixed-point iteration),
+#     instead of returning after exactly one pass. A simple 2-segment
+#     hole still resolves on the first pass exactly as before; chains of
+#     any length now fully collapse into a single continuous StepHole.
+#
+# CHANGE LOG (v20 -> v21):
+#   BUG FIX: Spherical-cap hole marker drifted off the dome's true visual
+#   center in the UI.
+#     Root cause: the SPHERE branch's rim_center was computed as a plain
+#     arithmetic mean of sampled 3D rim points. A cap's rim is almost
+#     always a single CLOSED circular edge, and for a closed edge
+#     positionAt(0.0) == positionAt(1.0) (same point). Our sample set
+#     t=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0) therefore double-weighted
+#     whichever point sits at that seam while every other angle around
+#     the circle was sampled once — pulling the raw-position average
+#     sideways toward the duplicated point instead of landing on the
+#     true circle center.
+#     Fix: rim_center is now rebuilt analytically ON the axis using only
+#     the scalar axial projection average (h_avg = mean of proj_len,
+#     rim_center = c0 + h_avg*axis_vec) instead of averaging raw 3D
+#     positions. A duplicated sample shares the same axial value as its
+#     twin, so it only reduces noise in a scalar average — it can no
+#     longer bias direction. This mirrors how deep_3d (the pole) was
+#     already built analytically rather than from a raw sample average.
+#     radius_open's perpendicular-distance averaging was NOT affected by
+#     this bug (a duplicated point has the same radius as its twin, so
+#     magnitude was already unbiased) — only rim_center's position needed
+#     the fix.
+#
+# CHANGE LOG (v19 -> v20):
+#   FEATURE: SPHERE faces are now extracted as holes (spherical-cap
+#   recesses/dimples), alongside CYLINDER, CONE, TORUS.
+#     - A sphere has no inherent axis; axis is derived from the trimmed
+#       face's centroid relative to the sphere center, which reliably
+#       points toward the cap's pole.
+#     - deep_3d is set analytically to the pole point (center + R*axis) —
+#       always exactly on the sphere surface — with radius_deep = 0.0,
+#       matching the existing CONE-tip convention.
+#     - open_3d is the sampled rim centroid; radius_open is the rim's
+#       perpendicular distance from the pole axis.
+#     - Falls through to the existing circle-edge fallback on failure,
+#       same safety net as CONE/TORUS.
+#     - Added disabled-by-default _MIN_SPHERE_CAP_RADIUS hook to filter
+#       spherical fillets, since these are far more common than cylinder/
+#       torus fillets in typical STEP models.
+#     - No downstream changes needed: StepHole/models.py/path_planner.py/
+#       projector.py/geometry_engine.py/UI tabs already tolerate differing
+#       open/deep radii (built for CONE, reused by TORUS, now SPHERE).
 #
 # CHANGE LOG (v18 -> v19):
 #   FEATURE: TORUS faces are now extracted as holes, alongside CYLINDER
@@ -126,6 +225,13 @@ _COAXIAL_GAP_TOL    = 1.5
 # `r_minor < _MIN_TORUS_TUBE_RADIUS` and `continue`s past them.
 _MIN_TORUS_TUBE_RADIUS = 2.0
 
+# v20: NOT applied by default — documented hook only, same pattern as
+# _MIN_TORUS_TUBE_RADIUS. Small ball-corner fillets are frequently modeled
+# as SPHERE faces; if they start appearing as false-positive "holes",
+# uncomment the guard inside extract()'s SPHERE branch that checks
+# `R < _MIN_SPHERE_CAP_RADIUS` and `continue`s past them.
+_MIN_SPHERE_CAP_RADIUS = 2.0
+
 def _sweep_angle(edge) -> float:
     arc_len = edge.Length()
     if arc_len <= 0: return 0.0
@@ -183,72 +289,95 @@ def _merge_half_faces(holes: list) -> list:
     return result
 
 def _merge_counterbores(holes: list) -> list:
+    # v22 FIX: iterate to a fixed point instead of a single O(n^2) pass.
+    # A single pass correctly merges a simple 2-segment hole (e.g. one
+    # counterbore + one main bore, or one cylindrical shank + one
+    # spherical ball-nose bottom), but a CHAIN of 3+ coaxial segments
+    # (e.g. entrance chamfer -> straight cylindrical shank -> spherical
+    # tip) was only getting ONE merge per pass: segment A merges into B,
+    # but the resulting combined A+B was never re-checked against C in
+    # the same call, silently leaving C as its own separate, too-shallow
+    # StepHole. That's what produced hole depths shorter than the true
+    # part depth, with the reported "open" end sitting deeper than the
+    # real surface — it was actually the boundary between two segments
+    # that never got stitched together. Repeating full passes until one
+    # produces zero merges resolves chains of any length; a simple
+    # 2-segment hole still merges in the first pass exactly as before.
     if not holes: return holes
-    merged_out = [False] * len(holes)
-    for i in range(len(holes)):
-        if merged_out[i]: continue
-        for j in range(len(holes)):
-            if i == j or merged_out[j]: continue
-            hi, hj = holes[i], holes[j]
-            dot = abs(float(np.dot(hi.axis, hj.axis)))
-            if dot < 1.0 - _AXIS_TOL: continue
+    current = holes
+    while True:
+        merged_out = [False] * len(current)
+        made_merge = False
 
-            axis   = np.array(hi.axis)
-            mid_i  = (np.array(hi.open_3d) + np.array(hi.deep_3d)) / 2.0
-            mid_j  = (np.array(hj.open_3d) + np.array(hj.deep_3d)) / 2.0
-            delta  = mid_j - mid_i
-            perp   = delta - float(np.dot(delta, axis)) * axis
-            perp_d = float(np.linalg.norm(perp))
+        for i in range(len(current)):
+            if merged_out[i]: continue
+            for j in range(len(current)):
+                if i == j or merged_out[j]: continue
+                hi, hj = current[i], current[j]
+                dot = abs(float(np.dot(hi.axis, hj.axis)))
+                if dot < 1.0 - _AXIS_TOL: continue
 
-            r_large = max(hi.radius_open, hj.radius_open)
-            r_small = min(hi.radius_open, hj.radius_open)
-            coaxial_threshold = max(_COAXIAL_PERP_TOL, r_small * _COAXIAL_PERP_FRAC)
-            is_coaxial = perp_d <= coaxial_threshold
+                axis   = np.array(hi.axis)
+                mid_i  = (np.array(hi.open_3d) + np.array(hi.deep_3d)) / 2.0
+                mid_j  = (np.array(hj.open_3d) + np.array(hj.deep_3d)) / 2.0
+                delta  = mid_j - mid_i
+                perp   = delta - float(np.dot(delta, axis)) * axis
+                perp_d = float(np.linalg.norm(perp))
 
-            if not is_coaxial and (perp_d + r_small >= r_large): continue
+                r_large = max(hi.radius_open, hj.radius_open)
+                r_small = min(hi.radius_open, hj.radius_open)
+                coaxial_threshold = max(_COAXIAL_PERP_TOL, r_small * _COAXIAL_PERP_FRAC)
+                is_coaxial = perp_d <= coaxial_threshold
 
-            proj  = lambda pt: float(np.dot(np.array(pt), axis))
-            seg_i = sorted([proj(hi.open_3d), proj(hi.deep_3d)])
-            seg_j = sorted([proj(hj.open_3d), proj(hj.deep_3d)])
-            gap   = max(seg_j[0] - seg_i[1], seg_i[0] - seg_j[1])
+                if not is_coaxial and (perp_d + r_small >= r_large): continue
 
-            gap_tol = _COAXIAL_GAP_TOL if is_coaxial else _STRICT_GAP_TOL
-            
-            # V17 CROSS-HOLE BRIDGE: ถ้ารูร่วมแกนและรัศมีเท่ากัน ให้ขยายระยะสะพานเชื่อมเป็น 50mm
-            if is_coaxial and abs(r_large - r_small) < 0.1 and perp_d < _COAXIAL_PERP_TOL:
-                extended_gap = max(gap_tol, r_large * 4.0, 50.0)
-                if gap_tol < extended_gap:
-                    _dbg(f"  CROSS-HOLE BRIDGE ACTIVATED: extending gap_tol from {gap_tol} to {extended_gap:.2f}")
-                    gap_tol = extended_gap
+                proj  = lambda pt: float(np.dot(np.array(pt), axis))
+                seg_i = sorted([proj(hi.open_3d), proj(hi.deep_3d)])
+                seg_j = sorted([proj(hj.open_3d), proj(hj.deep_3d)])
+                gap   = max(seg_j[0] - seg_i[1], seg_i[0] - seg_j[1])
 
-            if gap > gap_tol: continue
+                gap_tol = _COAXIAL_GAP_TOL if is_coaxial else _STRICT_GAP_TOL
 
-            if not is_coaxial:
-                radius_ratio = r_large / r_small if r_small > 0 else float('inf')
-                if radius_ratio > _MAX_RADIUS_RATIO: continue
+                # V17 CROSS-HOLE BRIDGE: ถ้ารูร่วมแกนและรัศมีเท่ากัน ให้ขยายระยะสะพานเชื่อมเป็น 50mm
+                if is_coaxial and abs(r_large - r_small) < 0.1 and perp_d < _COAXIAL_PERP_TOL:
+                    extended_gap = max(gap_tol, r_large * 4.0, 50.0)
+                    if gap_tol < extended_gap:
+                        _dbg(f"  CROSS-HOLE BRIDGE ACTIVATED: extending gap_tol from {gap_tol} to {extended_gap:.2f}")
+                        gap_tol = extended_gap
 
-            candidates = [
-                (hi.open_3d, proj(hi.open_3d), hi.radius_open),
-                (hi.deep_3d, proj(hi.deep_3d), hi.radius_deep),
-                (hj.open_3d, proj(hj.open_3d), hj.radius_open),
-                (hj.deep_3d, proj(hj.deep_3d), hj.radius_deep),
-            ]
-            candidates.sort(key=lambda c: c[1])
-            shallow_pt, _, shallow_r = candidates[0]
-            deep_pt,    _, deep_r    = candidates[-1]
-            new_depth = float(np.linalg.norm(np.array(deep_pt) - np.array(shallow_pt)))
-            if new_depth <= 1e-6: continue
+                if gap > gap_tol: continue
 
-            hi.open_3d     = tuple(shallow_pt)
-            hi.deep_3d     = tuple(deep_pt)
-            hi.radius_open = float(shallow_r)
-            hi.radius_deep = float(deep_r)
-            hi.radius      = float(shallow_r)
-            hi.depth       = new_depth
-            merged_out[j]  = True
+                if not is_coaxial:
+                    radius_ratio = r_large / r_small if r_small > 0 else float('inf')
+                    if radius_ratio > _MAX_RADIUS_RATIO: continue
+
+                candidates = [
+                    (hi.open_3d, proj(hi.open_3d), hi.radius_open),
+                    (hi.deep_3d, proj(hi.deep_3d), hi.radius_deep),
+                    (hj.open_3d, proj(hj.open_3d), hj.radius_open),
+                    (hj.deep_3d, proj(hj.deep_3d), hj.radius_deep),
+                ]
+                candidates.sort(key=lambda c: c[1])
+                shallow_pt, _, shallow_r = candidates[0]
+                deep_pt,    _, deep_r    = candidates[-1]
+                new_depth = float(np.linalg.norm(np.array(deep_pt) - np.array(shallow_pt)))
+                if new_depth <= 1e-6: continue
+
+                hi.open_3d     = tuple(shallow_pt)
+                hi.deep_3d     = tuple(deep_pt)
+                hi.radius_open = float(shallow_r)
+                hi.radius_deep = float(deep_r)
+                hi.radius      = float(shallow_r)
+                hi.depth       = new_depth
+                merged_out[j]  = True
+                made_merge      = True
+                break
+
+        current = [h for i, h in enumerate(current) if not merged_out[i]]
+        if not made_merge:
             break
-    result = [h for i, h in enumerate(holes) if not merged_out[i]]
-    return result
+
+    return current
 
 class StepExtractor:
     def __init__(self):
@@ -267,8 +396,8 @@ class StepExtractor:
             total_faces += 1
             geom_type = face.geomType()
 
-            # v19: TORUS added alongside CYLINDER/CONE
-            if geom_type not in ('CYLINDER', 'CONE', 'TORUS'):
+            # v20: SPHERE added alongside CYLINDER/CONE/TORUS
+            if geom_type not in ('CYLINDER', 'CONE', 'TORUS', 'SPHERE'):
                 continue
 
             analytical_success = False
@@ -412,7 +541,174 @@ class StepExtractor:
                 except Exception as e:
                     _dbg(f"Torus analytical extraction failed face#{total_faces}: {e!r}")
 
-            # FALLBACK: ถ้าดึงสมการพลาด (หรือเป็น CONE, หรือ TORUS ที่ดึงสมการไม่สำเร็จ)
+            # v20: ANALYTICAL SPHERE EXTRACTION (spherical-cap holes)
+            # A sphere has no inherent axis — every direction through its
+            # center is equivalent. The axis we need only exists because
+            # the FACE is a trimmed cap: the rim (boundary edges) defines
+            # a circle whose center lies on the cap's symmetry axis.
+            #   - axis_vec: sphere center -> face centroid, this reliably
+            #     points toward the cap's far side (the pole).
+            #   - deep_3d (pole) = center + radius * axis_vec — this is
+            #     analytically exact (always lies ON the sphere), not a
+            #     sampled approximation. radius_deep = 0.0, same
+            #     "point at the tip" convention already used for CONE.
+            #   - open_3d = centroid of sampled rim points (real sampled
+            #     boundary, not derived).
+            #   - radius_open = perpendicular distance of rim points from
+            #     the pole axis line through the center.
+            elif geom_type == 'SPHERE':
+                try:
+                    try:
+                        from OCP.BRepAdaptor import BRepAdaptor_Surface
+                        adaptor = BRepAdaptor_Surface(face.wrapped)
+                    except ImportError:
+                        from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
+                        adaptor = BRepAdaptor_Surface(face.wrapped)
+
+                    sph = adaptor.Sphere()
+                    loc = sph.Location()
+                    R   = float(sph.Radius())
+
+                    c0 = np.array([loc.X() - cx_off, loc.Y() - cy_off, loc.Z() - cz_off])
+
+                    # v23 FIX: a trimmed spherical face's edge loop can
+                    # include an internal SEAM_CURVE (the UV-periodicity
+                    # seam), not just the true rim boundary. Geometrically
+                    # the seam is ALSO a 'CIRCLE' edge, but it's a great
+                    # circle running from the pole out to the rim, with
+                    # radius exactly equal to the sphere's own radius R —
+                    # a genuine latitude/rim edge is always strictly
+                    # smaller than R. Sampling the seam alongside the real
+                    # rim silently pulled both radius_open and the axial
+                    # height of open_3d toward the pole (too deep).
+                    # Filter: only accept CIRCLE edges with radius clearly
+                    # < R as rim candidates; skip the seam.
+                    _SEAM_RADIUS_TOL = max(R * 1e-4, 1e-3)
+
+                    def _edge_radius(e):
+                        try:
+                            r = e.radius()
+                            return float(r) if r else None
+                        except Exception:
+                            return None
+
+                    rim_edges = []
+                    seam_skipped = 0
+                    for f_edge in face.Edges():
+                        if f_edge.geomType() != 'CIRCLE':
+                            continue
+                        er = _edge_radius(f_edge)
+                        if er is None:
+                            continue
+                        if er >= R - _SEAM_RADIUS_TOL:
+                            seam_skipped += 1
+                            continue
+                        rim_edges.append(f_edge)
+
+                    if seam_skipped:
+                        _dbg(f"  face#{total_faces}: skipped {seam_skipped} "
+                             f"seam/meridian edge(s) (radius≈R={R:.3f}) "
+                             f"from sphere rim sampling")
+
+                    # Sample the true rim (boundary) edges only.
+                    rim_pts = []
+                    for f_edge in rim_edges:
+                        for t in (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0):
+                            try:
+                                pt = f_edge.positionAt(t)
+                                rim_pts.append(np.array(
+                                    [pt.x - cx_off, pt.y - cy_off, pt.z - cz_off]))
+                            except: pass
+
+                    if not rim_pts:
+                        for v in face.Vertices():
+                            try:
+                                pt = v.Center() if hasattr(v, 'Center') else v.toTuple()
+                                if isinstance(pt, tuple):
+                                    rim_pts.append(np.array(
+                                        [pt[0] - cx_off, pt[1] - cy_off, pt[2] - cz_off]))
+                                else:
+                                    rim_pts.append(np.array(
+                                        [pt.x - cx_off, pt.y - cy_off, pt.z - cz_off]))
+                            except: pass
+
+                    if not rim_pts: raise ValueError("No rim samples found on sphere face")
+
+                    # Axis direction: prefer the face's own centroid (biased
+                    # toward the cap's far side incl. the pole) over the rim
+                    # centroid, since a shallow cap's rim centroid sits close
+                    # to the equatorial plane and is a noisier axis estimate.
+                    try:
+                        fc = face.Center()
+                        face_centroid = np.array(
+                            [fc.x - cx_off, fc.y - cy_off, fc.z - cz_off])
+                    except Exception:
+                        face_centroid = np.mean(rim_pts, axis=0)
+
+                    axis_raw  = face_centroid - c0
+                    axis_norm = np.linalg.norm(axis_raw)
+                    if axis_norm < 1e-6: raise ValueError("Degenerate sphere cap axis")
+                    axis_vec  = axis_raw / axis_norm
+                    ax, ay, az = axis_vec
+
+                    # Analytical pole = deepest point of the cap, always on
+                    # the sphere surface exactly.
+                    pole_pt = c0 + R * axis_vec
+
+                    # v21 FIX: rim_center is now rebuilt analytically ON the
+                    # axis, instead of averaging raw sampled 3D positions.
+                    # A spherical-cap rim is (almost always) ONE closed
+                    # circular edge, and for a closed edge positionAt(0.0)
+                    # and positionAt(1.0) are the SAME point — our sample
+                    # set (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0) therefore
+                    # double-weights whichever point sits at that seam,
+                    # while the rest of the circle is sampled once each.
+                    # Averaging raw positions directly (old code) pulled
+                    # the centroid sideways toward that duplicated point —
+                    # this is what caused the hole marker to drift off the
+                    # dome's true visual center. A scalar axial average is
+                    # immune to this: every rim point shares (almost) the
+                    # same projection onto axis_vec regardless of angular
+                    # sampling density, so duplicates only reduce noise,
+                    # never bias direction. Rebuilding the point from
+                    # c0 + h_avg*axis_vec guarantees it lands exactly on
+                    # the symmetry axis, mirroring how deep_3d (the pole)
+                    # is already built analytically rather than sampled.
+                    rim_arr    = np.array(rim_pts)
+                    rel        = rim_arr - c0
+                    proj_len   = rel @ axis_vec
+                    perp_vecs  = rel - np.outer(proj_len, axis_vec)
+
+                    h_avg      = float(np.mean(proj_len))
+                    rim_center = c0 + h_avg * axis_vec
+
+                    # radius_open = perpendicular distance of rim points
+                    # from the pole axis line through the sphere center.
+                    # (unaffected by the seam-duplicate issue above — a
+                    # duplicated point has the same radius as its twin,
+                    # so it doesn't bias the magnitude, only direction.)
+                    r_open     = float(np.mean(np.linalg.norm(perp_vecs, axis=1)))
+                    r_deep     = 0.0  # pole is a single point, same as CONE tip
+
+                    end_a      = tuple(rim_center)
+                    end_b      = tuple(pole_pt)
+                    r_a, r_b   = r_open, r_deep
+                    face_depth = float(np.linalg.norm(pole_pt - rim_center))
+
+                    # Optional fillet guard (disabled by default — small
+                    # ball-corner fillets are very commonly modeled as
+                    # SPHERE faces and are NOT real holes). Enable if
+                    # fillets start showing up as false-positive "holes":
+                    # if R < _MIN_SPHERE_CAP_RADIUS:
+                    #     raise ValueError(f"Sphere radius {R:.2f} looks like a fillet, skipping")
+
+                    analytical_success = True
+                    _dbg(f"SPHERE ANALYTICAL SUCCESS face#{total_faces}: "
+                         f"depth={face_depth:.2f} R={R:.2f} r_open={r_a:.2f}")
+                except Exception as e:
+                    _dbg(f"Sphere analytical extraction failed face#{total_faces}: {e!r}")
+
+            # FALLBACK: ถ้าดึงสมการพลาด (หรือเป็น CONE, หรือ TORUS/SPHERE ที่ดึงสมการไม่สำเร็จ)
             # จะกลับมาใช้วิธีหาเส้นวงกลม (Edge) — เหมือนเดิม ไม่แก้
             if not analytical_success:
                 raw_circle_edges = [e for e in face.Edges() if e.geomType() == 'CIRCLE']

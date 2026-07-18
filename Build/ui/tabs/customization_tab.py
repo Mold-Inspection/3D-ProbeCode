@@ -1,63 +1,16 @@
 # ui/tabs/customization_tab.py
-# v03
-#
-# CHANGELOG (v03 -- dead-code cleanup, no behavior change):
-#   Removed two commented-out `# ax3d.view_init(elev=90, azim=-90)` lines
-#   (one per branch: with-hole and no-hole). These were leftover disabled
-#   code from an earlier camera-angle experiment, never executed, and sat
-#   directly above the active `ax3d.view_init(elev=-130, azim=67.5)` call
-#   with no explanatory value beyond it.
-#
-# CHANGELOG (v02):
-#   Bug Fix — 3D view hole numbers didn't match the right-sidebar / 2D
-#   canvas numbers after renumbering.
-#     Root cause: this file labelled holes using `h.id` (the internal,
-#     STABLE identity used only as a dict key in main_window.show_view()
-#     to persist checkbox/zigzag/layer state across view switches —
-#     see main_window.py v05 changelog on why hole.id is intentionally
-#     left untouched). The user-facing number is `h.display_id`, which
-#     is recomputed every time `_renumber_holes_by_category()` runs (on
-#     every "Select for Inspection" toggle). selection_tab.py's 2D
-#     canvas already switched to `h.display_id` in its own v03 — this
-#     file was the one place still showing the stale `id`, so the 3D
-#     view's numbers would drift out of sync with the sidebar and 2D
-#     canvas as soon as any hole was checked/unchecked.
-#     Fix:
-#       1. The per-hole text label drawn in the wireframe loop (this
-#          loop runs over ALL current_holes, selected and unselected,
-#          for spatial context) now reads `h.display_id`, and mirrors
-#          the sidebar's category convention: Selected holes show the
-#          plain number ("3"), Unselected holes show a "U"-prefixed
-#          number ("U3") — matching "Hole 3" / "Hole U3" in the sidebar.
-#       2. The 3D view's title bar ("Customization — Hole {id} ...")
-#          now reads `hole.display_id` instead of `hole.id`.
-#     No other logic changed: hole.id itself, selection indexing, and
-#     all geometry/path-planning code are untouched — this is a
-#     display-text-only fix.
-#
-# --- retained from v01 header (unchanged content below) ---
-#   Bug Fix #1 (main) — Hole-wall mask coordinate-frame mismatch.
-#     `tri_cz` (triangle-centroid Z) stayed in RAW rotated-Z space, while
-#     `h.bottom_z` / `r_z` (hole_top_z) are DEPTH-from-surface values — both
-#     STEP holes (sh.depth_top/depth_bot) and mesh-detected holes (fed from
-#     Projector's z_depth = surface_z - raw_z) already live in depth-space.
-#     Comparing a depth-space range against a raw-Z array silently mixed two
-#     coordinate frames. For Top view the raw-Z extent is just the part
-#     thickness so the bug was barely visible; for Front/Right views (e.g.
-#     Y-axis holes) the raw-Z extent becomes the part's full length, so the
-#     mask matched almost every triangle in the model → the chaotic
-#     wireframe seen in Customization.
-#     Fix: shift `tri_cz` into depth-space once (`- SURF_Z_GLOBAL`), and
-#     update the one boundary constant that referenced the old raw frame.
-#
-#   Bug Fix #2 (related, same bug family) — hole-number label Z position.
-#     `r_z` is already depth-space; subtracting SURF_Z_GLOBAL a second time
-#     pushed the label far outside the rendered model. Removed the extra
-#     subtraction so labels sit at the correct height.
+# VERSION: 07 (Fix Missing Toolpath Line)
+# CHANGELOG:
+#   - V07 BUG FIX: Restored the missing `px_list.append(star_z)` lines that were 
+#     accidentally removed during the V06 merge. The yellow dashed toolpath will 
+#     now correctly reach the bottom depth star again.
+#   - V06 UX: Unselected holes have 10% opacity in 3D to reduce visual clutter.
+#   - V06 UX: Hovering over items in the right sidebar highlights the hole in 3D.
 
 import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
+from mpl_toolkits.mplot3d import proj3d
 
 # Layer colours for Zigzag mode — 24 colours, cycling if more layers
 # Avoids yellow/gold shades to stay clear of the Tool Path / star marker
@@ -68,16 +21,9 @@ ZIGZAG_LAYER_COLORS = [
     '#1de9b6', '#ff8a65', '#ce93d8', '#80d8ff', '#a5d6a7', '#ef9a9a',
 ]
 
-
 def _layer_color(lidx: int) -> str:
     return ZIGZAG_LAYER_COLORS[lidx % len(ZIGZAG_LAYER_COLORS)]
 
-
-# -----------------------------------------------------------------------
-# View rotation table — mirrors projector.py _VIEW_ROTATIONS exactly.
-# After applying _VIEW_ROTATIONS, the observer looks down −Z, so an
-# additional screen_rotation is a pure Z-axis spin on top of that.
-# -----------------------------------------------------------------------
 _VIEW_ROTATIONS = {
     'Top':    (  0,  0,   0),
     'Bottom': (180,  0,   0),
@@ -87,30 +33,20 @@ _VIEW_ROTATIONS = {
     'Right':  (-90,  90,  0),
 }
 
-
 def _build_combined_matrix(view_name: str, screen_rot: int):
     """
     Return the combined 4×4 transform that matches what the Projector applies:
       1. Apply the view rotation (object rotated so the named face points up).
       2. Apply an additional Z-axis spin of `screen_rot` degrees (on-screen rotation).
-
-    This ensures the Customization 3-D scene is oriented identically to the
-    Selection 2-D canvas at all four rotation steps (0 / 90 / 180 / 270°).
     """
     rx, ry, rz = _VIEW_ROTATIONS.get(view_name, (0, 0, 0))
-    m_view = euler_matrix(*np.radians([rx, ry, rz]))          # sxyz order
-
+    m_view = euler_matrix(*np.radians([rx, ry, rz]))
     if screen_rot != 0:
-        # Pure Z rotation (right-hand, counter-clockwise when viewed from +Z)
-        m_scrn = euler_matrix(0, 0, np.radians(screen_rot))   # Z only
-        return m_scrn @ m_view   # screen rotation applied AFTER view rotation
+        m_scrn = euler_matrix(0, 0, np.radians(screen_rot))
+        return m_scrn @ m_view
     return m_view
 
-
 def _hole_display_label(h) -> str:
-    """v02: category-local display text matching the sidebar's convention
-    ("Hole 3" for Selected, "Hole U3" for Unselected) — shown compactly
-    here as "3" / "U3" since space is tight on the 3D wireframe."""
     did = getattr(h, 'display_id', getattr(h, 'id', '?'))
     if getattr(h, 'selected_for_inspection', False):
         return str(did)
@@ -120,6 +56,7 @@ def _hole_display_label(h) -> str:
 class CustomizationTab:
     def __init__(self, app):
         self.app = app
+        self._text_objects = {}
 
     def draw_cross_section(self):
         app = self.app
@@ -127,31 +64,23 @@ class CustomizationTab:
         app.cax = None
 
         has_mesh = app.geo.mesh is not None
-        has_hole = (app.selected_hole_idx is not None
-                    and len(app.current_holes) > 0)
+        has_hole = (app.selected_hole_idx is not None and len(app.current_holes) > 0)
 
         if not has_mesh:
             app.ax = app.fig.add_subplot(111, facecolor='#1e1e1e')
-            app.ax.set_title(
-                "Please upload a model and generate holes first.",
-                color="white", fontsize=15)
+            app.ax.set_title("Please upload a model and generate holes first.", color="white", fontsize=15)
             app.ax.set_axis_off()
             app.canvas.draw()
             return
 
         app.fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
-        ax3d     = app.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
-        app.ax   = ax3d
+        ax3d = app.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
+        app.ax = ax3d
+        self._text_objects = {}
 
-        # ------------------------------------------------------------------
-        # Build the combined rotation matrix that matches Selection canvas
-        # (view rotation  +  on-screen rotation around Z)
-        # ------------------------------------------------------------------
         screen_rot = app.screen_rotation
         _matrix    = _build_combined_matrix(app.current_view, screen_rot)
-
-        _rotated = trimesh.transformations.transform_points(
-            app.geo.mesh.vertices, _matrix)
+        _rotated = trimesh.transformations.transform_points(app.geo.mesh.vertices, _matrix)
 
         faces = app.geo.mesh.faces
         x3    = _rotated[:, 0]
@@ -178,16 +107,10 @@ class CustomizationTab:
         seg_z   = np.hstack([tz_m[:, [0, 1, 2, 0]], nan_col]).ravel()
 
         if not has_hole:
-            ax3d.plot(seg_x, seg_y, seg_z,
-                      color="#1f538d", linewidth=0.8, alpha=0.6)
+            ax3d.plot(seg_x, seg_y, seg_z, color="#1f538d", linewidth=0.8, alpha=0.6)
 
         tri_cx = x3[tris].mean(axis=1)
         tri_cy = y3[tris].mean(axis=1)
-        # v01 FIX (Bug #1): shift into depth-space so this matches the same
-        # frame as h.bottom_z / r_z (both already "depth from surface").
-        # Previously this stayed in raw rotated-Z space, which only happened
-        # to look OK for Top view (small Z-extent) and broke badly for
-        # Front/Right views where the raw-Z extent is the part's full length.
         tri_cz = z3[tris].mean(axis=1) - SURF_Z_GLOBAL
 
         xmin, xmax = float(np.min(x3)), float(np.max(x3))
@@ -203,18 +126,19 @@ class CustomizationTab:
             r_z    = getattr(h, 'hole_top_z', h.surface_z)
             is_sel = (i == app.selected_hole_idx)
 
-            # v01 FIX (Bug #2): r_z is already depth-space — no need to
-            # subtract SURF_Z_GLOBAL again. The previous double-subtraction
-            # pushed hole-number labels far outside the rendered model.
-            #
-            # v02 FIX: label text now uses the same category-local
-            # display_id the sidebar and 2D canvas use, instead of the
-            # stable-but-user-invisible h.id, so the number next to a hole
-            # here always matches the number shown for that same hole in
-            # the sidebar and Selection tab.
-            ax3d.text(h.x, h.y, r_z + half * 0.02,
-                      _hole_display_label(h), color='white', fontsize=7,
-                      ha='center', va='bottom')
+            is_selected_cat = getattr(h, 'selected_for_inspection', False)
+            base_alpha = 1.0 if is_selected_cat else 0.1
+            
+            txt = ax3d.text(h.x, h.y, r_z + half * 0.02,
+                            _hole_display_label(h), color='white', fontsize=7,
+                            ha='center', va='bottom', alpha=base_alpha)
+            
+            self._text_objects[i] = {
+                'text': txt,
+                'base_alpha': base_alpha,
+                'base_color': 'white',
+                'base_zorder': txt.get_zorder()
+            }
 
             if has_hole and not is_sel:
                 continue
@@ -223,13 +147,8 @@ class CustomizationTab:
             z_lo_h = min(h.bottom_z, r_z)
             z_hi_h = max(h.bottom_z, r_z) + 0.5
 
-            mask_wall = ((dist_h <= h.radius * 1.2) &
-                         (tri_cz >= z_lo_h - 0.3) & (tri_cz <= z_hi_h))
-            # v01 FIX (Bug #1, cont.): lower bound was `SURF_Z_GLOBAL - 0.5`,
-            # which was correct for the OLD raw-Z tri_cz. Now that tri_cz is
-            # depth-space, "near the surface" is simply depth ≈ 0.
-            mask_rim  = ((dist_h <= h.radius * 1.3) &
-                         (tri_cz >= -0.5) & (tri_cz < z_lo_h + 0.3))
+            mask_wall = ((dist_h <= h.radius * 1.2) & (tri_cz >= z_lo_h - 0.3) & (tri_cz <= z_hi_h))
+            mask_rim  = ((dist_h <= h.radius * 1.3) & (tri_cz >= -0.5) & (tri_cz < z_lo_h + 0.3))
             htris = tris[mask_wall | mask_rim]
 
             if len(htris) > 0 and is_sel:
@@ -239,24 +158,18 @@ class CustomizationTab:
                 hxs   = np.hstack([htx[:, [0, 1, 2, 0]], nan_h]).ravel()
                 hys   = np.hstack([hty[:, [0, 1, 2, 0]], nan_h]).ravel()
                 hzs   = np.hstack([htz[:, [0, 1, 2, 0]], nan_h]).ravel()
-                ax3d.plot(hxs, hys, hzs,
-                          color="white", linewidth=1.6, alpha=0.76,
-                          label='Selected Hole Mesh')
+                ax3d.plot(hxs, hys, hzs, color="white", linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
 
-        # --- Probe profile check ---
         probe_warn_lines = []
         probe_ok         = True
 
         if has_hole:
             hole_for_check = app.current_holes[app.selected_hole_idx]
             if hasattr(app, 'probe_profile') and app.probe_profile is not None:
-                chk      = app.probe_profile.check_hole(
-                    hole_for_check.depth, hole_for_check.radius)
+                chk = app.probe_profile.check_hole(hole_for_check.depth, hole_for_check.radius)
                 probe_ok = chk['ok']
-                if chk['depth_warning']:
-                    probe_warn_lines.append(chk['depth_warning'])
-                if chk['fit_warning']:
-                    probe_warn_lines.append(chk['fit_warning'])
+                if chk['depth_warning']: probe_warn_lines.append(chk['depth_warning'])
+                if chk['fit_warning']:   probe_warn_lines.append(chk['fit_warning'])
 
         if has_hole:
             hole       = app.current_holes[app.selected_hole_idx]
@@ -274,14 +187,11 @@ class CustomizationTab:
             dist_v = np.hypot(x3 - hole.x, y3 - hole.y)
             z_lo_v = min(raw_rim_z, raw_bot_z) - 2.0
             z_hi_v = max(raw_rim_z, raw_bot_z) + 2.0
-            vmask  = ((dist_v <= hole.radius * 1.6) &
-                      (z3 >= z_lo_v) & (z3 <= z_hi_v))
+            vmask  = ((dist_v <= hole.radius * 1.6) & (z3 >= z_lo_v) & (z3 <= z_hi_v))
             vx = x3[vmask]; vy = y3[vmask]; vz = z3[vmask]
 
-            has_step_hole = (hasattr(hole, '_step_hole') and
-                             hole._step_hole is not None and
-                             hasattr(app.geo, 'step_data') and
-                             app.geo.step_data is not None)
+            has_step_hole = (hasattr(hole, '_step_hole') and hole._step_hole is not None and
+                             hasattr(app.geo, 'step_data') and app.geo.step_data is not None)
 
             def dz(z_raw): return z_raw - SURF_Z_GLOBAL
 
@@ -311,32 +221,26 @@ class CustomizationTab:
                     lidx       = lyr.get('layer_idx', 0)
 
                     layer_centers[lidx] = (cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z)
-                    px_list.append(cx_lyr); py_list.append(cy_lyr)
-                    pz_list.append(z_disp)
+                    px_list.append(cx_lyr); py_list.append(cy_lyr); pz_list.append(z_disp)
 
                     for ang in np.linspace(0, 2 * np.pi, points, endpoint=False):
                         a   = ang + ang_offset
                         ppx = cx_lyr + r_at_z * np.cos(a)
                         ppy = cy_lyr + r_at_z * np.sin(a)
                         wall_pts.append((ppx, ppy, z_disp, lidx))
-                        px_list += [ppx, cx_lyr]
-                        py_list += [ppy, cy_lyr]
-                        pz_list += [z_disp, z_disp]
+                        px_list += [ppx, cx_lyr]; py_list += [ppy, cy_lyr]; pz_list += [z_disp, z_disp]
 
             else:
                 vz_disp = vz - SURF_Z_GLOBAL
 
                 if len(vz_disp) >= 6:
                     n_bins    = max(20, layers * 4)
-                    z_bins    = np.linspace(float(np.min(vz_disp)),
-                                            float(np.max(vz_disp)), n_bins + 1)
+                    z_bins    = np.linspace(float(np.min(vz_disp)), float(np.max(vz_disp)), n_bins + 1)
                     z_profile, r_profile = [], []
                     for bi in range(n_bins):
-                        b_mask = ((vz_disp >= z_bins[bi]) &
-                                  (vz_disp < z_bins[bi + 1]))
+                        b_mask = ((vz_disp >= z_bins[bi]) & (vz_disp < z_bins[bi + 1]))
                         if b_mask.sum() >= 2:
-                            r_vals = np.hypot(vx[b_mask] - hole.x,
-                                              vy[b_mask] - hole.y)
+                            r_vals = np.hypot(vx[b_mask] - hole.x, vy[b_mask] - hole.y)
                             z_profile.append(float((z_bins[bi] + z_bins[bi+1]) / 2))
                             r_profile.append(float(np.percentile(r_vals, 72)))
                     z_profile = np.array(z_profile)
@@ -344,22 +248,18 @@ class CustomizationTab:
 
                     def mesh_radius_at_z(target_z_disp):
                         if len(z_profile) < 2: return hole.radius
-                        return float(np.interp(target_z_disp, z_profile, r_profile,
-                                               left=r_profile[0],
-                                               right=r_profile[-1]))
+                        return float(np.interp(target_z_disp, z_profile, r_profile, left=r_profile[0], right=r_profile[-1]))
                 else:
                     def mesh_radius_at_z(target_z_disp): return hole.radius
 
                 NEAR_CENTER_RATIO = 0.3
                 if len(vz) == 0:
-                    TRUE_TOP_Z = raw_rim_z
-                    TRUE_BOT_Z = raw_bot_z
+                    TRUE_TOP_Z = raw_rim_z; TRUE_BOT_Z = raw_bot_z
                 else:
                     TRUE_TOP_Z   = float(np.min(vz))
                     dist_vmask   = dist_v[vmask]
                     near_c_mask  = dist_vmask < (hole.radius * NEAR_CENTER_RATIO)
-                    if near_c_mask.sum() < 1:
-                        near_c_mask = np.ones(len(vz), dtype=bool)
+                    if near_c_mask.sum() < 1: near_c_mask = np.ones(len(vz), dtype=bool)
                     TRUE_BOT_Z = float(np.max(vz[near_c_mask]))
 
                 z_start       = dz(TRUE_TOP_Z)
@@ -374,107 +274,66 @@ class CustomizationTab:
 
                 for layer_idx, z_disp in enumerate(z_levels_path):
                     r_at_z     = mesh_radius_at_z(z_disp) * 0.92
-                    ang_offset = (np.radians(layer_idx * step_deg)
-                                  if use_zigzag else 0.0)
+                    ang_offset = (np.radians(layer_idx * step_deg) if use_zigzag else 0.0)
 
-                    layer_centers[layer_idx] = (hole.x, hole.y, z_disp,
-                                                ang_offset, r_at_z)
-
-                    px_list.append(hole.x); py_list.append(hole.y)
-                    pz_list.append(z_disp)
+                    layer_centers[layer_idx] = (hole.x, hole.y, z_disp, ang_offset, r_at_z)
+                    px_list.append(hole.x); py_list.append(hole.y); pz_list.append(z_disp)
 
                     for ang in np.linspace(0, 2 * np.pi, points, endpoint=False):
                         a   = ang + ang_offset
                         ppx = hole.x + r_at_z * np.cos(a)
                         ppy = hole.y + r_at_z * np.sin(a)
                         wall_pts.append((ppx, ppy, z_disp, layer_idx))
-                        px_list += [ppx, hole.x]
-                        py_list += [ppy, hole.y]
-                        pz_list += [z_disp, z_disp]
+                        px_list += [ppx, hole.x]; py_list += [ppy, hole.y]; pz_list += [z_disp, z_disp]
 
-            # Tool path
+            # ✅ V07 FIX: Restored the lines connecting the toolpath to the bottom depth star!
             px_list.append(star_x); py_list.append(star_y); pz_list.append(star_z)
             px_list.append(hole.x); py_list.append(hole.y); pz_list.append(z_start)
 
-            ax3d.plot(px_list, py_list, pz_list,
-                      color='yellow', linestyle='--', linewidth=1.2,
-                      label='Tool Path', alpha=0.85)
+            ax3d.plot(px_list, py_list, pz_list, color='yellow', linestyle='--', linewidth=1.2, label='Tool Path', alpha=0.85)
 
-            # Wall contact points
             if wall_pts:
                 if use_zigzag:
                     for lidx in range(layers):
-                        pts_l = [(wx, wy, wz)
-                                 for wx, wy, wz, li in wall_pts if li == lidx]
-                        if not pts_l:
-                            continue
+                        pts_l = [(wx, wy, wz) for wx, wy, wz, li in wall_pts if li == lidx]
+                        if not pts_l: continue
                         wx_l, wy_l, wz_l = zip(*pts_l)
                         color_l  = _layer_color(lidx)
                         deg_here = int(round(lidx * step_deg)) % 360
-                        lbl = (f'Layer {lidx+1} (+{deg_here}°)'
-                               if lidx > 0 else 'Layer 1 (0°)')
-                        ax3d.scatter(wx_l, wy_l, wz_l,
-                                     color=color_l, s=26, depthshade=False,
-                                     edgecolors='white', linewidths=0.4, label=lbl)
+                        lbl = (f'Layer {lidx+1} (+{deg_here}°)' if lidx > 0 else 'Layer 1 (0°)')
+                        ax3d.scatter(wx_l, wy_l, wz_l, color=color_l, s=26, depthshade=False, edgecolors='white', linewidths=0.4, label=lbl)
 
                         if lidx in layer_centers:
-                            cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z = \
-                                layer_centers[lidx]
+                            cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z = layer_centers[lidx]
                             spoke_x = cx_lyr + r_at_z * np.cos(ang_offset)
                             spoke_y = cy_lyr + r_at_z * np.sin(ang_offset)
-                            ax3d.plot([cx_lyr, spoke_x], [cy_lyr, spoke_y],
-                                      [z_disp, z_disp],
-                                      color=color_l, linewidth=2.4, alpha=0.95,
-                                      zorder=12, solid_capstyle='round')
+                            ax3d.plot([cx_lyr, spoke_x], [cy_lyr, spoke_y], [z_disp, z_disp], color=color_l, linewidth=2.4, alpha=0.95, zorder=12, solid_capstyle='round')
                 else:
-                    wx_a, wy_a, wz_a = zip(*[(wp[0], wp[1], wp[2])
-                                              for wp in wall_pts])
-                    ax3d.scatter(wx_a, wy_a, wz_a,
-                                 color='red', s=22, depthshade=False,
-                                 label=f'Wall Contact ({layers}L×{points}P)')
+                    wx_a, wy_a, wz_a = zip(*[(wp[0], wp[1], wp[2]) for wp in wall_pts])
+                    ax3d.scatter(wx_a, wy_a, wz_a, color='red', s=22, depthshade=False, label=f'Wall Contact ({layers}L×{points}P)')
 
-            # Bottom depth star
-            ax3d.scatter([star_x], [star_y], [star_z],
-                         color='#ffea00', s=110, marker='*', depthshade=False,
-                         label='Bottom Depth Point', zorder=10)
+            ax3d.scatter([star_x], [star_y], [star_z], color='#ffea00', s=110, marker='*', depthshade=False, label='Bottom Depth Point', zorder=10)
 
             text_color = '#ff3333' if has_step_hole else '#ffea00'
             source_tag = ' [STEP]' if has_step_hole else ' [Mesh]'
             ax3d.text(star_x, star_y, star_z,
-                      f" ★{source_tag} X={star_x:.2f}, Y={star_y:.2f}\n"
-                      f"   Depth={hole.depth:.2f} mm",
+                      f" ★{source_tag} X={star_x:.2f}, Y={star_y:.2f}\n   Depth={hole.depth:.2f} mm",
                       color=text_color, fontsize=7, zorder=11)
 
-            # Probe warning annotation
             if probe_warn_lines:
-                ax3d.text2D(
-                    0.01, 0.01,
-                    "\n".join(probe_warn_lines),
-                    transform=ax3d.transAxes,
-                    fontsize=9, color='#ef5350', fontweight='bold',
-                    va='bottom', ha='left',
-                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#1a0000',
-                              edgecolor='#ef5350', alpha=0.88),
-                    zorder=20)
+                ax3d.text2D(0.01, 0.01, "\n".join(probe_warn_lines), transform=ax3d.transAxes,
+                            fontsize=9, color='#ef5350', fontweight='bold', va='bottom', ha='left',
+                            bbox=dict(boxstyle='round,pad=0.4', facecolor='#1a0000', edgecolor='#ef5350', alpha=0.88), zorder=20)
 
             rot_tag    = f' [rot={screen_rot}°]' if screen_rot != 0 else ''
             zigzag_tag = f' ↕Zigzag({step_deg}°/layer)' if use_zigzag else ''
             probe_tag  = '  ⚠ PROBE' if not probe_ok else ''
-            # v02 FIX: title now shows hole.display_id (the same
-            # category-local number the sidebar and 2D canvas show) instead
-            # of the internal, invisible-to-the-user hole.id.
-            title_str  = (
-                f"Customization — Hole {hole.display_id}  |  R={hole.radius:.1f} mm  "
-                f"Depth={hole.depth:.2f} mm  |  "
-                f"{layers}L × {points}P = {layers*points} pts"
-                + (' [STEP]' if has_step_hole else ' [Mesh]')
-                + rot_tag + zigzag_tag + probe_tag
-            )
+            title_str  = (f"Customization — Hole {hole.display_id}  |  R={hole.radius:.1f} mm  Depth={hole.depth:.2f} mm  |  "
+                          f"{layers}L × {points}P = {layers*points} pts" + (' [STEP]' if has_step_hole else ' [Mesh]') + rot_tag + zigzag_tag + probe_tag)
             ax3d.view_init(elev=-130, azim=67.5)
 
             hole_z_mid = (z_start + star_z) / 2.0
-            half_zoom  = max(hole.radius * 1.6,
-                             abs(star_z - z_start)) * 0.55
+            half_zoom  = max(hole.radius * 1.6, abs(star_z - z_start)) * 0.55
             half_zoom  = max(half_zoom, half * 0.05)
 
             ax3d.set_xlim([hole.x - half_zoom, hole.x + half_zoom])
@@ -484,14 +343,11 @@ class CustomizationTab:
         else:
             title_str = "Customization — Select a hole to show probing path"
             ax3d.view_init(elev=-130, azim=67.5)
-
             ax3d.set_xlim([cx - half, cx + half])
             ax3d.set_ylim([cy - half, cy + half])
             ax3d.set_zlim([cz - half, cz + half])
 
-        ax3d.set_title(title_str,
-                       color='#ef5350' if not probe_ok else 'white',
-                       fontsize=11, pad=10)
+        ax3d.set_title(title_str, color='#ef5350' if not probe_ok else 'white', fontsize=11, pad=10)
         for spine in [ax3d.xaxis, ax3d.yaxis, ax3d.zaxis]:
             spine.set_pane_color((0.10, 0.10, 0.10, 1.0))
             spine.line.set_color('gray')
@@ -500,7 +356,54 @@ class CustomizationTab:
         ax3d.set_ylabel("Y (mm)", color='white', fontsize=9, labelpad=2)
         ax3d.set_zlabel("Z (mm)", color='white', fontsize=9, labelpad=2)
         if has_hole:
-            ax3d.legend(facecolor='#1e1e1e', edgecolor='gray',
-                        labelcolor='white', loc='upper right', fontsize=7)
+            ax3d.legend(facecolor='#1e1e1e', edgecolor='gray', labelcolor='white', loc='upper right', fontsize=7)
         ax3d.invert_xaxis()
         app.canvas.draw()
+
+    # ------------------------------------------------------------------
+    # External API for Hover Effect (Called from UI Sidebar)
+    # ------------------------------------------------------------------
+    def highlight_hole(self, global_idx):
+        """รับค่าจาก Sidebar เพื่อเปลี่ยนสี / Opacity ของตัวเลข 3D แบบเรียลไทม์"""
+        if not hasattr(self, '_text_objects') or not self._text_objects: return
+        need_redraw = False
+        
+        for idx, obj in self._text_objects.items():
+            txt = obj['text']
+            if idx == global_idx:
+                if txt.get_alpha() != 1.0 or txt.get_color() != 'yellow':
+                    txt.set_alpha(1.0)
+                    txt.set_color('yellow')
+                    txt.set_fontsize(10)
+                    txt.set_fontweight('bold')
+                    txt.set_zorder(1000)
+                    need_redraw = True
+            else:
+                if txt.get_alpha() != obj['base_alpha'] or txt.get_color() != obj['base_color']:
+                    txt.set_alpha(obj['base_alpha'])
+                    txt.set_color(obj['base_color'])
+                    txt.set_fontsize(7)
+                    txt.set_fontweight('normal')
+                    txt.set_zorder(obj['base_zorder'])
+                    need_redraw = True
+                    
+        if need_redraw:
+            self.app.canvas.draw_idle()
+
+    def clear_hole_highlight(self):
+        """เคลียร์ไฮไลต์ คืนค่ากลับสู่สถานะเดิม (Opacity จางสำหรับ Unselected)"""
+        if not hasattr(self, '_text_objects') or not self._text_objects: return
+        need_redraw = False
+        
+        for idx, obj in self._text_objects.items():
+            txt = obj['text']
+            if txt.get_alpha() != obj['base_alpha'] or txt.get_color() != obj['base_color']:
+                txt.set_alpha(obj['base_alpha'])
+                txt.set_color(obj['base_color'])
+                txt.set_fontsize(7)
+                txt.set_fontweight('normal')
+                txt.set_zorder(obj['base_zorder'])
+                need_redraw = True
+                
+        if need_redraw:
+            self.app.canvas.draw_idle()
