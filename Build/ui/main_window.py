@@ -1,10 +1,8 @@
 # ui/main_window.py
-# VERSION: 08
+# VERSION: 09
 # CHANGE LOG:
-#   - UX Update: "Select for Inspection" checkboxes moved to the right side of the hole header.
-#   - UX Update: Toggling inspection checkbox no longer triggers auto-refresh. User must click "Apply Selection".
-#   - UX Update: Unselected Holes item layout upgraded to match Selected Holes.
-#   - Restored missing Z-Layers, Points/Layer, and Zigzag UI components inside expanded view.
+#   - UX Update: Linked Sidebar Hover events directly to 3D Customization Tab.
+#   - Hovering over an item now highlights it BOTH in the 2D view and the 3D Customization View.
 
 import customtkinter as ctk
 import numpy as np
@@ -19,12 +17,10 @@ from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 
-
 class UIManager:
     def __init__(self, geometry_engine):
         self.geo = geometry_engine
 
-        # --- State ---
         self.current_view       = 'Top'
         self.screen_rotation    = 0
         self.scatter_holes      = None
@@ -38,26 +34,19 @@ class UIManager:
 
         self.view_buttons  = {}
         self.hole_widgets  = {}
-
         self._visible_hole_map  = {}
 
-        # --- Probe Profile ---
         self.probe_profile = ProbeProfile()
-
-        # --- Inspection selection list ---
         self.inspection_selected_holes = []
 
-        # --- Tab instances ---
         self.selection_tab     = SelectionTab(self)
         self.customization_tab = CustomizationTab(self)
         self.path_mapper_tab   = PathMapperTab(self)
 
-        # --- Main window ---
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
         self.root.geometry("1400x800")
 
-        # Layout
         self.sidebar_left = ctk.CTkFrame(self.root, width=250, corner_radius=0)
         self.sidebar_left.pack(side="left", fill="y")
 
@@ -81,7 +70,6 @@ class UIManager:
         self.nav_selector.set("Selection")
         self.nav_selector.pack(side="top", pady=5)
 
-        # --- Matplotlib canvas ---
         plt.style.use('dark_background')
         colors    = ["white", "yellow", "orange", "red"]
         self.cmap = LinearSegmentedColormap.from_list("depth_color", colors)
@@ -99,10 +87,8 @@ class UIManager:
         self.canvas_widget.pack(fill=ctk.BOTH, expand=True, padx=10, pady=10)
 
         self.hover_text = self.ax.annotate(
-            "", xy=(0, 0), xytext=(15, 15),
-            textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.3", fc="red", ec="gray", alpha=1),
-            visible=False
+            "", xy=(0, 0), xytext=(15, 15), textcoords="offset points",
+            bbox=dict(boxstyle="round,pad=0.3", fc="red", ec="gray", alpha=1), visible=False
         )
 
         self._setup_left_sidebar()
@@ -112,22 +98,15 @@ class UIManager:
         if self.geo.mesh is not None:
             self.show_view('Top')
 
-    # ---------------------------------------------------------
-    # UI Sidebar Setup
-    # ---------------------------------------------------------
     def _setup_left_sidebar(self):
         self._left_scroll = ctk.CTkScrollableFrame(self.sidebar_left, fg_color="transparent", width=230)
         self._left_scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
-        ctk.CTkLabel(
-            self._left_scroll, text="3D ProbeCode Control",
-            font=ctk.CTkFont(size=20, weight="bold")
-        ).pack(pady=(20, 10))
+        ctk.CTkLabel(self._left_scroll, text="3D ProbeCode Control", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(20, 10))
 
         self.btn_upload = ctk.CTkButton(
             self._left_scroll, text="Upload STEP or STP",
-            fg_color="#2e7d32", hover_color="#4caf50",
-            command=self.open_file_dialog)
+            fg_color="#2e7d32", hover_color="#4caf50", command=self.open_file_dialog)
         self.btn_upload.pack(pady=10, padx=20, fill="x")
 
         self.info_frame = ctk.CTkFrame(self._left_scroll, fg_color="#1e1e1e", corner_radius=5)
@@ -144,36 +123,30 @@ class UIManager:
 
         self.btn_detect = ctk.CTkButton(
             self._left_scroll, text="🔍 Generate Holes",
-            fg_color="#f57c00", hover_color="#ef6c00",
-            command=self.on_generate_holes)
+            fg_color="#f57c00", hover_color="#ef6c00", command=self.on_generate_holes)
         self.btn_detect.pack(pady=(10, 5), padx=20, fill="x")
 
         self.btn_clear = ctk.CTkButton(
             self._left_scroll, text="❌ Clear & Unlock",
-            fg_color="#c62828", hover_color="#b71c1c",
-            command=self.on_clear_holes, state="disabled")
+            fg_color="#c62828", hover_color="#b71c1c", command=self.on_clear_holes, state="disabled")
         self.btn_clear.pack(pady=(0, 10), padx=20, fill="x")
 
         ctk.CTkLabel(self._left_scroll, text="--- View Controls ---", text_color="gray").pack(pady=(20, 5))
 
         self.btn_rotate = ctk.CTkButton(
             self._left_scroll, text="⟳ Rotate 90°",
-            fg_color="#0277bd", hover_color="#039be5",
-            command=self.rotate_screen)
+            fg_color="#0277bd", hover_color="#039be5", command=self.rotate_screen)
         self.btn_rotate.pack(pady=10, padx=20, fill="x")
 
         self.btn_reset = ctk.CTkButton(
             self._left_scroll, text="⌂ Reset Position",
-            fg_color="#d84315", hover_color="#bf360c",
-            command=self.reset_position)
+            fg_color="#d84315", hover_color="#bf360c", command=self.reset_position)
         self.btn_reset.pack(pady=(0, 10), padx=20, fill="x")
 
         view_frame = ctk.CTkFrame(self._left_scroll, fg_color="transparent")
         view_frame.pack(pady=10, padx=20, fill="x")
 
-        views = [('Top', 0, 0), ('Bottom', 0, 1),
-                 ('Front', 1, 0), ('Back', 1, 1),
-                 ('Left', 2, 0), ('Right', 2, 1)]
+        views = [('Top', 0, 0), ('Bottom', 0, 1), ('Front', 1, 0), ('Back', 1, 1), ('Left', 2, 0), ('Right', 2, 1)]
 
         for name, row, col in views:
             btn = ctk.CTkButton(
@@ -192,10 +165,8 @@ class UIManager:
         self._probe_panel_expanded = False
 
         self._probe_toggle_btn = ctk.CTkButton(
-            probe_header_frame,
-            text="🔩 Probe Stylus Profile  ▸",
-            fg_color="transparent", hover_color="#2a2a4e",
-            anchor="w", font=ctk.CTkFont(size=13, weight="bold"),
+            probe_header_frame, text="🔩 Probe Stylus Profile  ▸",
+            fg_color="transparent", hover_color="#2a2a4e", anchor="w", font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#90caf9", command=self._toggle_probe_panel,
         )
         self._probe_toggle_btn.pack(fill="x", padx=4, pady=6)
@@ -225,22 +196,17 @@ class UIManager:
         ctk.CTkFrame(self._probe_body, height=1, fg_color="#2a2a4e").pack(fill="x", padx=14, pady=(10, 6))
 
         self._btn_apply_probe = ctk.CTkButton(
-            self._probe_body, text="✔ Apply Profile",
-            fg_color="#1565c0", hover_color="#1976d2",
-            font=ctk.CTkFont(size=12, weight="bold"), height=30,
-            command=self._apply_probe_profile)
+            self._probe_body, text="✔ Apply Profile", fg_color="#1565c0", hover_color="#1976d2",
+            font=ctk.CTkFont(size=12, weight="bold"), height=30, command=self._apply_probe_profile)
         self._btn_apply_probe.pack(fill="x", padx=14, pady=(0, 6))
 
         self._btn_reset_probe = ctk.CTkButton(
-            self._probe_body, text="↺ Reset to Default",
-            fg_color="#37474f", hover_color="#546e7a",
-            font=ctk.CTkFont(size=11), height=26,
-            command=self._reset_probe_profile)
+            self._probe_body, text="↺ Reset to Default", fg_color="#37474f", hover_color="#546e7a",
+            font=ctk.CTkFont(size=11), height=26, command=self._reset_probe_profile)
         self._btn_reset_probe.pack(fill="x", padx=14, pady=(0, 10))
 
         self._lbl_probe_summary = ctk.CTkLabel(
-            self._probe_body, text=self._probe_summary_text(),
-            font=ctk.CTkFont(size=10), text_color="#546e7a", justify="left")
+            self._probe_body, text=self._probe_summary_text(), font=ctk.CTkFont(size=10), text_color="#546e7a", justify="left")
         self._lbl_probe_summary.pack(anchor="w", padx=14, pady=(0, 10))
 
     def _toggle_probe_panel(self):
@@ -303,15 +269,11 @@ class UIManager:
     def _set_view_controls_locked(self, is_locked):
         rotate_state = "disabled" if is_locked else "normal"
         self.btn_rotate.configure(state=rotate_state)
-        for btn in self.view_buttons.values():
-            btn.configure(state=rotate_state)
+        for btn in self.view_buttons.values(): btn.configure(state=rotate_state)
         self.btn_reset.configure(state="normal")
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
         self.btn_clear.configure(state="normal" if is_locked else "disabled")
 
-    # ---------------------------------------------------------
-    # Core Functions
-    # ---------------------------------------------------------
     def on_nav_change(self, selected_tab):
         if selected_tab == "Customization":
             if not self.holes_detected or len(self.current_holes) == 0:
@@ -505,21 +467,15 @@ class UIManager:
         self.show_view(self.current_view)
         self.selection_tab._restore_pins(saved_pins)
 
-    # ---------------------------------------------------------
-    # Hole Settings UI (Right Sidebar)
-    # ---------------------------------------------------------
     def update_treeview(self, holes):
         for widget in self.holes_list_frame.winfo_children():
             widget.destroy()
 
-        self.hole_widgets = {} # Reset widget references
+        self.hole_widgets = {}
 
-        # 1. ปุ่ม Apply Selection สำหรับอัปเดตและแยกหมวดหมู่รูใหม่
         apply_btn = ctk.CTkButton(
-            self.holes_list_frame,
-            text="✅ Apply Selection",
-            fg_color="#2E7D32", hover_color="#1B5E20", 
-            font=("", 14, "bold"),
+            self.holes_list_frame, text="✅ Apply Selection",
+            fg_color="#2E7D32", hover_color="#1B5E20", font=("", 14, "bold"),
             command=self._refresh_after_inspection_toggle
         )
         apply_btn.pack(fill="x", padx=10, pady=(10, 15))
@@ -527,7 +483,6 @@ class UIManager:
         selected = [h for h in holes if h.selected_for_inspection]
         unselected = [h for h in holes if not h.selected_for_inspection]
 
-        # 🟢 Selected Holes Section
         lbl_sel = ctk.CTkLabel(self.holes_list_frame, text=f"🟢 Selected Holes ({len(selected)})", font=("", 14, "bold"), text_color="#66bb6a")
         lbl_sel.pack(anchor="w", padx=10, pady=(5, 5))
 
@@ -535,7 +490,6 @@ class UIManager:
             idx = self.current_holes.index(h)
             self._build_selected_item(self.holes_list_frame, idx, h)
 
-        # ⚪ Unselected Holes Section
         lbl_unsel = ctk.CTkLabel(self.holes_list_frame, text=f"⚪ Unselected Holes ({len(unselected)})", font=("", 14, "bold"), text_color="#9aa4b2")
         lbl_unsel.pack(anchor="w", padx=10, pady=(20, 5))
 
@@ -560,7 +514,6 @@ class UIManager:
         header_row = ctk.CTkFrame(item_frame, fg_color="transparent")
         header_row.pack(fill="x")
 
-        # กำหนดสีปุ่มถ้ากำลังถูกเลือก (Click expand)
         default_color = "#1a3a5c"
         current_color = "#1f538d" if self.selected_hole_idx == idx else default_color
 
@@ -579,14 +532,21 @@ class UIManager:
         )
         chk.pack(side="right")
 
-        # Hover Effect (เชื่อมกับกราฟ)
-        self._bind_hover_recursive(
-            item_frame,
-            lambda e, gi=idx: self.selection_tab.highlight_hole(gi),
-            lambda e: self.selection_tab.clear_hole_highlight()
-        )
+        # ✅ Hover Effect: เชื่อมทั้งฝั่ง Selection (2D) และ Customization (3D)
+        def enter_selected(e, gi=idx):
+            if self.current_tab == "Selection":
+                self.selection_tab.highlight_hole(gi)
+            elif self.current_tab == "Customization":
+                self.customization_tab.highlight_hole(gi)
 
-        # ✅ แก้ไข: สร้างกล่อง Setting เตรียมไว้เสมอ (แม้จะยังไม่ได้กาง)
+        def leave_selected(e):
+            if self.current_tab == "Selection":
+                self.selection_tab.clear_hole_highlight()
+            elif self.current_tab == "Customization":
+                self.customization_tab.clear_hole_highlight()
+
+        self._bind_hover_recursive(item_frame, enter_selected, leave_selected)
+
         setting_frame = ctk.CTkFrame(item_frame, fg_color="#1c212c", corner_radius=6)
         widgets['settings_frame'] = setting_frame
 
@@ -597,7 +557,6 @@ class UIManager:
                 lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color="#ef5350", font=("", 11, "bold"))
                 lbl_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
-        # Z-Layers Dropdown
         row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
         row1.pack(fill="x", padx=10, pady=(5,0))
         ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
@@ -607,7 +566,6 @@ class UIManager:
         opt_layers.pack(side="right")
         widgets['opt_layers'] = opt_layers
 
-        # Points/Layer Dropdown
         row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
         row2.pack(fill="x", padx=10, pady=(5,0))
         ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5").pack(side="left")
@@ -617,14 +575,12 @@ class UIManager:
         opt_points.pack(side="right")
         widgets['opt_points'] = opt_points
 
-        # Zigzag checkbox
         zig_var = ctk.BooleanVar(value=hole.zigzag_inspection)
         chk_zig = ctk.CTkCheckBox(setting_frame, text="↕ Zigzag Inspection", text_color="#b0bec5", variable=zig_var,
                                   command=lambda: self._on_zigzag_toggle(idx, zig_var))
         chk_zig.pack(anchor="w", padx=10, pady=(10,5))
         widgets['chk_zigzag'] = chk_zig
 
-        # Degree Config Frame
         df = ctk.CTkFrame(setting_frame, fg_color="transparent")
         ctk.CTkLabel(df, text="Degree/Layer:", text_color="#b0bec5").pack(side="left")
         deg_ent = ctk.CTkEntry(df, width=50)
@@ -637,7 +593,6 @@ class UIManager:
         if hole.zigzag_inspection:
             df.pack(fill="x", padx=15, pady=(0, 8))
 
-        # ✅ ถ้าสถานะมันเป็นกางอยู่ ถึงจะเอามาแสดงให้เห็น
         if widgets['is_expanded']:
             setting_frame.pack(fill="x", pady=(5, 0))
 
@@ -652,7 +607,6 @@ class UIManager:
         header_row = ctk.CTkFrame(item_frame, fg_color="transparent")
         header_row.pack(fill="x")
 
-        # หน้าตาปุ่มเลียนแบบของ Selected แต่สีทึบกว่า
         btn_text = f"Hole {hole.display_id} [X: {hole.x:.2f}, Y: {hole.y:.2f}]"
         header_btn = ctk.CTkButton(
             header_row, text=btn_text, anchor="w",
@@ -669,22 +623,26 @@ class UIManager:
         )
         chk.pack(side="right")
 
-        # Hover Effect
-        self._bind_hover_recursive(
-            item_frame,
-            lambda e, h_obj=hole: self.selection_tab.show_unselected_marker(h_obj),
-            lambda e: self.selection_tab.clear_unselected_marker()
-        )
+        # ✅ Hover Effect: เชื่อมทั้งฝั่ง Selection (2D) และ Customization (3D)
+        def enter_unselected(e, gi=idx, h_obj=hole):
+            if self.current_tab == "Selection":
+                self.selection_tab.show_unselected_marker(h_obj)
+            elif self.current_tab == "Customization":
+                self.customization_tab.highlight_hole(gi)
+
+        def leave_unselected(e):
+            if self.current_tab == "Selection":
+                self.selection_tab.clear_unselected_marker()
+            elif self.current_tab == "Customization":
+                self.customization_tab.clear_hole_highlight()
+
+        self._bind_hover_recursive(item_frame, enter_unselected, leave_unselected)
 
         reason_text = f"⚠ {hole.reject_reason}" if hole.is_rejected else "└ Not selected for inspection"
         lbl_reason = ctk.CTkLabel(item_frame, text=reason_text, text_color="#ffb74d", font=("", 11))
         lbl_reason.pack(anchor="w", padx=10, pady=(2, 0))
 
-    # ------------------------------------------------------------------
-    # Checkbox Callbacks
-    # ------------------------------------------------------------------
     def _on_inspection_select_toggle(self, idx, var):
-        """รับค่า checkbox แล้วจำค่าไว้เงียบๆ ไม่ต้องกระตุกจอ รอจนกว่าจะกดปุ่ม Apply"""
         hole = self.current_holes[idx]
         hole.selected_for_inspection = var.get()
 
@@ -710,22 +668,27 @@ class UIManager:
                 self._visible_hole_map[gi] = len(visible_holes)
                 visible_holes.append(h)
 
+        # 1. ถ้าอยู่หน้า Selection (2D) ให้รีเฟรชวิวทั้งหมด
         if self.current_tab == "Selection":
-            # สำหรับ update_plot ของ SelectionTab
-            # จำเป็นต้องโยน params เก่าเข้าไป ซึ่งของเดิมไม่ได้เก็บตัวแปร current_x, current_y เอาไว้
-            # เลยสั่งให้มัน render view ปัจจุบันใหม่ทับไปเลยจะปลอดภัยที่สุด
             saved_pins = list(self.selection_tab._pinned_pin_data)
             self.show_view(self.current_view)
             self.selection_tab._restore_pins(saved_pins)
-            return # show_view จะไปเรียก update_treeview ให้อยู่แล้ว
+            return
 
+        # 2. อัปเดตรายการเมนูด้านขวาใหม่
         self.update_treeview(self.current_holes)
+
+        # 3. ✅ ถ้ายืนยันตอนอยู่หน้า Customization (3D) ให้สั่งวาดกราฟ 3D ใหม่ทันที
+        if self.current_tab == "Customization":
+            self.customization_tab.draw_cross_section()
+        # 4. ถ้ายืนยันตอนอยู่หน้า Path Mapper ก็ให้รีเฟรชเช่นกัน
+        elif self.current_tab == "Path Mapper":
+            self.path_mapper_tab.draw_path_mapper()
 
     def _on_zigzag_toggle(self, idx: int, var: ctk.BooleanVar):
         if idx >= len(self.current_holes): return
         hole = self.current_holes[idx]
         hole.zigzag_inspection = var.get()
-
         if idx in self.hole_widgets and 'degree_frame' in self.hole_widgets[idx]:
             df = self.hole_widgets[idx]['degree_frame']
             sf = self.hole_widgets[idx]['settings_frame']
@@ -745,7 +708,6 @@ class UIManager:
             val = max(1.0, min(180.0, float(entry.get().strip())))
         except ValueError:
             val = hole.zigzag_degree
-
         hole.zigzag_degree = val
         entry.delete(0, "end")
         entry.insert(0, str(int(val)) if val == int(val) else str(val))
@@ -753,19 +715,13 @@ class UIManager:
         if self.current_tab == "Customization" and self.selected_hole_idx == idx:
             self.customization_tab.draw_cross_section()
 
-    # ------------------------------------------------------------------
-    # Hole Selection / Config
-    # ------------------------------------------------------------------
     def on_hole_select(self, idx):
         is_deselecting = (self.selected_hole_idx == idx)
-
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
             hole_i = self.current_holes[i] if i < len(self.current_holes) else None
             default_color = "#1a3a5c" if (hole_i and hole_i.selected_for_inspection) else "#1f1f1f"
             widgets['btn'].configure(fg_color=default_color)
-            
-            # ซ่อนเมนูรูอื่นที่ไม่ได้ถูกเลือก
             if widgets.get('is_expanded') and i != idx:
                 if 'settings_frame' in widgets:
                     widgets['settings_frame'].pack_forget()
@@ -789,7 +745,6 @@ class UIManager:
                 sel['is_expanded'] = True
             self.selected_hole_idx = idx
 
-        # อัปเดตไฮไลต์กราฟ 2D/3D
         if self.current_tab == "Selection" and hasattr(self, 'scatter_holes') and self.scatter_holes:
             colors = ['white'] * len(self._visible_hole_map)
             if self.selected_hole_idx is not None:
