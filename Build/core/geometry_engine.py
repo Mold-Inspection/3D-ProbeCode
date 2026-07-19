@@ -1,14 +1,22 @@
 # core/geometry_engine.py
-# VERSION: 01
-# CHANGE LOG (v01):
-#   Dead-code cleanup — removed MoldGeometry.triangles and
-#   MoldGeometry._step_holes_cache. Both were written in load_file() but
-#   never read anywhere: no file in core/* or ui/* accesses geo.triangles
-#   (UI code uses app.current_triangles / view-tuple returns instead), and
-#   nothing reads geo._step_holes_cache (selection_tab.py reads
-#   geo.extractor._step_holes_cache instead, which extractor.extract()
-#   already populates on its own). extractor.extract() is still called for
-#   its side effect of populating that cache.
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FIX: forward the already-loaded mesh into extractor.extract() so it
+#   can confirm/correct multi-diameter hole segment order against the
+#   real mesh surface instead of trusting the B-Rep axis sign alone (see
+#   step_extractor.py v25 / _orient_segments_by_mesh()). self.mesh is
+#   already centered by the same mesh_centroid every extracted point
+#   uses (both come from cad_loader.py's single centering step), so no
+#   extra transform is needed — just pass the reference through.
+# CHANGE LOG (v01 -> v02):
+#   FEATURE: multi-diameter ("counterbore-style") hole support.
+#     Added get_probe_path_layers_multi() — thin facade wrapper mirroring
+#     the existing get_probe_path_layers(), forwarding to
+#     PathPlanner.get_probe_path_layers_multi() (see path_planner.py v02).
+#     UI code (customization_tab.py) decides which of the two to call
+#     based on whether the hole has 2+ segments; this file makes no such
+#     decision itself, same separation of concerns as the existing single
+#     get_probe_path_layers().
 import numpy as np
 
 from core.cad_loader import CADLoader
@@ -65,3 +73,15 @@ class MoldGeometry:
             screen_rot=screen_rot,
             zigzag_inspection=zigzag_inspection,
             zigzag_degree=zigzag_degree)
+
+    def get_probe_path_layers_multi(self, hole, segment_settings: list,
+                                     view_name: str, screen_rot: int = 0):
+        """
+        Segment-aware path for multi-diameter holes. `hole` is a StepHole
+        with .segments (raw geometry); `segment_settings` is the matching
+        list of HoleSegmentSetting (per-segment layers/points/zigzag
+        config) — see path_planner.py v02 for details.
+        """
+        return self.planner.get_probe_path_layers_multi(
+            hole, segment_settings, self.projector, view_name,
+            screen_rot=screen_rot)

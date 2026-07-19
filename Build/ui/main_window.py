@@ -1,8 +1,63 @@
 # ui/main_window.py
-# VERSION: 09
-# CHANGE LOG:
-#   - UX Update: Linked Sidebar Hover events directly to 3D Customization Tab.
-#   - Hovering over an item now highlights it BOTH in the 2D view and the 3D Customization View.
+# VERSION: 11
+# CHANGE LOG (v10 -> v11):
+#   FEATURE REQUEST (2 items, segment "folder" UI from v10):
+#     1. _toggle_segment_expand() no longer calls update_treeview(). That
+#        rebuilt the ENTIRE right sidebar (every hole card destroyed and
+#        recreated) just to expand/collapse one segment row — visible
+#        flicker, lost scroll position, for a purely local toggle. It now
+#        updates only that hole's segment_blocks widgets in place (same
+#        pattern _on_zigzag_toggle already used for the single-segment
+#        case). Full sidebar rebuild stays reserved for the Apply button
+#        (_refresh_after_inspection_toggle) as intended.
+#     2. New self.selected_segment_idx state (None = show whole hole).
+#        Expanding a segment now also "isolates" it: only that segment's
+#        wall/toolpath is drawn in the Customization 3D view, other
+#        segments of the same hole are hidden (see customization_tab.py
+#        v09). Made an accordion — expanding one segment auto-collapses
+#        any other expanded segment in the same hole, since isolate only
+#        makes sense for one segment at a time. Reset to None whenever
+#        hole selection changes (on_hole_select) or the view is rebuilt
+#        (show_view), so a stale index can never point at the wrong hole.
+# CHANGE LOG (v09 -> v10):
+#   FEATURE: multi-diameter ("counterbore-style") hole support — sidebar
+#   "folder" UI + state wiring.
+#     1. New import: HoleSegmentSetting (core.models v02).
+#     2. New helper _build_segment_settings(sh): builds one
+#        HoleSegmentSetting per raw StepHole.segments entry (see
+#        step_extractor.py v24 / models.py v02), each starting at the
+#        same defaults as an ordinary hole (3 layers, 4 points, no
+#        zigzag). Returns [] for an ordinary single-segment hole — this
+#        is the flag main_window/customization_tab use to decide whether
+#        a hole needs the multi-segment folder UI/path at all.
+#     3. show_view(): every HoleFeature built from a StepHole now gets
+#        hf.segments = _build_segment_settings(sh). The existing
+#        prev_states persistence dict (keyed by h.id, already used to
+#        carry selected/zigzag/layers/points across view switches) now
+#        also carries 'segments' — since a hole's raw 3D segment geometry
+#        never changes between views, the SAME HoleSegmentSetting objects
+#        (with whatever layers/points/zigzag/is_expanded the user set)
+#        are reused directly by list length match, so per-segment config
+#        survives switching Top/Front/etc. exactly like the old
+#        single-segment settings already did.
+#     4. _build_selected_item(): branches on `hole.segments`. Empty (the
+#        overwhelming majority of holes) → 100% unchanged old behavior
+#        (single Z-Layers/Points/Zigzag block wired directly to the
+#        hole). Non-empty → renders ONE header button per segment inside
+#        the existing settings_frame ("📂 Segment k  ⌀open→⌀deep
+#        D=depth"), each independently expandable to reveal that
+#        segment's OWN Layers/Points/Zigzag controls
+#        (_build_segment_block / _toggle_segment_expand /
+#        _on_segment_config_change / _on_segment_zigzag_toggle /
+#        _on_segment_zigzag_degree_change). The hole still shows as ONE
+#        card with ONE display_id / ONE selected_for_inspection checkbox
+#        — segments are purely a nested settings concern, matching the
+#        "one hole, expandable folder of segments" design agreed with
+#        the user.
+#     5. Multi-diameter hole button label gets a small "📂 Nseg" tag so
+#        it's visually distinguishable from an ordinary hole at a glance.
+#   No changes to: view routing, occlusion/rejection logic, renumbering,
+#   pin management, or any single-segment hole's behavior.
 
 import customtkinter as ctk
 import numpy as np
@@ -11,11 +66,29 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
-from core.models import HoleFeature
+from core.models import HoleFeature, HoleSegmentSetting
 from core.probe_profile import ProbeProfile
 from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
+
+
+def _build_segment_settings(sh) -> list:
+    """
+    v10: build one HoleSegmentSetting per raw segment on a StepHole.
+    Returns [] for an ordinary (never-merged / single-diameter) hole —
+    that empty list is the signal used everywhere else (sidebar,
+    customization_tab) to skip the multi-segment "folder" UI/path and
+    fall back to the original single-segment behavior untouched.
+    """
+    segs = getattr(sh, 'segments', None)
+    if not segs or len(segs) <= 1:
+        return []
+    return [
+        HoleSegmentSetting(idx, seg.radius_open, seg.radius_deep, seg.depth)
+        for idx, seg in enumerate(segs)
+    ]
+
 
 class UIManager:
     def __init__(self, geometry_engine):
@@ -30,6 +103,7 @@ class UIManager:
 
         self.current_tab        = "Selection"
         self.selected_hole_idx  = None
+        self.selected_segment_idx = None   # v11: which segment is "isolated" in 3D view (None = whole hole)
         self.max_physical_dim   = None
 
         self.view_buttons  = {}
@@ -337,6 +411,7 @@ class UIManager:
         if self.geo.mesh is None: return
         if view_name != self.current_view: self.selection_tab.clear_pins()
         self.current_view = view_name
+        self.selected_segment_idx = None   # v11: hole positions can shift between views — never carry a stale isolate index
         rot = self.screen_rotation
 
         if   view_name == 'Top':    x, y, z_v, z_f, tri = self.geo.get_top_view(rot)
@@ -355,6 +430,11 @@ class UIManager:
                     'zigzag_deg': getattr(h, 'zigzag_degree',           45.0),
                     'layers':     getattr(h, 'layers',                  3),
                     'points':     getattr(h, 'points_per_layer',        4),
+                    # v10: carry the SAME HoleSegmentSetting objects across
+                    # view switches — raw segment geometry never changes
+                    # between views, so per-segment layers/points/zigzag/
+                    # is_expanded set by the user survives untouched.
+                    'segments':   getattr(h, 'segments', []),
                 }
 
             has_step = (hasattr(self.geo, 'step_data') and self.geo.step_data is not None)
@@ -371,6 +451,7 @@ class UIManager:
                     hf.is_rejected      = getattr(sh, 'is_rejected', False)
                     hf.reject_reason    = getattr(sh, 'reject_reason', "")
                     hf.position_unknown = getattr(sh, 'position_unknown', False)
+                    hf.segments          = _build_segment_settings(sh)
                     converted.append(hf)
                 self.current_holes = converted
             else:
@@ -389,6 +470,14 @@ class UIManager:
                     h.zigzag_degree           = state.get('zigzag_deg', 45.0)
                     h.layers                  = state.get('layers', 3)
                     h.points_per_layer        = state.get('points', 4)
+                    # v10: reuse old per-segment settings only if the
+                    # segment COUNT still matches (raw 3D geometry is
+                    # view-independent so it always should, but guard
+                    # against any edge case rather than silently
+                    # mismatching segment k's settings to segment j).
+                    old_segments = state.get('segments') or []
+                    if old_segments and len(old_segments) == len(getattr(h, 'segments', [])):
+                        h.segments = old_segments
                 else:
                     h.selected_for_inspection = not getattr(h, 'is_rejected', False)
                     h.zigzag_inspection       = False
@@ -517,7 +606,9 @@ class UIManager:
         default_color = "#1a3a5c"
         current_color = "#1f538d" if self.selected_hole_idx == idx else default_color
 
-        btn_text = f"🎯 Hole {hole.display_id} [X: {hole.x:.2f}, Y: {hole.y:.2f}] D: {hole.depth:.2f}"
+        is_multi_seg = bool(getattr(hole, 'segments', None))
+        folder_tag = f" 📂×{len(hole.segments)}" if is_multi_seg else ""
+        btn_text = f"🎯 Hole {hole.display_id}{folder_tag} [X: {hole.x:.2f}, Y: {hole.y:.2f}] D: {hole.depth:.2f}"
         header_btn = ctk.CTkButton(
             header_row, text=btn_text, anchor="w", fg_color=current_color,
             command=lambda: self.on_hole_select(idx)
@@ -557,44 +648,197 @@ class UIManager:
                 lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color="#ef5350", font=("", 11, "bold"))
                 lbl_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
-        row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
-        row1.pack(fill="x", padx=10, pady=(5,0))
-        ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
-        opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60, 
-                                       command=lambda val: self.on_config_change_for_hole(idx))
-        opt_layers.set(str(hole.layers))
-        opt_layers.pack(side="right")
-        widgets['opt_layers'] = opt_layers
+        if is_multi_seg:
+            # v10: "folder" UI — one expandable sub-block per segment,
+            # each with its OWN Layers/Points/Zigzag controls. The hole
+            # itself keeps a single display_id/checkbox; segments are a
+            # nested settings concern only.
+            widgets['segment_blocks'] = {}
+            for seg_idx, cfg in enumerate(hole.segments):
+                self._build_segment_block(setting_frame, idx, seg_idx, hole, cfg)
+        else:
+            # --- Original single-segment controls, unchanged ---
+            row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
+            row1.pack(fill="x", padx=10, pady=(5,0))
+            ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
+            opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60, 
+                                           command=lambda val: self.on_config_change_for_hole(idx))
+            opt_layers.set(str(hole.layers))
+            opt_layers.pack(side="right")
+            widgets['opt_layers'] = opt_layers
 
-        row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
-        row2.pack(fill="x", padx=10, pady=(5,0))
-        ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5").pack(side="left")
-        opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
-                                       command=lambda val: self.on_config_change_for_hole(idx))
-        opt_points.set(str(hole.points_per_layer))
-        opt_points.pack(side="right")
-        widgets['opt_points'] = opt_points
+            row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
+            row2.pack(fill="x", padx=10, pady=(5,0))
+            ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5").pack(side="left")
+            opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
+                                           command=lambda val: self.on_config_change_for_hole(idx))
+            opt_points.set(str(hole.points_per_layer))
+            opt_points.pack(side="right")
+            widgets['opt_points'] = opt_points
 
-        zig_var = ctk.BooleanVar(value=hole.zigzag_inspection)
-        chk_zig = ctk.CTkCheckBox(setting_frame, text="↕ Zigzag Inspection", text_color="#b0bec5", variable=zig_var,
-                                  command=lambda: self._on_zigzag_toggle(idx, zig_var))
-        chk_zig.pack(anchor="w", padx=10, pady=(10,5))
-        widgets['chk_zigzag'] = chk_zig
+            zig_var = ctk.BooleanVar(value=hole.zigzag_inspection)
+            chk_zig = ctk.CTkCheckBox(setting_frame, text="↕ Zigzag Inspection", text_color="#b0bec5", variable=zig_var,
+                                      command=lambda: self._on_zigzag_toggle(idx, zig_var))
+            chk_zig.pack(anchor="w", padx=10, pady=(10,5))
+            widgets['chk_zigzag'] = chk_zig
 
-        df = ctk.CTkFrame(setting_frame, fg_color="transparent")
-        ctk.CTkLabel(df, text="Degree/Layer:", text_color="#b0bec5").pack(side="left")
-        deg_ent = ctk.CTkEntry(df, width=50)
-        deg_ent.insert(0, str(hole.zigzag_degree))
-        deg_ent.pack(side="left", padx=5)
-        deg_ent.bind("<Return>", lambda e: self._on_zigzag_degree_change(idx))
-        widgets['degree_frame'] = df
-        widgets['degree_entry'] = deg_ent
+            df = ctk.CTkFrame(setting_frame, fg_color="transparent")
+            ctk.CTkLabel(df, text="Degree/Layer:", text_color="#b0bec5").pack(side="left")
+            deg_ent = ctk.CTkEntry(df, width=50)
+            deg_ent.insert(0, str(hole.zigzag_degree))
+            deg_ent.pack(side="left", padx=5)
+            deg_ent.bind("<Return>", lambda e: self._on_zigzag_degree_change(idx))
+            widgets['degree_frame'] = df
+            widgets['degree_entry'] = deg_ent
 
-        if hole.zigzag_inspection:
-            df.pack(fill="x", padx=15, pady=(0, 8))
+            if hole.zigzag_inspection:
+                df.pack(fill="x", padx=15, pady=(0, 8))
 
         if widgets['is_expanded']:
             setting_frame.pack(fill="x", pady=(5, 0))
+
+    # ------------------------------------------------------------------
+    # v10: per-segment "folder" sub-block (multi-diameter holes only)
+    # ------------------------------------------------------------------
+    def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
+        block = ctk.CTkFrame(parent, fg_color="#141824", corner_radius=6)
+        block.pack(fill="x", padx=8, pady=(8 if seg_idx == 0 else 4, 4))
+
+        seg_header = ctk.CTkFrame(block, fg_color="transparent")
+        seg_header.pack(fill="x", padx=6, pady=6)
+
+        arrow = "▾" if cfg.is_expanded else "▸"
+        label_text = (f"{arrow} Segment {seg_idx + 1}  "
+                      f"⌀{cfg.radius_open*2:.1f}→⌀{cfg.radius_deep*2:.1f} mm  "
+                      f"D={cfg.depth:.1f} mm")
+        seg_btn = ctk.CTkButton(
+            seg_header, text=label_text, anchor="w",
+            fg_color="#22283a", hover_color="#2c3348", font=("", 12),
+            command=lambda: self._toggle_segment_expand(hole_idx, seg_idx))
+        seg_btn.pack(fill="x")
+
+        seg_body = ctk.CTkFrame(block, fg_color="transparent")
+
+        row1 = ctk.CTkFrame(seg_body, fg_color="transparent")
+        row1.pack(fill="x", padx=8, pady=(6, 0))
+        ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5", font=("", 11)).pack(side="left")
+        opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60,
+                                       command=lambda val: self._on_segment_config_change(hole_idx, seg_idx))
+        opt_layers.set(str(cfg.layers))
+        opt_layers.pack(side="right")
+
+        row2 = ctk.CTkFrame(seg_body, fg_color="transparent")
+        row2.pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5", font=("", 11)).pack(side="left")
+        opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
+                                       command=lambda val: self._on_segment_config_change(hole_idx, seg_idx))
+        opt_points.set(str(cfg.points_per_layer))
+        opt_points.pack(side="right")
+
+        zig_var = ctk.BooleanVar(value=cfg.zigzag_inspection)
+        chk_zig = ctk.CTkCheckBox(seg_body, text="↕ Zigzag Inspection", text_color="#b0bec5", font=("", 11),
+                                  variable=zig_var,
+                                  command=lambda: self._on_segment_zigzag_toggle(hole_idx, seg_idx, zig_var))
+        chk_zig.pack(anchor="w", padx=8, pady=(8, 4))
+
+        deg_row = ctk.CTkFrame(seg_body, fg_color="transparent")
+        ctk.CTkLabel(deg_row, text="Degree/Layer:", text_color="#b0bec5", font=("", 11)).pack(side="left")
+        deg_ent = ctk.CTkEntry(deg_row, width=50)
+        deg_ent.insert(0, str(cfg.zigzag_degree))
+        deg_ent.pack(side="left", padx=5)
+        deg_ent.bind("<Return>", lambda e: self._on_segment_zigzag_degree_change(hole_idx, seg_idx))
+
+        if cfg.zigzag_inspection:
+            deg_row.pack(fill="x", padx=12, pady=(0, 6))
+
+        if cfg.is_expanded:
+            seg_body.pack(fill="x", pady=(0, 6))
+
+        self.hole_widgets[hole_idx]['segment_blocks'][seg_idx] = {
+            'btn': seg_btn, 'body': seg_body, 'opt_layers': opt_layers,
+            'opt_points': opt_points, 'chk_zigzag': chk_zig,
+            'degree_frame': deg_row, 'degree_entry': deg_ent,
+        }
+
+    def _toggle_segment_expand(self, hole_idx, seg_idx):
+        """
+        v11: in-place toggle only — does NOT call update_treeview(). The
+        old version rebuilt the whole right sidebar (every hole card) for
+        what should be a purely local expand/collapse of one segment row.
+        Sidebar-wide refresh stays reserved for the Apply button.
+
+        Also drives segment "isolate": expanding a segment sets
+        self.selected_segment_idx so the Customization 3D view shows only
+        that segment (see customization_tab.py draw_cross_section, v09).
+        Accordion behavior — expanding one segment collapses any other
+        expanded segment in the SAME hole, since isolating only makes
+        sense for one segment at a time.
+        """
+        if hole_idx >= len(self.current_holes): return
+        hole = self.current_holes[hole_idx]
+        segments = getattr(hole, 'segments', None)
+        if not segments or seg_idx >= len(segments): return
+
+        now_expanding = not segments[seg_idx].is_expanded
+        for i, cfg in enumerate(segments):
+            cfg.is_expanded = (now_expanding and i == seg_idx)
+
+        seg_blocks = self.hole_widgets.get(hole_idx, {}).get('segment_blocks', {})
+        for i, cfg in enumerate(segments):
+            blk = seg_blocks.get(i)
+            if not blk: continue
+            arrow = "▾" if cfg.is_expanded else "▸"
+            blk['btn'].configure(text=(f"{arrow} Segment {i + 1}  "
+                                        f"⌀{cfg.radius_open*2:.1f}→⌀{cfg.radius_deep*2:.1f} mm  "
+                                        f"D={cfg.depth:.1f} mm"))
+            if cfg.is_expanded:
+                blk['body'].pack(fill="x", pady=(0, 6))
+            else:
+                blk['body'].pack_forget()
+
+        self.selected_segment_idx = seg_idx if now_expanding else None
+
+        if self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
+            self.customization_tab.draw_cross_section()
+
+    def _on_segment_config_change(self, hole_idx, seg_idx):
+        if hole_idx >= len(self.current_holes): return
+        cfg     = self.current_holes[hole_idx].segments[seg_idx]
+        widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
+        cfg.layers           = int(widgets['opt_layers'].get())
+        cfg.points_per_layer = int(widgets['opt_points'].get())
+        if self.current_tab == "Path Mapper":
+            self.path_mapper_tab.draw_path_mapper()
+        elif self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
+            self.customization_tab.draw_cross_section()
+
+    def _on_segment_zigzag_toggle(self, hole_idx, seg_idx, var):
+        if hole_idx >= len(self.current_holes): return
+        cfg = self.current_holes[hole_idx].segments[seg_idx]
+        cfg.zigzag_inspection = var.get()
+        widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
+        df = widgets['degree_frame']
+        if cfg.zigzag_inspection:
+            df.pack(fill="x", padx=12, pady=(0, 6))
+        else:
+            df.pack_forget()
+        if self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
+            self.customization_tab.draw_cross_section()
+
+    def _on_segment_zigzag_degree_change(self, hole_idx, seg_idx):
+        if hole_idx >= len(self.current_holes): return
+        cfg     = self.current_holes[hole_idx].segments[seg_idx]
+        widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
+        entry   = widgets['degree_entry']
+        try:
+            val = max(1.0, min(180.0, float(entry.get().strip())))
+        except ValueError:
+            val = cfg.zigzag_degree
+        cfg.zigzag_degree = val
+        entry.delete(0, "end")
+        entry.insert(0, str(int(val)) if val == int(val) else str(val))
+        if self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
+            self.customization_tab.draw_cross_section()
 
     def _build_unselected_item(self, parent, idx, hole):
         if idx not in self.hole_widgets:
@@ -716,6 +960,7 @@ class UIManager:
             self.customization_tab.draw_cross_section()
 
     def on_hole_select(self, idx):
+        self.selected_segment_idx = None   # v11: switching/deselecting a hole always clears any segment isolate
         is_deselecting = (self.selected_hole_idx == idx)
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
