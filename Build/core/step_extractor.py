@@ -1,36 +1,38 @@
 # core/step_extractor.py
-# VERSION: 23
+# VERSION: 24
 #
-# CHANGE LOG (v22 -> v23):
-#   BUG FIX: SPHERE hole's "open" end (rim/mouth) reported too deep into
-#   the part (e.g. 20.36 mm depth reported vs. the true 30.00 mm).
-#     Root cause: a trimmed spherical face's edge loop contains not only
-#     the real rim boundary edge(s), but also, for periodic (>180° swept)
-#     caps, an internal SEAM_CURVE — CadQuery/OCC's UV-periodicity seam
-#     for the sphere's parametrization. Geometrically this seam is ALSO a
-#     'CIRCLE' edge, but it's a full great circle that runs from the pole
-#     straight out to the rim, with radius == the sphere's own radius R.
-#     The old code sampled `for f_edge in face.Edges(): ...` with no
-#     filter, so seam-edge points (whose perpendicular distance from the
-#     axis ranges from 0 at the pole up to the rim radius) got mixed into
-#     the same average used for BOTH radius_open and the axial height
-#     used to build rim_center (open_3d). That pulled rim_center's height
-#     toward the pole — i.e. deeper into the part — and dragged
-#     radius_open down, below the true rim radius.
-#     Verified directly against smooth_perfect_bowl_mold.step: the face's
-#     edge loop is (#379, #380, #384); #379/#380 are the true rim at
-#     r=67.082mm, #384 is explicitly a SEAM_CURVE at r=90mm (== sphere R).
-#     With the seam excluded, R=90 and r_rim=67.082 give the analytically
-#     exact depth R - sqrt(R^2 - r_rim^2) = 30.00 mm.
-#     Fix: rim sampling now only accepts CIRCLE edges whose radius is
-#     meaningfully smaller than the sphere's own radius R (radius < R -
-#     tolerance). A genuine latitude/rim edge is always strictly smaller
-#     than R (equal only in the degenerate case of an exact hemisphere,
-#     which the old center-offset heuristic couldn't disambiguate either
-#     — not a concern here). A seam/meridian edge, passing through the
-#     sphere's own center, is always exactly radius R and is now skipped.
-#     Falls back to the existing vertex-sampling path if zero qualifying
-#     rim edges are found, same safety net as before.
+# CHANGE LOG (v23 -> v24):
+#   FEATURE: multi-diameter ("counterbore-style") hole support — segment
+#   preservation through merging.
+#     Problem: _merge_counterbores() collapsed a chain of coaxial
+#     segments with DIFFERENT radii (e.g. counterbore + main bore, or
+#     entrance chamfer -> shank -> ball-nose) into a single StepHole
+#     that only remembered the outermost open_3d/deep_3d/radius_open/
+#     radius_deep. Every intermediate step's own geometry was discarded.
+#     Downstream, StepHole.radius_at()/path_planner interpolated radius
+#     LINEARLY between those two extremes — correct for a taper, wrong
+#     for a true step: it produced a smooth ramp across what should be
+#     a sudden jump, so the probe path missed the wall at each step.
+#   Fix (this file):
+#     - _merge_half_faces(): when it averages a hole's two half-face
+#       samples into one true position, it now also rebuilds
+#       hi.segments[0] (models.py's HoleSegment) to match the corrected
+#       geometry, so a half-face-only hole (still ONE real diameter)
+#       still carries exactly one accurate segment.
+#     - _merge_counterbores(): each merge step now concatenates
+#       hi.segments + hj.segments (instead of only updating the
+#       endpoints) and re-sorts the combined list by axial position
+#       along the shared axis, shallow-to-deep. Because this already
+#       iterates to a fixed point (v22 fix), a chain of any length
+#       accumulates its full segment history correctly — segment i is
+#       whatever HoleSegment(s) were present on whichever side merged in
+#       at that step, so no intermediate radius/step boundary is lost.
+#     - StepHole.open_3d/deep_3d/radius_open/radius_deep/radius/depth
+#       (the OVERALL extent used everywhere else — view filtering,
+#       occlusion, UI depth/radius display) are computed exactly as
+#       before; only the new .segments list is additive.
+#   No other extraction logic (CYLINDER/CONE/TORUS/SPHERE analytical
+#   branches, fallback, view filtering) was touched.
 #
 # CHANGE LOG (v21 -> v22):
 #   BUG FIX: Total hole depth read too shallow (e.g. 20.36 mm reported vs
@@ -164,7 +166,7 @@ import copy
 import os
 import datetime
 import cadquery as cq
-from core.models import StepHole
+from core.models import StepHole, HoleSegment
 
 DEBUG = True
 
@@ -283,6 +285,11 @@ def _merge_half_faces(holes: list) -> list:
             hi.open_3d = tuple(true_open)
             hi.deep_3d = tuple(true_deep)
             hi.depth   = float(np.linalg.norm(true_deep - true_open))
+            # v24: this is still ONE real diameter (just two noisy half-face
+            # samples averaged into one true position) — rebuild the single
+            # segment so it matches the corrected geometry instead of going
+            # stale with the pre-average open_3d/deep_3d.
+            hi.segments = [HoleSegment(hi.open_3d, hi.deep_3d, hi.radius_open, hi.radius_deep)]
             merged[j]  = True
             break
     result = [h for i, h in enumerate(holes) if not merged[i]]
@@ -303,6 +310,13 @@ def _merge_counterbores(holes: list) -> list:
     # that never got stitched together. Repeating full passes until one
     # produces zero merges resolves chains of any length; a simple
     # 2-segment hole still merges in the first pass exactly as before.
+    #
+    # v24: every merge now also concatenates hi.segments + hj.segments
+    # (re-sorted shallow-to-deep along the shared axis) instead of only
+    # updating the combined open/deep endpoints. Because the outer loop
+    # already iterates to a fixed point, a chain of any length keeps
+    # accumulating its full segment history — no intermediate step
+    # boundary/radius is ever lost, even across 3+ merges.
     if not holes: return holes
     current = holes
     while True:
@@ -363,14 +377,25 @@ def _merge_counterbores(holes: list) -> list:
                 new_depth = float(np.linalg.norm(np.array(deep_pt) - np.array(shallow_pt)))
                 if new_depth <= 1e-6: continue
 
+                # v24: preserve per-step geometry — concatenate both sides'
+                # segment history and re-sort shallow->deep along the axis
+                # so hi.segments always reads open-end-first regardless of
+                # which side (hi/hj) happened to be shallower this pass.
+                combined_segments = list(hi.segments) + list(hj.segments)
+                combined_segments.sort(
+                    key=lambda seg: min(proj(seg.open_3d), proj(seg.deep_3d)))
+
                 hi.open_3d     = tuple(shallow_pt)
                 hi.deep_3d     = tuple(deep_pt)
                 hi.radius_open = float(shallow_r)
                 hi.radius_deep = float(deep_r)
                 hi.radius      = float(shallow_r)
                 hi.depth       = new_depth
+                hi.segments    = combined_segments
                 merged_out[j]  = True
                 made_merge      = True
+                _dbg(f"  MERGE: combined into {len(combined_segments)} segment(s), "
+                     f"total_depth={new_depth:.2f}")
                 break
 
         current = [h for i, h in enumerate(current) if not merged_out[i]]
