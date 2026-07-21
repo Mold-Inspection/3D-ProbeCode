@@ -1,6 +1,23 @@
 # ui/tabs/customization_tab.py
-# VERSION: 10
+# VERSION: 11
 # CHANGELOG:
+#   - V11 FIX: "deepest segment" (the one allowed to show the bottom-depth
+#     star) is now decided by comparing each segment's own PROJECTED
+#     depth through the CURRENT VIEW, not by trusting hole.segments' list
+#     order (segments[-1]). List order comes from B-Rep/mesh axis
+#     direction conventions (step_extractor.py) which can still end up
+#     ambiguous for some geometry even after the v25 mesh-orientation
+#     check; "bottom of the workpiece" is unambiguous once you look at
+#     actual projected depth (surface_z minus the projected point — the
+#     same convention driving every other depth value in this app) —
+#     whichever segment reaches the largest depth value IS the one
+#     closest to the real workpiece bottom, independent of list order.
+#     deepest_seg_idx is now computed once (alongside isolate_raw_seg,
+#     near the top of draw_cross_section) by projecting every raw
+#     segment's open_3d/deep_3d through projector.project_point_to_view()
+#     and taking whichever segment's deepest point is largest. Isolating
+#     any OTHER segment withholds the star, same as before — only the
+#     comparison basis changed.
 #   - V10 FIX (2 items):
 #     1. Isolate-mode bottom depth star suppressed for non-deepest
 #        segments. hole.segments is always sorted shallow->deep by
@@ -220,16 +237,40 @@ class CustomizationTab:
         # Used both by the wall-highlight loop right below and by the
         # toolpath-building block further down. None = show the whole
         # hole (original v08 behavior, zero change).
-        isolate_raw_seg = None
+        #
+        # v11: also determine which segment is the TRUE bottom of the
+        # workpiece, for the "only the deepest segment shows the star"
+        # rule. This is now decided by comparing each segment's own
+        # PROJECTED depth through the current view (the same depth
+        # convention already used everywhere else — surface_z minus the
+        # projected point, via projector.project_point_to_view), NOT by
+        # trusting hole.segments' list order. List order comes from
+        # B-Rep/mesh axis conventions that can still be ambiguous;
+        # projected depth is unambiguous — whichever segment actually
+        # reaches the largest depth value IS the one closest to the
+        # workpiece's true bottom, full stop.
+        isolate_raw_seg  = None
+        deepest_seg_idx  = None
         if has_hole:
             sel_hole      = app.current_holes[app.selected_hole_idx]
             sel_segments  = getattr(sel_hole, 'segments', None)
             isolate_idx   = getattr(app, 'selected_segment_idx', None)
+            sel_step_hole = getattr(sel_hole, '_step_hole', None)
+            raw_segments  = getattr(sel_step_hole, 'segments', None) if sel_step_hole else None
+
             if sel_segments and isolate_idx is not None and 0 <= isolate_idx < len(sel_segments):
-                sel_step_hole = getattr(sel_hole, '_step_hole', None)
-                raw_segments  = getattr(sel_step_hole, 'segments', None) if sel_step_hole else None
                 if raw_segments and isolate_idx < len(raw_segments):
                     isolate_raw_seg = raw_segments[isolate_idx]
+
+            if raw_segments and len(raw_segments) > 1:
+                deepest_depth = None
+                for si, seg in enumerate(raw_segments):
+                    d_open = app.geo.projector.project_point_to_view(*seg.open_3d, app.current_view, screen_rot)[2]
+                    d_deep = app.geo.projector.project_point_to_view(*seg.deep_3d, app.current_view, screen_rot)[2]
+                    seg_deepest = max(d_open, d_deep)
+                    if deepest_depth is None or seg_deepest > deepest_depth:
+                        deepest_depth  = seg_deepest
+                        deepest_seg_idx = si
 
         for i, h in enumerate(app.current_holes):
             r_z    = getattr(h, 'hole_top_z', h.surface_z)
@@ -320,16 +361,18 @@ class CustomizationTab:
             # further down.
             multi_seg_display = is_multi_seg and not isolate_active
 
-            # v10: hole.segments is always sorted shallow->deep (see
-            # step_extractor.py _merge_counterbores v24), so the LAST
-            # entry is always the one that actually reaches the hole's
-            # true bottom. Isolating any earlier (shallower) segment must
-            # not show the bottom-depth star — that segment's own "end"
-            # is really just the boundary into the next segment, not the
-            # real hole bottom.
+            # v11: the deepest segment is decided by comparing PROJECTED
+            # depth through the current view (deepest_seg_idx, computed
+            # above from the real workpiece surface via the projector) —
+            # not by trusting hole.segments' list order, which can still
+            # be ambiguous coming from B-Rep/mesh axis conventions.
+            # Isolating any segment that ISN'T that true-deepest one must
+            # not show the bottom-depth star — its own "end" is really
+            # just the boundary into the next segment, not the workpiece's
+            # actual bottom.
             show_bottom_star = True
             if isolate_active:
-                show_bottom_star = (app.selected_segment_idx == len(hole.segments) - 1)
+                show_bottom_star = (app.selected_segment_idx == deepest_seg_idx)
 
             if isolate_active:
                 layers     = isolate_cfg.layers

@@ -1,5 +1,45 @@
 # core/step_extractor.py
-# VERSION: 24
+# VERSION: 25
+#
+# CHANGE LOG (v24 -> v25):
+#   FIX: segment shallow->deep order confirmed against the actual MESH
+#   surface instead of trusting the B-Rep axis sign alone.
+#     Root cause: hole.segments' order (which end is "open"/shallow vs
+#     "deep"/bottom) came entirely from projecting each segment's
+#     endpoints onto that hole's B-Rep-reported axis (OCC's
+#     BRepAdaptor_Surface .Axis()/.Direction()). That vector's sign is
+#     whatever OCC happened to assign the underlying face — it can point
+#     either into the part or out of it with no guarantee of consistency
+#     between holes, or even between the analytical branch and the
+#     circle-edge fallback for the SAME hole. When it pointed the
+#     "wrong" way for a given hole, the smallest-projection point (which
+#     the merge logic always calls "shallow") was actually the physically
+#     DEEPEST point, silently reversing that hole's whole segment order —
+#     with no way to detect it from B-Rep data alone, since the sign is
+#     self-consistent within that one wrong assumption.
+#     Fix: new _orient_segments_by_mesh(), run once per hole after all
+#     B-Rep merging (_merge_half_faces / _merge_counterbores) is done.
+#     Compares which endpoint sits closer to the real tessellated MESH
+#     surface (trimesh's mesh.nearest.on_surface) — segments[0]'s
+#     presumed-shallow open_3d, or segments[-1]'s presumed-deep deep_3d.
+#     The mesh is ground truth for where the part's actual outer surface
+#     is, independent of any CAD axis sign. Whichever point is CLOSER to
+#     that real surface is the true opening; if it's the far end instead
+#     of the near end, the entire segment list (order + every segment's
+#     own open/deep + radius_open/radius_deep, plus the hole's own
+#     open_3d/deep_3d/radius_open/radius_deep/radius) is reversed so
+#     index 0 always stays the true open end and index -1 the true
+#     bottom — the invariant every downstream consumer (UI folder
+#     ordering, path_planner's segment walk, customization_tab's
+#     "only the deepest segment shows the bottom-depth star" rule) relies
+#     on. No-op for single-segment holes (nothing ambiguous to confirm)
+#     or if no mesh is available (falls back to the v24 B-Rep-only order,
+#     unchanged).
+#     extract() now takes an optional `mesh=None` 3rd parameter so
+#     geometry_engine.py (v03) can forward the already-loaded, already
+#     centroid-centered trimesh object — same coordinate frame every
+#     extracted point already uses (both were centered by the SAME
+#     mesh_centroid in cad_loader.py), so no extra transform is needed.
 #
 # CHANGE LOG (v23 -> v24):
 #   FEATURE: multi-diameter ("counterbore-style") hole support — segment
@@ -404,11 +444,52 @@ def _merge_counterbores(holes: list) -> list:
 
     return current
 
+def _orient_segments_by_mesh(h, mesh):
+    """
+    v25: after all B-Rep-based merging, confirm which end of a
+    multi-segment hole is the true OPENING using the actual tessellated
+    MESH surface, instead of trusting the CAD B-Rep axis sign that
+    decided the merge-time order (OCC can report a face's axis direction
+    either way — occasionally flipping which end the proj-based sort
+    called "shallow").
+
+    The endpoint closer to the mesh's real outer surface is the true
+    opening. If that turns out to be the far end of the LAST segment
+    instead of the near end of the FIRST, the whole hole (list order +
+    every field on both the hole itself and each segment) is reversed so
+    index 0 always stays the true open end and index -1 the true bottom
+    — the invariant everything downstream assumes.
+
+    No-op if mesh is unavailable or the hole has fewer than 2 segments
+    (nothing ambiguous to confirm for a single segment).
+    """
+    if mesh is None or not h.segments or len(h.segments) < 2:
+        return
+    try:
+        first_pt = np.array([h.segments[0].open_3d])
+        last_pt  = np.array([h.segments[-1].deep_3d])
+        _, dist_first, _ = mesh.nearest.on_surface(first_pt)
+        _, dist_last,  _ = mesh.nearest.on_surface(last_pt)
+    except Exception as e:
+        _dbg(f"  mesh orientation check failed: {e!r}")
+        return
+
+    if dist_last[0] < dist_first[0] - 1e-6:
+        _dbg(f"  MESH ORIENT: reversing segment order "
+             f"(surface dist first={dist_first[0]:.3f} last={dist_last[0]:.3f})")
+        h.segments.reverse()
+        for seg in h.segments:
+            seg.open_3d, seg.deep_3d         = seg.deep_3d, seg.open_3d
+            seg.radius_open, seg.radius_deep = seg.radius_deep, seg.radius_open
+        h.open_3d, h.deep_3d         = h.deep_3d, h.open_3d
+        h.radius_open, h.radius_deep = h.radius_deep, h.radius_open
+        h.radius                     = h.radius_open
+
 class StepExtractor:
     def __init__(self):
         self._step_holes_cache = []
 
-    def extract(self, step_data, mesh_centroid):
+    def extract(self, step_data, mesh_centroid, mesh=None):
         if step_data is None: return []
 
         cx_off, cy_off, cz_off = mesh_centroid
@@ -811,7 +892,12 @@ class StepExtractor:
 
         holes = _merge_half_faces(holes)
         holes = _merge_counterbores(holes)
-        
+
+        # v25: confirm/correct shallow->deep segment order against the
+        # real mesh surface -- see _orient_segments_by_mesh() docstring.
+        for h in holes:
+            _orient_segments_by_mesh(h, mesh)
+
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)}")
         return holes
