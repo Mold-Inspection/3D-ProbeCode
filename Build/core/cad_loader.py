@@ -1,19 +1,3 @@
-# core/cad_loader.py
-# VERSION: 02
-# CHANGE LOG (v02):
-#   Dead-code cleanup — self.mesh / self.step_data / self.centroid were
-#   stored as instance attributes but only ever consumed through load()'s
-#   return tuple (geometry_engine.load_file() never reads
-#   self.loader.mesh/.step_data/.centroid). Converted to local variables
-#   inside load(); behavior and return values are unchanged.
-# CHANGE LOG (v01):
-#   Feature (input validation) — enforce STEP/STP-only input.
-#   3D ProbeCode plans CMM touch-probe G-code from exact B-Rep hole
-#   geometry parsed from STEP files. Mesh-only formats (STL, OBJ, etc.)
-#   cannot supply that B-Rep data, so the old silent "load anything
-#   trimesh can open, fall back to mesh approximation" branch has been
-#   removed entirely. load() now raises ValueError with a clear message
-#   for any non-.step/.stp extension instead of silently degrading.
 import trimesh
 import cadquery as cq
 import os

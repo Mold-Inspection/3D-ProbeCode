@@ -1,27 +1,3 @@
-# core/path_planner.py
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   FEATURE: multi-diameter ("counterbore-style") hole support.
-#     Problem: get_probe_path_layers() built n_layers evenly spaced
-#     between the hole's OVERALL open_3d/deep_3d and read radius via
-#     hole.radius_at(t) — a straight-line interpolation between the two
-#     outermost radii. For a hole with a real step in diameter (not a
-#     taper), this smeared the step into a fake ramp, so layers landed
-#     off the true wall right around the step boundary.
-#     Fix: new get_probe_path_layers_multi() walks hole.segments (see
-#     models.py v02 / step_extractor.py v24 — each segment is one
-#     contiguous piece with its own open_3d/deep_3d/radius_open/
-#     radius_deep) and, for EACH segment independently, generates that
-#     segment's own layers using that segment's own
-#     layers/points_per_layer/zigzag_inspection/zigzag_degree config
-#     (models.HoleSegmentSetting — set per-segment by the user in the
-#     sidebar "folder" UI). Radius is only ever interpolated WITHIN a
-#     segment, never across a step boundary. zigzag angle offset resets
-#     to 0° at the start of every segment (each segment's zigzag is
-#     independent, per user's own scoping choice).
-#     The original get_probe_path_layers() is UNCHANGED and still used
-#     as-is for ordinary single-segment holes (HoleFeature.segments
-#     empty) — this is purely additive.
 import numpy as np
 
 

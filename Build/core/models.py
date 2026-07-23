@@ -1,31 +1,3 @@
-# core/models.py
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   FEATURE: multi-diameter ("counterbore-style") hole support.
-#     Problem: a hole with 2+ true steps in radius (e.g. counterbore +
-#     main bore) was collapsed by step_extractor._merge_counterbores()
-#     into ONE StepHole holding only the outermost open_3d/deep_3d and
-#     radius_open/radius_deep. Probe path generation then interpolated
-#     radius LINEARLY between those two extremes (StepHole.radius_at),
-#     which is correct for a taper/cone but wrong for a stepped hole —
-#     it produced a smooth ramp across what should be a sudden jump,
-#     causing the probe path to miss the actual wall at each step.
-#   Fix (this file only — geometry/UI wiring comes in later files):
-#     1. New HoleSegment class: holds the RAW per-segment geometry
-#        (open_3d/deep_3d/radius_open/radius_deep/depth) for one
-#        contiguous constant-or-tapered piece of a hole, exactly as it
-#        was before any counterbore merge. StepHole now carries a
-#        `segments` list of these — for an ordinary (never-merged) hole
-#        this list has exactly one entry mirroring the hole itself, so
-#        all existing single-segment code paths keep working unchanged.
-#     2. New HoleSegmentSetting class: per-segment INSPECTION config
-#        (layers, points_per_layer, zigzag_inspection, zigzag_degree,
-#        is_expanded) — the UI-facing counterpart of HoleSegment, one
-#        per segment. HoleFeature.segments is a list of these; it stays
-#        EMPTY for ordinary single-segment holes (legacy behavior, no
-#        folder UI shown) and is only populated (by main_window.py, next
-#        file in this change) when a hole has 2+ raw segments.
-#   No existing attribute was renamed, removed, or changed in meaning.
 import numpy as np
 
 
@@ -120,11 +92,6 @@ class StepHole:
         self.depth_top = None
         self.depth_bot = None
 
-        # v02: รายการ segment ดิบ เรียงจากปากรูไปก้นรู ใช้สำหรับ
-        # path planning แบบแยกตามขั้น. รูปกติ (ไม่เคยถูก merge เลย)
-        # จะมี segment เดียวที่เรขาคณิตตรงกับตัว StepHole เอง —
-        # ทำให้โค้ดเดิมที่ยังไม่รู้จัก segments (เช่น radius_at เก่า)
-        # ทำงานเหมือนเดิมทุกกรณี
         self.segments = segments if segments is not None else [
             HoleSegment(self.open_3d, self.deep_3d, self.radius_open, self.radius_deep)
         ]

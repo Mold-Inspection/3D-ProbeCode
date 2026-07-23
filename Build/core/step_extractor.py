@@ -1,205 +1,3 @@
-# core/step_extractor.py
-# VERSION: 25
-#
-# CHANGE LOG (v24 -> v25):
-#   FIX: segment shallow->deep order confirmed against the actual MESH
-#   surface instead of trusting the B-Rep axis sign alone.
-#     Root cause: hole.segments' order (which end is "open"/shallow vs
-#     "deep"/bottom) came entirely from projecting each segment's
-#     endpoints onto that hole's B-Rep-reported axis (OCC's
-#     BRepAdaptor_Surface .Axis()/.Direction()). That vector's sign is
-#     whatever OCC happened to assign the underlying face — it can point
-#     either into the part or out of it with no guarantee of consistency
-#     between holes, or even between the analytical branch and the
-#     circle-edge fallback for the SAME hole. When it pointed the
-#     "wrong" way for a given hole, the smallest-projection point (which
-#     the merge logic always calls "shallow") was actually the physically
-#     DEEPEST point, silently reversing that hole's whole segment order —
-#     with no way to detect it from B-Rep data alone, since the sign is
-#     self-consistent within that one wrong assumption.
-#     Fix: new _orient_segments_by_mesh(), run once per hole after all
-#     B-Rep merging (_merge_half_faces / _merge_counterbores) is done.
-#     Compares which endpoint sits closer to the real tessellated MESH
-#     surface (trimesh's mesh.nearest.on_surface) — segments[0]'s
-#     presumed-shallow open_3d, or segments[-1]'s presumed-deep deep_3d.
-#     The mesh is ground truth for where the part's actual outer surface
-#     is, independent of any CAD axis sign. Whichever point is CLOSER to
-#     that real surface is the true opening; if it's the far end instead
-#     of the near end, the entire segment list (order + every segment's
-#     own open/deep + radius_open/radius_deep, plus the hole's own
-#     open_3d/deep_3d/radius_open/radius_deep/radius) is reversed so
-#     index 0 always stays the true open end and index -1 the true
-#     bottom — the invariant every downstream consumer (UI folder
-#     ordering, path_planner's segment walk, customization_tab's
-#     "only the deepest segment shows the bottom-depth star" rule) relies
-#     on. No-op for single-segment holes (nothing ambiguous to confirm)
-#     or if no mesh is available (falls back to the v24 B-Rep-only order,
-#     unchanged).
-#     extract() now takes an optional `mesh=None` 3rd parameter so
-#     geometry_engine.py (v03) can forward the already-loaded, already
-#     centroid-centered trimesh object — same coordinate frame every
-#     extracted point already uses (both were centered by the SAME
-#     mesh_centroid in cad_loader.py), so no extra transform is needed.
-#
-# CHANGE LOG (v23 -> v24):
-#   FEATURE: multi-diameter ("counterbore-style") hole support — segment
-#   preservation through merging.
-#     Problem: _merge_counterbores() collapsed a chain of coaxial
-#     segments with DIFFERENT radii (e.g. counterbore + main bore, or
-#     entrance chamfer -> shank -> ball-nose) into a single StepHole
-#     that only remembered the outermost open_3d/deep_3d/radius_open/
-#     radius_deep. Every intermediate step's own geometry was discarded.
-#     Downstream, StepHole.radius_at()/path_planner interpolated radius
-#     LINEARLY between those two extremes — correct for a taper, wrong
-#     for a true step: it produced a smooth ramp across what should be
-#     a sudden jump, so the probe path missed the wall at each step.
-#   Fix (this file):
-#     - _merge_half_faces(): when it averages a hole's two half-face
-#       samples into one true position, it now also rebuilds
-#       hi.segments[0] (models.py's HoleSegment) to match the corrected
-#       geometry, so a half-face-only hole (still ONE real diameter)
-#       still carries exactly one accurate segment.
-#     - _merge_counterbores(): each merge step now concatenates
-#       hi.segments + hj.segments (instead of only updating the
-#       endpoints) and re-sorts the combined list by axial position
-#       along the shared axis, shallow-to-deep. Because this already
-#       iterates to a fixed point (v22 fix), a chain of any length
-#       accumulates its full segment history correctly — segment i is
-#       whatever HoleSegment(s) were present on whichever side merged in
-#       at that step, so no intermediate radius/step boundary is lost.
-#     - StepHole.open_3d/deep_3d/radius_open/radius_deep/radius/depth
-#       (the OVERALL extent used everywhere else — view filtering,
-#       occlusion, UI depth/radius display) are computed exactly as
-#       before; only the new .segments list is additive.
-#   No other extraction logic (CYLINDER/CONE/TORUS/SPHERE analytical
-#   branches, fallback, view filtering) was touched.
-#
-# CHANGE LOG (v21 -> v22):
-#   BUG FIX: Total hole depth read too shallow (e.g. 20.36 mm reported vs
-#   30 mm true), with the "open" end of the hole appearing deeper into
-#   the part than the real surface.
-#     Root cause: `_merge_counterbores()` only ran a SINGLE pass over all
-#     hole pairs. This correctly merges a simple 2-segment composite hole
-#     (e.g. one counterbore + one main bore, or a straight cylindrical
-#     shank sitting on a spherical ball-nose bottom), but for a CHAIN of
-#     3+ coaxial segments (e.g. entrance chamfer -> cylindrical shank ->
-#     spherical tip), a single pass only performs one merge: segment A
-#     merges into B, but the newly-combined A+B was never re-checked
-#     against C within that same call — C was silently left behind as
-#     its own separate, too-shallow StepHole. Since the shallowest
-#     surviving segment (e.g. the sphere-to-cylinder transition circle)
-#     then gets reported as the hole's `open_3d`, the tool appeared to
-#     start measuring from partway down the real hole instead of from
-#     the true part surface, undercounting total depth by whatever the
-#     un-merged segment's length was.
-#     Fix: `_merge_counterbores()` now repeats full merge passes until
-#     one pass completes with zero merges (fixed-point iteration),
-#     instead of returning after exactly one pass. A simple 2-segment
-#     hole still resolves on the first pass exactly as before; chains of
-#     any length now fully collapse into a single continuous StepHole.
-#
-# CHANGE LOG (v20 -> v21):
-#   BUG FIX: Spherical-cap hole marker drifted off the dome's true visual
-#   center in the UI.
-#     Root cause: the SPHERE branch's rim_center was computed as a plain
-#     arithmetic mean of sampled 3D rim points. A cap's rim is almost
-#     always a single CLOSED circular edge, and for a closed edge
-#     positionAt(0.0) == positionAt(1.0) (same point). Our sample set
-#     t=(0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0) therefore double-weighted
-#     whichever point sits at that seam while every other angle around
-#     the circle was sampled once — pulling the raw-position average
-#     sideways toward the duplicated point instead of landing on the
-#     true circle center.
-#     Fix: rim_center is now rebuilt analytically ON the axis using only
-#     the scalar axial projection average (h_avg = mean of proj_len,
-#     rim_center = c0 + h_avg*axis_vec) instead of averaging raw 3D
-#     positions. A duplicated sample shares the same axial value as its
-#     twin, so it only reduces noise in a scalar average — it can no
-#     longer bias direction. This mirrors how deep_3d (the pole) was
-#     already built analytically rather than from a raw sample average.
-#     radius_open's perpendicular-distance averaging was NOT affected by
-#     this bug (a duplicated point has the same radius as its twin, so
-#     magnitude was already unbiased) — only rim_center's position needed
-#     the fix.
-#
-# CHANGE LOG (v19 -> v20):
-#   FEATURE: SPHERE faces are now extracted as holes (spherical-cap
-#   recesses/dimples), alongside CYLINDER, CONE, TORUS.
-#     - A sphere has no inherent axis; axis is derived from the trimmed
-#       face's centroid relative to the sphere center, which reliably
-#       points toward the cap's pole.
-#     - deep_3d is set analytically to the pole point (center + R*axis) —
-#       always exactly on the sphere surface — with radius_deep = 0.0,
-#       matching the existing CONE-tip convention.
-#     - open_3d is the sampled rim centroid; radius_open is the rim's
-#       perpendicular distance from the pole axis.
-#     - Falls through to the existing circle-edge fallback on failure,
-#       same safety net as CONE/TORUS.
-#     - Added disabled-by-default _MIN_SPHERE_CAP_RADIUS hook to filter
-#       spherical fillets, since these are far more common than cylinder/
-#       torus fillets in typical STEP models.
-#     - No downstream changes needed: StepHole/models.py/path_planner.py/
-#       projector.py/geometry_engine.py/UI tabs already tolerate differing
-#       open/deep radii (built for CONE, reused by TORUS, now SPHERE).
-#
-# CHANGE LOG (v18 -> v19):
-#   FEATURE: TORUS faces are now extracted as holes, alongside CYLINDER
-#   and CONE.
-#     - geom_type filter now accepts 'CYLINDER', 'CONE', 'TORUS'.
-#     - New analytical branch for TORUS (mirrors the CYLINDER branch):
-#       pulls gp_Torus from BRepAdaptor_Surface (MajorRadius/MinorRadius/
-#       Axis), then samples the face's edges/vertices and, for EACH
-#       sample point, computes both its axial coordinate (projection onto
-#       the main axis) and its LOCAL radius (perpendicular distance from
-#       the axis). This matters because — unlike a cylinder — a torus
-#       does NOT have a constant radius along its axis: at the "equator"
-#       of the tube the local radius is (R + r), at the innermost point
-#       it's (R - r). Using per-sample local radius instead of one shared
-#       radius keeps radius_open / radius_deep faithful to the actual
-#       surface instead of distorting a cone-like taper onto a torus.
-#     - The two axial extremes (min/max projected sample) become
-#       end_a/end_b exactly as in the CYLINDER branch, each keeping its
-#       own local radius as r_a/r_b. This flows into the existing
-#       StepHole(open_3d, deep_3d, radius_open, radius_deep, axis)
-#       constructor unchanged — no changes needed elsewhere (models.py,
-#       _merge_half_faces, _merge_counterbores, get_step_holes_in_view,
-#       view filtering) since they already tolerate differing
-#       open/deep radii (this path was built for CONE).
-#     - If the analytical gp_Torus path fails for any reason, execution
-#       falls through to the existing generic circle-edge fallback
-#       (unchanged) — same safety net CONE already relies on.
-#   NOTE: no fillet-vs-real-hole filtering was added — a small-tube-radius
-#   TORUS face (typical of a rounded hole mouth) is currently counted the
-#   same as a real toroidal groove/bore. _MIN_TORUS_TUBE_RADIUS is left
-#   as a documented, unused-by-default hook below in case fillets start
-#   showing up as false-positive "holes" in testing.
-#
-# CHANGE LOG (v17 -> v18):
-#   Dead-code cleanup only, no behavior change:
-#     1. Removed unused constant _DEPTH_TOL (never referenced — the actual
-#        depth-reject check hardcodes 0.1).
-#     2. Removed write-only rejection counters (rejected_geomtype,
-#        rejected_edges, rejected_sweep, rejected_dist, rejected_depth,
-#        rejected_dup, rejected_other) — incremented throughout extract()
-#        but never read, printed, or returned anywhere. total_faces is
-#        KEPT since it's used inside a _dbg() debug message.
-#     3. Removed pre_merge_count / post_half_face_count in extract() —
-#        computed, never used afterward.
-#     4. Removed the `h._id = i + 1` assignment at the end of
-#        get_step_holes_in_view() — nothing in core/* or ui/* reads
-#        StepHole._id; the UI layer uses HoleFeature.id/.display_id
-#        instead, assigned separately in main_window.show_view().
-#
-# CHANGE LOG (v16 -> v17):
-#   1. BUG FIX: Removed the flawed `_geomAdaptor()` branch entirely. Now strictly 
-#      enforcing `BRepAdaptor_Surface` which correctly wraps trimmed B-Rep faces 
-#      and exposes the `.Cylinder()` mathematical equations.
-#   2. ENHANCEMENT: Increased the Cross-Hole Bridge gap tolerance to 50.0mm specifically 
-#      for fragmented coaxial holes with identical radii to survive large perpendicular pin bores.
-#   3. UX FILTER: Added view-based filtering in `get_step_holes_in_view()`. 
-#      Irrelevant side-holes and holes facing away from the camera are now dropped completely 
-#      instead of cluttering the "Unselected" UI list.
-
 import numpy as np
 import math
 import copy
@@ -261,17 +59,8 @@ _COAXIAL_PERP_TOL   = 0.3
 _COAXIAL_PERP_FRAC  = 0.15  
 _COAXIAL_GAP_TOL    = 1.5   
 
-# v19: NOT applied by default — documented hook only. If small-fillet
-# TORUS faces start appearing as false-positive "holes", uncomment the
-# guard inside extract()'s TORUS branch that checks
-# `r_minor < _MIN_TORUS_TUBE_RADIUS` and `continue`s past them.
 _MIN_TORUS_TUBE_RADIUS = 2.0
 
-# v20: NOT applied by default — documented hook only, same pattern as
-# _MIN_TORUS_TUBE_RADIUS. Small ball-corner fillets are frequently modeled
-# as SPHERE faces; if they start appearing as false-positive "holes",
-# uncomment the guard inside extract()'s SPHERE branch that checks
-# `R < _MIN_SPHERE_CAP_RADIUS` and `continue`s past them.
 _MIN_SPHERE_CAP_RADIUS = 2.0
 
 def _sweep_angle(edge) -> float:
@@ -325,10 +114,6 @@ def _merge_half_faces(holes: list) -> list:
             hi.open_3d = tuple(true_open)
             hi.deep_3d = tuple(true_deep)
             hi.depth   = float(np.linalg.norm(true_deep - true_open))
-            # v24: this is still ONE real diameter (just two noisy half-face
-            # samples averaged into one true position) — rebuild the single
-            # segment so it matches the corrected geometry instead of going
-            # stale with the pre-average open_3d/deep_3d.
             hi.segments = [HoleSegment(hi.open_3d, hi.deep_3d, hi.radius_open, hi.radius_deep)]
             merged[j]  = True
             break
@@ -336,27 +121,6 @@ def _merge_half_faces(holes: list) -> list:
     return result
 
 def _merge_counterbores(holes: list) -> list:
-    # v22 FIX: iterate to a fixed point instead of a single O(n^2) pass.
-    # A single pass correctly merges a simple 2-segment hole (e.g. one
-    # counterbore + one main bore, or one cylindrical shank + one
-    # spherical ball-nose bottom), but a CHAIN of 3+ coaxial segments
-    # (e.g. entrance chamfer -> straight cylindrical shank -> spherical
-    # tip) was only getting ONE merge per pass: segment A merges into B,
-    # but the resulting combined A+B was never re-checked against C in
-    # the same call, silently leaving C as its own separate, too-shallow
-    # StepHole. That's what produced hole depths shorter than the true
-    # part depth, with the reported "open" end sitting deeper than the
-    # real surface — it was actually the boundary between two segments
-    # that never got stitched together. Repeating full passes until one
-    # produces zero merges resolves chains of any length; a simple
-    # 2-segment hole still merges in the first pass exactly as before.
-    #
-    # v24: every merge now also concatenates hi.segments + hj.segments
-    # (re-sorted shallow-to-deep along the shared axis) instead of only
-    # updating the combined open/deep endpoints. Because the outer loop
-    # already iterates to a fixed point, a chain of any length keeps
-    # accumulating its full segment history — no intermediate step
-    # boundary/radius is ever lost, even across 3+ merges.
     if not holes: return holes
     current = holes
     while True:
@@ -392,7 +156,6 @@ def _merge_counterbores(holes: list) -> list:
 
                 gap_tol = _COAXIAL_GAP_TOL if is_coaxial else _STRICT_GAP_TOL
 
-                # V17 CROSS-HOLE BRIDGE: ถ้ารูร่วมแกนและรัศมีเท่ากัน ให้ขยายระยะสะพานเชื่อมเป็น 50mm
                 if is_coaxial and abs(r_large - r_small) < 0.1 and perp_d < _COAXIAL_PERP_TOL:
                     extended_gap = max(gap_tol, r_large * 4.0, 50.0)
                     if gap_tol < extended_gap:
@@ -417,10 +180,6 @@ def _merge_counterbores(holes: list) -> list:
                 new_depth = float(np.linalg.norm(np.array(deep_pt) - np.array(shallow_pt)))
                 if new_depth <= 1e-6: continue
 
-                # v24: preserve per-step geometry — concatenate both sides'
-                # segment history and re-sort shallow->deep along the axis
-                # so hi.segments always reads open-end-first regardless of
-                # which side (hi/hj) happened to be shallower this pass.
                 combined_segments = list(hi.segments) + list(hj.segments)
                 combined_segments.sort(
                     key=lambda seg: min(proj(seg.open_3d), proj(seg.deep_3d)))
@@ -445,24 +204,6 @@ def _merge_counterbores(holes: list) -> list:
     return current
 
 def _orient_segments_by_mesh(h, mesh):
-    """
-    v25: after all B-Rep-based merging, confirm which end of a
-    multi-segment hole is the true OPENING using the actual tessellated
-    MESH surface, instead of trusting the CAD B-Rep axis sign that
-    decided the merge-time order (OCC can report a face's axis direction
-    either way — occasionally flipping which end the proj-based sort
-    called "shallow").
-
-    The endpoint closer to the mesh's real outer surface is the true
-    opening. If that turns out to be the far end of the LAST segment
-    instead of the near end of the FIRST, the whole hole (list order +
-    every field on both the hole itself and each segment) is reversed so
-    index 0 always stays the true open end and index -1 the true bottom
-    — the invariant everything downstream assumes.
-
-    No-op if mesh is unavailable or the hole has fewer than 2 segments
-    (nothing ambiguous to confirm for a single segment).
-    """
     if mesh is None or not h.segments or len(h.segments) < 2:
         return
     try:
@@ -564,17 +305,6 @@ class StepExtractor:
                 except Exception as e:
                     _dbg(f"Analytical extraction failed face#{total_faces}: {e!r}")
 
-            # v19: ANALYTICAL TORUS EXTRACTION
-            # A torus does NOT have a constant radius along its axis like a
-            # cylinder does, so we cannot reuse a single r_a=r_b value. For
-            # every sampled point on the face we compute BOTH its axial
-            # position (projection onto the main axis) and its own local
-            # radius (perpendicular distance from the axis). The two axial
-            # extremes become end_a/end_b, each carrying its own local
-            # radius as r_a/r_b — this then flows into the same
-            # StepHole(open, deep, radius_open, radius_deep, axis)
-            # constructor already used for CONE, so no downstream code
-            # (merging, view filtering, UI) needs to change.
             elif geom_type == 'TORUS':
                 try:
                     try:
@@ -597,11 +327,6 @@ class StepExtractor:
 
                     R_major = float(tor.MajorRadius())
                     r_minor = float(tor.MinorRadius())
-
-                    # Optional fillet guard (disabled by default — see
-                    # _MIN_TORUS_TUBE_RADIUS docstring above):
-                    # if r_minor < _MIN_TORUS_TUBE_RADIUS:
-                    #     raise ValueError(f"Tube radius {r_minor:.2f} looks like a fillet, skipping")
 
                     samples = []  # (axial_coord, local_radius_at_that_point)
                     for f_edge in face.Edges():
@@ -647,21 +372,6 @@ class StepExtractor:
                 except Exception as e:
                     _dbg(f"Torus analytical extraction failed face#{total_faces}: {e!r}")
 
-            # v20: ANALYTICAL SPHERE EXTRACTION (spherical-cap holes)
-            # A sphere has no inherent axis — every direction through its
-            # center is equivalent. The axis we need only exists because
-            # the FACE is a trimmed cap: the rim (boundary edges) defines
-            # a circle whose center lies on the cap's symmetry axis.
-            #   - axis_vec: sphere center -> face centroid, this reliably
-            #     points toward the cap's far side (the pole).
-            #   - deep_3d (pole) = center + radius * axis_vec — this is
-            #     analytically exact (always lies ON the sphere), not a
-            #     sampled approximation. radius_deep = 0.0, same
-            #     "point at the tip" convention already used for CONE.
-            #   - open_3d = centroid of sampled rim points (real sampled
-            #     boundary, not derived).
-            #   - radius_open = perpendicular distance of rim points from
-            #     the pole axis line through the center.
             elif geom_type == 'SPHERE':
                 try:
                     try:
@@ -677,18 +387,6 @@ class StepExtractor:
 
                     c0 = np.array([loc.X() - cx_off, loc.Y() - cy_off, loc.Z() - cz_off])
 
-                    # v23 FIX: a trimmed spherical face's edge loop can
-                    # include an internal SEAM_CURVE (the UV-periodicity
-                    # seam), not just the true rim boundary. Geometrically
-                    # the seam is ALSO a 'CIRCLE' edge, but it's a great
-                    # circle running from the pole out to the rim, with
-                    # radius exactly equal to the sphere's own radius R —
-                    # a genuine latitude/rim edge is always strictly
-                    # smaller than R. Sampling the seam alongside the real
-                    # rim silently pulled both radius_open and the axial
-                    # height of open_3d toward the pole (too deep).
-                    # Filter: only accept CIRCLE edges with radius clearly
-                    # < R as rim candidates; skip the seam.
                     _SEAM_RADIUS_TOL = max(R * 1e-4, 1e-3)
 
                     def _edge_radius(e):
@@ -740,10 +438,6 @@ class StepExtractor:
 
                     if not rim_pts: raise ValueError("No rim samples found on sphere face")
 
-                    # Axis direction: prefer the face's own centroid (biased
-                    # toward the cap's far side incl. the pole) over the rim
-                    # centroid, since a shallow cap's rim centroid sits close
-                    # to the equatorial plane and is a noisier axis estimate.
                     try:
                         fc = face.Center()
                         face_centroid = np.array(
@@ -756,30 +450,7 @@ class StepExtractor:
                     if axis_norm < 1e-6: raise ValueError("Degenerate sphere cap axis")
                     axis_vec  = axis_raw / axis_norm
                     ax, ay, az = axis_vec
-
-                    # Analytical pole = deepest point of the cap, always on
-                    # the sphere surface exactly.
                     pole_pt = c0 + R * axis_vec
-
-                    # v21 FIX: rim_center is now rebuilt analytically ON the
-                    # axis, instead of averaging raw sampled 3D positions.
-                    # A spherical-cap rim is (almost always) ONE closed
-                    # circular edge, and for a closed edge positionAt(0.0)
-                    # and positionAt(1.0) are the SAME point — our sample
-                    # set (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0) therefore
-                    # double-weights whichever point sits at that seam,
-                    # while the rest of the circle is sampled once each.
-                    # Averaging raw positions directly (old code) pulled
-                    # the centroid sideways toward that duplicated point —
-                    # this is what caused the hole marker to drift off the
-                    # dome's true visual center. A scalar axial average is
-                    # immune to this: every rim point shares (almost) the
-                    # same projection onto axis_vec regardless of angular
-                    # sampling density, so duplicates only reduce noise,
-                    # never bias direction. Rebuilding the point from
-                    # c0 + h_avg*axis_vec guarantees it lands exactly on
-                    # the symmetry axis, mirroring how deep_3d (the pole)
-                    # is already built analytically rather than sampled.
                     rim_arr    = np.array(rim_pts)
                     rel        = rim_arr - c0
                     proj_len   = rel @ axis_vec
@@ -787,12 +458,6 @@ class StepExtractor:
 
                     h_avg      = float(np.mean(proj_len))
                     rim_center = c0 + h_avg * axis_vec
-
-                    # radius_open = perpendicular distance of rim points
-                    # from the pole axis line through the sphere center.
-                    # (unaffected by the seam-duplicate issue above — a
-                    # duplicated point has the same radius as its twin,
-                    # so it doesn't bias the magnitude, only direction.)
                     r_open     = float(np.mean(np.linalg.norm(perp_vecs, axis=1)))
                     r_deep     = 0.0  # pole is a single point, same as CONE tip
 
@@ -800,13 +465,6 @@ class StepExtractor:
                     end_b      = tuple(pole_pt)
                     r_a, r_b   = r_open, r_deep
                     face_depth = float(np.linalg.norm(pole_pt - rim_center))
-
-                    # Optional fillet guard (disabled by default — small
-                    # ball-corner fillets are very commonly modeled as
-                    # SPHERE faces and are NOT real holes). Enable if
-                    # fillets start showing up as false-positive "holes":
-                    # if R < _MIN_SPHERE_CAP_RADIUS:
-                    #     raise ValueError(f"Sphere radius {R:.2f} looks like a fillet, skipping")
 
                     analytical_success = True
                     _dbg(f"SPHERE ANALYTICAL SUCCESS face#{total_faces}: "
@@ -892,9 +550,6 @@ class StepExtractor:
 
         holes = _merge_half_faces(holes)
         holes = _merge_counterbores(holes)
-
-        # v25: confirm/correct shallow->deep segment order against the
-        # real mesh surface -- see _orient_segments_by_mesh() docstring.
         for h in holes:
             _orient_segments_by_mesh(h, mesh)
 
@@ -992,12 +647,10 @@ class StepExtractor:
                         result.append(hc)
                         continue
 
-                # V17 UI FILTER: กรองรูเจาะด้านข้าง (Side-holes) ทิ้ง ไม่แสดงในลิสต์ Unselected
                 if axis_align < SIDE_HOLE_AXIS_THRESHOLD:
                     _dbg(f"  cache[{cache_idx}] DROPPED: irrelevant side-hole for this view.")
                     continue
                 
-                # V17 UI FILTER: กรองรูที่เจาะจากอีกฝั่ง (Facing away) ทิ้ง ไม่แสดงในลิสต์
                 if open_depth > deep_depth:
                     _dbg(f"  cache[{cache_idx}] DROPPED: hole faces away from camera.")
                     continue

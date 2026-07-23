@@ -1,104 +1,3 @@
-# ui/tabs/customization_tab.py
-# VERSION: 11
-# CHANGELOG:
-#   - V11 FIX: "deepest segment" (the one allowed to show the bottom-depth
-#     star) is now decided by comparing each segment's own PROJECTED
-#     depth through the CURRENT VIEW, not by trusting hole.segments' list
-#     order (segments[-1]). List order comes from B-Rep/mesh axis
-#     direction conventions (step_extractor.py) which can still end up
-#     ambiguous for some geometry even after the v25 mesh-orientation
-#     check; "bottom of the workpiece" is unambiguous once you look at
-#     actual projected depth (surface_z minus the projected point — the
-#     same convention driving every other depth value in this app) —
-#     whichever segment reaches the largest depth value IS the one
-#     closest to the real workpiece bottom, independent of list order.
-#     deepest_seg_idx is now computed once (alongside isolate_raw_seg,
-#     near the top of draw_cross_section) by projecting every raw
-#     segment's open_3d/deep_3d through projector.project_point_to_view()
-#     and taking whichever segment's deepest point is largest. Isolating
-#     any OTHER segment withholds the star, same as before — only the
-#     comparison basis changed.
-#   - V10 FIX (2 items):
-#     1. Isolate-mode bottom depth star suppressed for non-deepest
-#        segments. hole.segments is always sorted shallow->deep by
-#        step_extractor.py's _merge_counterbores() (open end at index 0,
-#        true hole bottom at index len-1 — see that file's v24 changelog),
-#        so segments[-1] is always the one that actually reaches the real
-#        hole bottom. Isolating any OTHER (shallower) segment no longer
-#        draws the yellow star / "Bottom Depth Point" marker or its
-#        "Depth=... mm" text, since that segment's own end is really just
-#        the boundary into the next segment, not the hole's true bottom —
-#        showing a star there was misleading. The wall/toolpath for that
-#        segment still draws normally; only the star+text is withheld.
-#     2. Whole-hole (non-isolated) wall-highlight mask no longer uses a
-#        single h.radius (the OPEN end's radius only) as its search
-#        radius across the ENTIRE depth. For any hole that's wider at a
-#        deeper point than at its mouth (counterbore, ball-nose bottom,
-#        reverse taper, etc.) that single narrow radius silently excluded
-#        the wider triangles further down, making the highlighted mesh
-#        look cut off partway through. Now uses the MAX radius found
-#        across the hole's full geometry (StepHole.radius_open/
-#        radius_deep, plus every raw segment's own radius_open/
-#        radius_deep when present) so nothing at any depth is excluded.
-#        Isolate mode is unaffected — it already used that segment's own
-#        max(radius_open, radius_deep).
-#   - V09 FEATURE: segment isolate. When the user expands one segment's
-#     folder row in the sidebar (main_window.py v11 sets
-#     app.selected_segment_idx), draw_cross_section() now shows ONLY that
-#     segment — its own wall-highlight mesh slice and its own toolpath —
-#     instead of the combined all-segments view. Other segments of the
-#     same hole are hidden entirely (not just dimmed), same as how an
-#     unselected hole is skipped today.
-#       - Isolate's path is built by calling the plain single-segment
-#         app.geo.get_probe_path_layers() directly on the raw HoleSegment
-#         (StepHole.segments[i] — it already exposes open_3d/deep_3d/
-#         radius_at, the exact interface get_probe_path_layers expects),
-#         using that segment's OWN HoleSegmentSetting
-#         (layers/points/zigzag/degree). No new geometry/path code was
-#         needed — this reuses the existing single-segment function with
-#         segment-scoped inputs instead of whole-hole inputs.
-#       - The wall-highlight mesh mask (white "Selected Hole Mesh" outline
-#         drawn from the loop above) is scoped to that segment's own
-#         projected z-range/radius instead of the whole hole's, so the
-#         highlighted mesh band matches what's being probed.
-#       - 3D camera zoom (xlim/ylim/zlim) now frames just the isolated
-#         segment's z-span instead of the whole hole's, so isolating a
-#         short segment usefully zooms in on it.
-#       - Collapsing the segment (selected_segment_idx back to None) or
-#         switching holes reverts to the original v08 "whole hole, all
-#         segments" rendering — zero behavior change for ordinary
-#         single-segment holes or multi-segment holes with nothing
-#         expanded.
-#   - V08 FEATURE: multi-diameter ("counterbore-style") hole support.
-#     Problem: draw_cross_section() always called the single-segment
-#     app.geo.get_probe_path_layers(sh, hole.layers, ...), which
-#     interpolates radius linearly across the WHOLE hole (open_3d to
-#     deep_3d). For a hole with a true step in diameter, this produced a
-#     toolpath that ramped smoothly through what should be a sudden
-#     jump, missing the wall right around the step.
-#     Fix: when `hole.segments` is non-empty (see main_window.py v10 /
-#     path_planner.py v02 / models.py v02), this now calls
-#     app.geo.get_probe_path_layers_multi(sh, hole.segments, ...)
-#     instead — each segment's own layers/points_per_layer/
-#     zigzag_inspection/zigzag_degree (set per-segment in the sidebar
-#     "folder" UI) drives its own slice of the path, and radius is only
-#     ever interpolated within that segment. The wall-point loop now
-#     reads 'points_per_layer' off each layer dict (present only for the
-#     multi-segment path) instead of a single shared `points` value.
-#     Zigzag layer coloring/spoke-line rendering now iterates the actual
-#     layer indices present (sorted(layer_centers.keys())) instead of
-#     range(hole.layers), so it works whether those layers came from one
-#     segment or several. Title bar / legend text summarizes per-segment
-#     config for multi-diameter holes instead of a single "NL × NP".
-#     Ordinary single-segment holes (hole.segments empty — the
-#     overwhelming majority) take the exact same code path as before,
-#     byte-for-byte unchanged behavior.
-#   - V07 BUG FIX: Restored the missing `px_list.append(star_z)` lines that were 
-#     accidentally removed during the V06 merge. The yellow dashed toolpath will 
-#     now correctly reach the bottom depth star again.
-#   - V06 UX: Unselected holes have 10% opacity in 3D to reduce visual clutter.
-#   - V06 UX: Hovering over items in the right sidebar highlights the hole in 3D.
-
 import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
@@ -146,13 +45,6 @@ def _hole_display_label(h) -> str:
 
 
 def _hole_max_radius(h) -> float:
-    """
-    v10: best-effort MAXIMUM radius across a hole's full depth, used for
-    the whole-hole wall-highlight mask so it never excludes real wall
-    triangles at a wider point (counterbore mouth, ball-nose bottom,
-    reverse taper, etc.) — a single open-end radius alone isn't enough.
-    Falls back to h.radius for mesh-only holes (no _step_hole).
-    """
     sh = getattr(h, '_step_hole', None)
     if sh is None:
         return h.radius
@@ -231,24 +123,6 @@ class CustomizationTab:
         cy         = (ymin + ymax) / 2.0
         cz         = (zmin_d + zmax_d) / 2.0
         half       = max(xmax - xmin, ymax - ymin, zmax_d - zmin_d) / 2.0 * 1.1
-
-        # v09: determine whether a specific segment is "isolated" (set by
-        # main_window.py's _toggle_segment_expand -> selected_segment_idx).
-        # Used both by the wall-highlight loop right below and by the
-        # toolpath-building block further down. None = show the whole
-        # hole (original v08 behavior, zero change).
-        #
-        # v11: also determine which segment is the TRUE bottom of the
-        # workpiece, for the "only the deepest segment shows the star"
-        # rule. This is now decided by comparing each segment's own
-        # PROJECTED depth through the current view (the same depth
-        # convention already used everywhere else — surface_z minus the
-        # projected point, via projector.project_point_to_view), NOT by
-        # trusting hole.segments' list order. List order comes from
-        # B-Rep/mesh axis conventions that can still be ambiguous;
-        # projected depth is unambiguous — whichever segment actually
-        # reaches the largest depth value IS the one closest to the
-        # workpiece's true bottom, full stop.
         isolate_raw_seg  = None
         deepest_seg_idx  = None
         if has_hole:
@@ -296,10 +170,6 @@ class CustomizationTab:
             dist_h = np.hypot(tri_cx - h.x, tri_cy - h.y)
 
             if is_sel and isolate_raw_seg is not None:
-                # v09: isolating one segment — scope the highlight band to
-                # THAT segment's own projected z-range/radius instead of
-                # the whole hole's, so the white mesh outline matches what
-                # is actually being probed.
                 d_open   = app.geo.projector.project_point_to_view(*isolate_raw_seg.open_3d, app.current_view, screen_rot)
                 d_deep   = app.geo.projector.project_point_to_view(*isolate_raw_seg.deep_3d, app.current_view, screen_rot)
                 z_lo_h   = min(d_open[2], d_deep[2])
@@ -340,36 +210,10 @@ class CustomizationTab:
             points     = hole.points_per_layer
             use_zigzag = getattr(hole, 'zigzag_inspection', False)
             step_deg   = getattr(hole, 'zigzag_degree', 45.0)
-
-            # v08: multi-diameter ("counterbore-style") hole — hole.segments
-            # is a list of HoleSegmentSetting (models.py v02), non-empty only
-            # for holes step_extractor.py v24 merged from 2+ real-diameter
-            # segments. Empty (ordinary hole) => every branch below behaves
-            # exactly as before.
             is_multi_seg = bool(getattr(hole, 'segments', None))
-
-            # v09: isolate_raw_seg was resolved earlier (before the
-            # wall-highlight loop) from app.selected_segment_idx. When set,
-            # treat this hole exactly like an ordinary single-segment hole
-            # for path/label purposes, but scoped to THIS segment's own
-            # raw geometry + own HoleSegmentSetting — never the whole hole.
             isolate_active = (is_multi_seg and isolate_raw_seg is not None)
             isolate_cfg    = hole.segments[app.selected_segment_idx] if isolate_active else None
-            # multi_seg_display: True only when the ALL-segments combined
-            # view is actually being drawn (multi-segment hole, nothing
-            # isolated). Drives the "N segments" vs "NL x NP" labeling
-            # further down.
             multi_seg_display = is_multi_seg and not isolate_active
-
-            # v11: the deepest segment is decided by comparing PROJECTED
-            # depth through the current view (deepest_seg_idx, computed
-            # above from the real workpiece surface via the projector) —
-            # not by trusting hole.segments' list order, which can still
-            # be ambiguous coming from B-Rep/mesh axis conventions.
-            # Isolating any segment that ISN'T that true-deepest one must
-            # not show the bottom-depth star — its own "end" is really
-            # just the boundary into the next segment, not the workpiece's
-            # actual bottom.
             show_bottom_star = True
             if isolate_active:
                 show_bottom_star = (app.selected_segment_idx == deepest_seg_idx)
@@ -404,10 +248,6 @@ class CustomizationTab:
                 sh     = hole._step_hole
 
                 if isolate_active:
-                    # v09: scope z_start/star_z to THIS segment's own
-                    # projected depth range, not the whole hole's — so the
-                    # camera zoom (further below) frames just the isolated
-                    # segment instead of the whole hole.
                     d_open  = app.geo.projector.project_point_to_view(
                         *isolate_raw_seg.open_3d, app.current_view, screen_rot)
                     d_deep  = app.geo.projector.project_point_to_view(
@@ -419,18 +259,6 @@ class CustomizationTab:
                     star_z  = sh.depth_bot
                 star_x  = hole.x
                 star_y  = hole.y
-
-                # v08/v09: segment-aware path for multi-diameter holes —
-                # radius is only ever interpolated WITHIN one segment,
-                # never across a real step boundary.
-                #   isolate_active -> ONE segment only, via the plain
-                #     single-segment get_probe_path_layers() called
-                #     directly on the raw HoleSegment (it already exposes
-                #     open_3d/deep_3d/radius_at) with that segment's own
-                #     HoleSegmentSetting.
-                #   multi_seg_display -> ALL segments combined (v08,
-                #     unchanged).
-                #   else -> ordinary single-segment hole (unchanged).
                 if isolate_active:
                     step_layers = app.geo.get_probe_path_layers(
                         isolate_raw_seg, layers, app.current_view,
@@ -459,9 +287,6 @@ class CustomizationTab:
                     cy_lyr     = lyr['y_display']
                     ang_offset = lyr.get('angle_offset', 0.0)
                     lidx       = lyr.get('layer_idx', 0)
-                    # v08: multi-segment layers carry their OWN
-                    # points_per_layer (that segment's setting); ordinary
-                    # holes fall back to the single shared `points` value.
                     pts_this_layer = lyr.get('points_per_layer', points)
 
                     layer_centers[lidx] = (cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z)
@@ -530,7 +355,6 @@ class CustomizationTab:
                         wall_pts.append((ppx, ppy, z_disp, layer_idx))
                         px_list += [ppx, hole.x]; py_list += [ppy, hole.x]; pz_list += [z_disp, z_disp]
 
-            # ✅ V07 FIX: Restored the lines connecting the toolpath to the bottom depth star!
             px_list.append(star_x); py_list.append(star_y); pz_list.append(star_z)
             px_list.append(hole.x); py_list.append(hole.y); pz_list.append(z_start)
 
@@ -538,10 +362,6 @@ class CustomizationTab:
 
             if wall_pts:
                 if zigzag_any:
-                    # v08: iterate the ACTUAL layer indices present (works
-                    # whether they came from one segment or several) instead
-                    # of range(hole.layers), which only made sense for a
-                    # single-segment hole.
                     for lidx in sorted(layer_centers.keys()):
                         pts_l = [(wx, wy, wz) for wx, wy, wz, li in wall_pts if li == lidx]
                         if not pts_l: continue
@@ -581,17 +401,9 @@ class CustomizationTab:
 
             rot_tag   = f' [rot={screen_rot}°]' if screen_rot != 0 else ''
             probe_tag = '  ⚠ PROBE' if not probe_ok else ''
-
-            # v08: multi-diameter holes summarize each segment's own
-            # layers/points instead of a single shared "NL × NP" count,
-            # and the zigzag tag notes it's configured per segment.
-            # v09: isolate_active takes the plain single-segment label
-            # path (layers/points already point at the isolated segment's
-            # own settings) plus an explicit "isolated" tag so it's clear
-            # the rest of the hole is hidden, not just this segment shown.
             isolate_tag = ''
             if isolate_active:
-                isolate_tag = f'  🔎 Segment {app.selected_segment_idx + 1}/{len(hole.segments)} isolated'
+                isolate_tag = f'  [ISOLATED] Segment {app.selected_segment_idx + 1}/{len(hole.segments)}'
 
             if multi_seg_display:
                 seg_summary = " + ".join(
@@ -634,9 +446,6 @@ class CustomizationTab:
         ax3d.invert_xaxis()
         app.canvas.draw()
 
-    # ------------------------------------------------------------------
-    # External API for Hover Effect (Called from UI Sidebar)
-    # ------------------------------------------------------------------
     def highlight_hole(self, global_idx):
         """รับค่าจาก Sidebar เพื่อเปลี่ยนสี / Opacity ของตัวเลข 3D แบบเรียลไทม์"""
         if not hasattr(self, '_text_objects') or not self._text_objects: return

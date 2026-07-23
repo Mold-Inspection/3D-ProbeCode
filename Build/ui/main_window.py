@@ -1,64 +1,3 @@
-# ui/main_window.py
-# VERSION: 11
-# CHANGE LOG (v10 -> v11):
-#   FEATURE REQUEST (2 items, segment "folder" UI from v10):
-#     1. _toggle_segment_expand() no longer calls update_treeview(). That
-#        rebuilt the ENTIRE right sidebar (every hole card destroyed and
-#        recreated) just to expand/collapse one segment row — visible
-#        flicker, lost scroll position, for a purely local toggle. It now
-#        updates only that hole's segment_blocks widgets in place (same
-#        pattern _on_zigzag_toggle already used for the single-segment
-#        case). Full sidebar rebuild stays reserved for the Apply button
-#        (_refresh_after_inspection_toggle) as intended.
-#     2. New self.selected_segment_idx state (None = show whole hole).
-#        Expanding a segment now also "isolates" it: only that segment's
-#        wall/toolpath is drawn in the Customization 3D view, other
-#        segments of the same hole are hidden (see customization_tab.py
-#        v09). Made an accordion — expanding one segment auto-collapses
-#        any other expanded segment in the same hole, since isolate only
-#        makes sense for one segment at a time. Reset to None whenever
-#        hole selection changes (on_hole_select) or the view is rebuilt
-#        (show_view), so a stale index can never point at the wrong hole.
-# CHANGE LOG (v09 -> v10):
-#   FEATURE: multi-diameter ("counterbore-style") hole support — sidebar
-#   "folder" UI + state wiring.
-#     1. New import: HoleSegmentSetting (core.models v02).
-#     2. New helper _build_segment_settings(sh): builds one
-#        HoleSegmentSetting per raw StepHole.segments entry (see
-#        step_extractor.py v24 / models.py v02), each starting at the
-#        same defaults as an ordinary hole (3 layers, 4 points, no
-#        zigzag). Returns [] for an ordinary single-segment hole — this
-#        is the flag main_window/customization_tab use to decide whether
-#        a hole needs the multi-segment folder UI/path at all.
-#     3. show_view(): every HoleFeature built from a StepHole now gets
-#        hf.segments = _build_segment_settings(sh). The existing
-#        prev_states persistence dict (keyed by h.id, already used to
-#        carry selected/zigzag/layers/points across view switches) now
-#        also carries 'segments' — since a hole's raw 3D segment geometry
-#        never changes between views, the SAME HoleSegmentSetting objects
-#        (with whatever layers/points/zigzag/is_expanded the user set)
-#        are reused directly by list length match, so per-segment config
-#        survives switching Top/Front/etc. exactly like the old
-#        single-segment settings already did.
-#     4. _build_selected_item(): branches on `hole.segments`. Empty (the
-#        overwhelming majority of holes) → 100% unchanged old behavior
-#        (single Z-Layers/Points/Zigzag block wired directly to the
-#        hole). Non-empty → renders ONE header button per segment inside
-#        the existing settings_frame ("📂 Segment k  ⌀open→⌀deep
-#        D=depth"), each independently expandable to reveal that
-#        segment's OWN Layers/Points/Zigzag controls
-#        (_build_segment_block / _toggle_segment_expand /
-#        _on_segment_config_change / _on_segment_zigzag_toggle /
-#        _on_segment_zigzag_degree_change). The hole still shows as ONE
-#        card with ONE display_id / ONE selected_for_inspection checkbox
-#        — segments are purely a nested settings concern, matching the
-#        "one hole, expandable folder of segments" design agreed with
-#        the user.
-#     5. Multi-diameter hole button label gets a small "📂 Nseg" tag so
-#        it's visually distinguishable from an ordinary hole at a glance.
-#   No changes to: view routing, occlusion/rejection logic, renumbering,
-#   pin management, or any single-segment hole's behavior.
-
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -74,13 +13,6 @@ from ui.tabs.path_mapper_tab import PathMapperTab
 
 
 def _build_segment_settings(sh) -> list:
-    """
-    v10: build one HoleSegmentSetting per raw segment on a StepHole.
-    Returns [] for an ordinary (never-merged / single-diameter) hole —
-    that empty list is the signal used everywhere else (sidebar,
-    customization_tab) to skip the multi-segment "folder" UI/path and
-    fall back to the original single-segment behavior untouched.
-    """
     segs = getattr(sh, 'segments', None)
     if not segs or len(segs) <= 1:
         return []
@@ -430,10 +362,6 @@ class UIManager:
                     'zigzag_deg': getattr(h, 'zigzag_degree',           45.0),
                     'layers':     getattr(h, 'layers',                  3),
                     'points':     getattr(h, 'points_per_layer',        4),
-                    # v10: carry the SAME HoleSegmentSetting objects across
-                    # view switches — raw segment geometry never changes
-                    # between views, so per-segment layers/points/zigzag/
-                    # is_expanded set by the user survives untouched.
                     'segments':   getattr(h, 'segments', []),
                 }
 
@@ -470,11 +398,6 @@ class UIManager:
                     h.zigzag_degree           = state.get('zigzag_deg', 45.0)
                     h.layers                  = state.get('layers', 3)
                     h.points_per_layer        = state.get('points', 4)
-                    # v10: reuse old per-segment settings only if the
-                    # segment COUNT still matches (raw 3D geometry is
-                    # view-independent so it always should, but guard
-                    # against any edge case rather than silently
-                    # mismatching segment k's settings to segment j).
                     old_segments = state.get('segments') or []
                     if old_segments and len(old_segments) == len(getattr(h, 'segments', [])):
                         h.segments = old_segments
@@ -649,15 +572,10 @@ class UIManager:
                 lbl_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
         if is_multi_seg:
-            # v10: "folder" UI — one expandable sub-block per segment,
-            # each with its OWN Layers/Points/Zigzag controls. The hole
-            # itself keeps a single display_id/checkbox; segments are a
-            # nested settings concern only.
             widgets['segment_blocks'] = {}
             for seg_idx, cfg in enumerate(hole.segments):
                 self._build_segment_block(setting_frame, idx, seg_idx, hole, cfg)
         else:
-            # --- Original single-segment controls, unchanged ---
             row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row1.pack(fill="x", padx=10, pady=(5,0))
             ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
@@ -696,10 +614,6 @@ class UIManager:
 
         if widgets['is_expanded']:
             setting_frame.pack(fill="x", pady=(5, 0))
-
-    # ------------------------------------------------------------------
-    # v10: per-segment "folder" sub-block (multi-diameter holes only)
-    # ------------------------------------------------------------------
     def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
         block = ctk.CTkFrame(parent, fg_color="#141824", corner_radius=6)
         block.pack(fill="x", padx=8, pady=(8 if seg_idx == 0 else 4, 4))
@@ -761,19 +675,6 @@ class UIManager:
         }
 
     def _toggle_segment_expand(self, hole_idx, seg_idx):
-        """
-        v11: in-place toggle only — does NOT call update_treeview(). The
-        old version rebuilt the whole right sidebar (every hole card) for
-        what should be a purely local expand/collapse of one segment row.
-        Sidebar-wide refresh stays reserved for the Apply button.
-
-        Also drives segment "isolate": expanding a segment sets
-        self.selected_segment_idx so the Customization 3D view shows only
-        that segment (see customization_tab.py draw_cross_section, v09).
-        Accordion behavior — expanding one segment collapses any other
-        expanded segment in the SAME hole, since isolating only makes
-        sense for one segment at a time.
-        """
         if hole_idx >= len(self.current_holes): return
         hole = self.current_holes[hole_idx]
         segments = getattr(hole, 'segments', None)

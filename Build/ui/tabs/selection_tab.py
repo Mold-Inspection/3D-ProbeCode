@@ -1,47 +1,3 @@
-# ui/tabs/selection_tab.py
-# VERSION: 01
-# CHANGE LOG (v01 -- dead-code cleanup, no behavior change):
-#   - Removed unused import `from core.models import HoleFeature` — never
-#     referenced anywhere in this file.
-#   - Removed `self._hover_local_idx` — set in highlight_hole(), reset to
-#     None in clear_hole_highlight() and update_plot(), but never read
-#     anywhere. Write-only tracking variable with no observable effect.
-#
-# --- retained from prior header (unchanged content below) ---
-#   v01: BUG FIX — removed the duplicate mesh-depth occlusion filter that
-#        had been added inside update_plot(). True hole visibility is now
-#        determined ONCE, correctly, via ray-cast occlusion in
-#        step_extractor.py's get_step_holes_in_view() (see step_extractor08.py).
-#        Re-filtering the already-correct hole list here using a separate
-#        2D depth-buffer heuristic (mesh_depth vs depth_top, 1.5mm tolerance)
-#        caused two independent occlusion checks to disagree, which is what
-#        produced "phantom" hole circles in the plot (drawn by tripcolor from
-#        raw mesh depth) with no number/marker on them — the marker/list data
-#        had been silently stripped here even though the hole was already
-#        confirmed visible upstream.
-#   v02: Added hover-driven visual feedback for the split sidebar
-#        (see main_window.py v01):
-#          - highlight_hole()/clear_hole_highlight(): yellow-highlights a
-#            Selected-Hole item's canvas marker on hover (same color used
-#            for click-selection). Uses app._visible_hole_map since the
-#            scatter array only contains non-rejected holes.
-#          - show_unselected_marker()/clear_unselected_marker(): draws/
-#            removes a temporary white-fill / red-edge / red "U" marker
-#            for an Unselected-Hole item on hover (these holes are not
-#            drawn normally on the canvas).
-#        update_plot()'s initial-color logic now goes through the same
-#        index map for consistency with click-selection, and clears any
-#        stale hover artists left over from before ax.clear().
-#   v03: Task 4 (see main_window.py v05) — canvas marker numbers now read
-#        h.display_id instead of h.id. main_window.py's
-#        _renumber_holes_by_category() assigns display_id as a
-#        category-local rank (1..N for Selected Holes, independently
-#        renumbered every time a checkbox toggle changes section
-#        membership), while h.id stays an internal, unrelated identity.
-#        Since `holes` passed into update_plot() is always the
-#        Selected-only canvas list, this keeps the number drawn next to
-#        each marker on the canvas identical to that hole's number in the
-#        Selected Holes sidebar section.
 import numpy as np
 
 
@@ -106,10 +62,6 @@ class SelectionTab:
 
         if saved_pins:
             self.app.canvas.draw_idle()
-
-    # ------------------------------------------------------------------
-    # v02: Hover feedback — Selected Hole highlight
-    # ------------------------------------------------------------------
     def highlight_hole(self, global_idx):
         """Yellow-highlight the canvas marker for a Selected Hole item on
         hover. Uses the global->local index map since the scatter array
@@ -144,10 +96,6 @@ class SelectionTab:
                 colors[sel_local] = 'yellow'
         app.scatter_holes.set_facecolors(colors)
         app.canvas.draw_idle()
-
-    # ------------------------------------------------------------------
-    # v02: Hover feedback — Unselected Hole "U" marker
-    # ------------------------------------------------------------------
     def show_unselected_marker(self, hole):
         """Draw a standout white-fill / red-edge / red 'U' marker at a
         rejected hole's fallback position. Nothing is drawn if the hole's
@@ -385,19 +333,6 @@ class SelectionTab:
         app.current_triangles = triangles
         app.current_face_data = face_data
 
-        # NOTE (v01): the duplicate mesh-depth occlusion filter that used to
-        # live here has been removed. `holes` passed in is already the
-        # correct, fully-occlusion-tested list from
-        # geometry_engine.get_step_holes_in_view() (ray-cast based, see
-        # step_extractor.py v08) — re-filtering it again here with a
-        # different heuristic only introduced inconsistencies between what
-        # was drawn and what was listed/numbered.
-        #
-        # NOTE (v02): `holes` here is now the CANVAS-ONLY (non-rejected)
-        # list built by main_window.show_view() — rejected/"unselected"
-        # holes are intentionally excluded from this plot and are only
-        # shown transiently via show_unselected_marker() on hover.
-
         vmin, vmax = np.min(face_data), np.max(face_data)
         if vmin == vmax:
             vmax = vmin + 0.1
@@ -411,9 +346,6 @@ class SelectionTab:
             hole_y = [h.y for h in holes]
             app.current_holes_count = len(holes)
             initial_colors = ['white'] * app.current_holes_count
-
-            # v02: go through the same global->local index map used by
-            # click-selection and hover-highlight, for consistency.
             if app.selected_hole_idx is not None:
                 local_idx = getattr(app, '_visible_hole_map', {}).get(app.selected_hole_idx)
                 if local_idx is not None and 0 <= local_idx < app.current_holes_count:
