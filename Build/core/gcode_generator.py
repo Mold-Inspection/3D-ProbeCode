@@ -1,0 +1,222 @@
+# core/gcode_generator.py
+# VERSION: 01
+# CHANGE LOG (v01):
+#   FEATURE: Phase 2 — G-code Export (GRBL dialect).
+#     New file. Builds a real, downloadable probe program from the
+#     currently selected_for_inspection holes.
+#
+#     KEY DESIGN POINT: this file deliberately does NOT reuse
+#     path_planner.py's get_probe_path_layers()/..._multi(). Those
+#     functions run every point through projector.project_point_to_view()
+#     — correct for drawing the on-screen preview in whatever view/
+#     rotation the user happens to be looking at, but NOT the coordinate
+#     frame a real machine understands. _raw_layers_for_hole() below
+#     mirrors the same t-parameterization/segment-walk logic but works
+#     entirely in raw CAD-space 3D (StepHole.open_3d/deep_3d/segments —
+#     the same mesh-centroid-centered frame cad_loader.py already
+#     produces), and derives its own perpendicular (u, v) basis from each
+#     segment's own axis so points are placed correctly in true 3D even
+#     for a hole axis that isn't aligned to any single world axis.
+#
+#     ASSUMPTIONS (documented, not yet configurable):
+#       - Work offset: NOT applied. Output assumes mesh centroid =
+#         machine zero (G54 origin) — explicit scoping decision, revisit
+#         after real-machine testing.
+#       - Hole axis is assumed close enough to the probe's straight-line
+#         G38.2 approach capability (GRBL 3-axis linear probe move) —
+#         no 5-axis/tool-orientation logic here.
+#       - Visit order: greedy nearest-neighbor over raw XY (open_3d),
+#         starting from whichever selected hole is closest to (0,0).
+#       - Only holes with STEP geometry (h._step_hole is not None) can
+#         be exported; mesh-only holes are skipped and reported back to
+#         the caller so the UI can warn the user.
+#
+#     Per-hole G-code pattern:
+#       G0 Z[SafeZ]                      ; retract before travel
+#       G0 X.. Y..                       ; travel over next hole (safe Z)
+#       G0 X.. Y.. Z..                   ; plunge to entry point (open_3d
+#                                           + entry_clearance along axis)
+#       --- per layer ---
+#         G0 X.. Y.. Z..                 ; move to layer center
+#         --- per point (angle + zigzag offset) ---
+#           G38.2 X.. Y.. Z.. F[feed]    ; probe outward to radius+overtravel
+#           G91 / G0 (relative back-off toward center) / G90
+#     Full Safe-Z retract is only ever emitted between holes (start of
+#     each hole's block) and once at program end — matching the user's
+#     explicit "safety distance when hole changes" requirement.
+import numpy as np
+
+
+class GCodeSettings:
+    """Plain settings container consumed by generate_gcode()."""
+    def __init__(self, safe_z: float, entry_clearance: float = 2.0,
+                 probe_feedrate: float = 100.0, overtravel: float = 0.8,
+                 backoff: float = 1.2):
+        self.safe_z          = float(safe_z)
+        self.entry_clearance = float(entry_clearance)
+        self.probe_feedrate  = float(probe_feedrate)
+        self.overtravel      = float(overtravel)
+        self.backoff          = float(backoff)
+
+
+def suggest_safe_z(mesh, margin: float = 10.0) -> float:
+    """Default Safe Z suggestion: part's highest raw Z (mesh already
+    centered by cad_loader.py) plus a clearance margin."""
+    return float(mesh.bounds[1][2]) + margin
+
+
+# ---------------------------------------------------------------------
+def _orthonormal_basis(axis_vec):
+    """Return (unit_axis, u, v) — u and v span the plane perpendicular
+    to axis_vec, used to place probe points radially in true 3D
+    regardless of which way the hole's real axis points."""
+    axis = np.array(axis_vec, dtype=float)
+    norm = np.linalg.norm(axis)
+    if norm < 1e-9:
+        axis = np.array([0.0, 0.0, 1.0])
+    else:
+        axis = axis / norm
+    arbitrary = np.array([0.0, 0.0, 1.0]) if abs(axis[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    u = np.cross(axis, arbitrary)
+    u_norm = np.linalg.norm(u)
+    u = u / u_norm if u_norm > 1e-9 else np.array([1.0, 0.0, 0.0])
+    v = np.cross(axis, u)
+    return axis, u, v
+
+
+def _raw_layers_for_hole(hole_feature):
+    """
+    Raw-3D (non-projected) layer/point plan for one hole. Mirrors
+    path_planner.py's t-parameterization but works purely in CAD-space.
+
+    Returns a list of dicts:
+        seg_idx, layer_idx, center (np.array3), radius,
+        axis, u, v, angle_offset, points_n
+    """
+    sh = hole_feature._step_hole
+    is_multi = bool(getattr(hole_feature, 'segments', None))
+    layers = []
+
+    if is_multi:
+        global_idx = 0
+        for seg_idx, (seg, cfg) in enumerate(zip(sh.segments, hole_feature.segments)):
+            axis, u, v = _orthonormal_basis(np.array(seg.deep_3d) - np.array(seg.open_3d))
+            o = np.array(seg.open_3d)
+            d = np.array(seg.deep_3d)
+            t_vals = np.linspace(0.0, 1.0, cfg.layers + 2)[1:-1]
+            for local_idx, t in enumerate(t_vals):
+                center = o + t * (d - o)
+                r      = seg.radius_at(t)
+                offset = (np.radians(local_idx * cfg.zigzag_degree)
+                         if cfg.zigzag_inspection else 0.0)
+                layers.append(dict(
+                    seg_idx=seg_idx, layer_idx=global_idx, center=center, radius=r,
+                    axis=axis, u=u, v=v, angle_offset=offset,
+                    points_n=cfg.points_per_layer))
+                global_idx += 1
+    else:
+        axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
+        o = np.array(sh.open_3d)
+        d = np.array(sh.deep_3d)
+        n_layers = hole_feature.layers
+        use_zz   = getattr(hole_feature, 'zigzag_inspection', False)
+        deg      = getattr(hole_feature, 'zigzag_degree', 45.0)
+        t_vals   = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
+        for idx, t in enumerate(t_vals):
+            center = o + t * (d - o)
+            r      = sh.radius_at(t)
+            offset = np.radians(idx * deg) if use_zz else 0.0
+            layers.append(dict(
+                seg_idx=0, layer_idx=idx, center=center, radius=r,
+                axis=axis, u=u, v=v, angle_offset=offset,
+                points_n=hole_feature.points_per_layer))
+
+    return layers
+
+
+def _order_holes_nearest_neighbor(holes):
+    """Greedy nearest-neighbor visit order over raw XY (open_3d),
+    starting from whichever hole is closest to (0, 0)."""
+    def open_xy(h):
+        return np.array(h._step_hole.open_3d[:2])
+
+    remaining = list(holes)
+    remaining.sort(key=lambda h: float(np.linalg.norm(open_xy(h))))
+    if not remaining:
+        return []
+
+    ordered = [remaining.pop(0)]
+    while remaining:
+        cur_xy = open_xy(ordered[-1])
+        remaining.sort(key=lambda h: float(np.linalg.norm(open_xy(h) - cur_xy)))
+        ordered.append(remaining.pop(0))
+    return ordered
+
+
+# ---------------------------------------------------------------------
+def generate_gcode(holes, probe_profile, settings: GCodeSettings):
+    """
+    Build a GRBL probe program from `holes` (HoleFeature list, already
+    filtered to selected_for_inspection by the caller).
+
+    Returns (gcode_text: str, skipped: list) — `skipped` holds any hole
+    with no STEP geometry (_step_hole is None), which cannot be exported
+    since this file works entirely from raw B-Rep data.
+    """
+    valid   = [h for h in holes if getattr(h, '_step_hole', None) is not None]
+    skipped = [h for h in holes if getattr(h, '_step_hole', None) is None]
+    ordered = _order_holes_nearest_neighbor(valid)
+
+    lines = []
+    lines.append("; ============================================")
+    lines.append("; 3D ProbeCode - GRBL Probe Program (Phase 2)")
+    lines.append(f"; Holes: {len(ordered)}  Safe Z: {settings.safe_z:.2f} mm  "
+                 f"Probe Feed: {settings.probe_feedrate:.0f} mm/min")
+    lines.append("; NOTE: work zero = mesh centroid (no G54 offset applied)")
+    lines.append("; NOTE: assumes hole axis suits a straight-line G38.2 approach")
+    if skipped:
+        names = ", ".join(str(getattr(h, 'display_id', '?')) for h in skipped)
+        lines.append(f"; WARNING: {len(skipped)} hole(s) skipped (no STEP geometry): {names}")
+    lines.append("; ============================================")
+    lines.append("G21 ; mm units")
+    lines.append("G90 ; absolute positioning")
+    lines.append("G94 ; feed rate mode: units/min")
+    lines.append(f"G0 Z{settings.safe_z:.3f}")
+    lines.append("")
+
+    for hi, hole in enumerate(ordered):
+        sh = hole._step_hole
+        axis, _, _ = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
+        entry_pt = np.array(sh.open_3d) + settings.entry_clearance * axis
+
+        lines.append(f"; --- Hole {hole.display_id} ({hi + 1}/{len(ordered)}) ---")
+        lines.append(f"G0 Z{settings.safe_z:.3f}")
+        lines.append(f"G0 X{sh.open_3d[0]:.3f} Y{sh.open_3d[1]:.3f}")
+        lines.append(f"G0 X{entry_pt[0]:.3f} Y{entry_pt[1]:.3f} Z{entry_pt[2]:.3f}")
+
+        for lyr in _raw_layers_for_hole(hole):
+            c, r          = lyr['center'], lyr['radius']
+            u, v          = lyr['u'], lyr['v']
+            offset, n     = lyr['angle_offset'], lyr['points_n']
+            seg_tag       = f" seg {lyr['seg_idx'] + 1}" if 'seg_idx' in lyr else ""
+
+            lines.append(f"G0 X{c[0]:.3f} Y{c[1]:.3f} Z{c[2]:.3f} "
+                         f"; layer {lyr['layer_idx'] + 1}{seg_tag}")
+
+            angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
+            for a in angles:
+                radial = np.cos(a) * u + np.sin(a) * v
+                target = c + (r + settings.overtravel) * radial
+                back   = -radial * settings.backoff
+
+                lines.append(f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} "
+                             f"Z{target[2]:.3f} F{settings.probe_feedrate:.0f}")
+                lines.append("G91")
+                lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f}")
+                lines.append("G90")
+        lines.append("")
+
+    lines.append(f"G0 Z{settings.safe_z:.3f}")
+    lines.append("M30 ; program end")
+
+    return "\n".join(lines), skipped

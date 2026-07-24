@@ -29,6 +29,7 @@ from core.probe_profile import ProbeProfile
 from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
+from core.gcode_export_panel import GCodeExportPanel
 
 
 def _build_segment_settings(sh) -> list:
@@ -183,6 +184,7 @@ class UIManager:
             self.view_buttons[name] = btn
 
         self._setup_probe_profile_panel()
+        self._setup_gcode_export_panel()
 
     def _setup_probe_profile_panel(self):
         probe_header_frame = ctk.CTkFrame(self._left_scroll, fg_color="#1a1a2e", corner_radius=6)
@@ -235,6 +237,10 @@ class UIManager:
             self._probe_body, text=self._probe_summary_text(), font=ctk.CTkFont(size=10), text_color="#546e7a", justify="left")
         self._lbl_probe_summary.pack(anchor="w", padx=14, pady=(0, 10))
 
+    def _setup_gcode_export_panel(self):
+        self.gcode_export_panel = GCodeExportPanel(self)
+        self.gcode_export_panel.build(self._left_scroll)
+        
     def _toggle_probe_panel(self):
         self._probe_panel_expanded = not self._probe_panel_expanded
         if self._probe_panel_expanded:
