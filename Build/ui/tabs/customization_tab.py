@@ -1,10 +1,24 @@
+# ==============================================================================
+# ui/tabs/customization_tab.py — แท็บ "Customization" (มุมมอง 3D ของรูที่เลือก)
+# ==============================================================================
+# หน้าที่หลัก: วาดกราฟ 3D แบบ wireframe ของชิ้นงาน + เส้นทางโพรบ (Tool Path)
+# สำหรับรูที่เลือกไว้ พร้อมจุดสัมผัสผนังรู (wall contact points) แต่ละ layer
+# และคำเตือนหาก Probe Profile (core/probe_profile.py) เข้าไปวัดรูนั้นไม่ได้
+#
+# ตัวแปรสำคัญที่ปรับจูนได้:
+#   ZIGZAG_LAYER_COLORS = ชุดสีของแต่ละ layer เมื่อเปิดโหมด Zigzag (วนซ้ำถ้า layer เกิน 24)
+#   MAX_TRIS             = จำนวนสามเหลี่ยม mesh สูงสุดที่วาด (ลดเพื่อเพิ่มความไว, เพิ่มเพื่อความละเอียด)
+#   NEAR_CENTER_RATIO     = สัดส่วนรัศมีที่ถือว่า "ใกล้ศูนย์กลางรู" (ใช้หาก้นรูจาก mesh)
+#   elev / azim (view_init)= มุมกล้อง 3D เริ่มต้นของกราฟ (องศา)
+#   half_zoom factor      = สัดส่วนการซูมเข้าเมื่อแสดงรูที่เลือก (มากขึ้น = ซูมออกกว้างขึ้น)
+# ==============================================================================
 import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
 from mpl_toolkits.mplot3d import proj3d
 
-# Layer colours for Zigzag mode — 24 colours, cycling if more layers
-# Avoids yellow/gold shades to stay clear of the Tool Path / star marker
+# ชุดสีของแต่ละ layer เมื่อเปิดโหมด Zigzag — 24 สี วนซ้ำถ้า layer มากกว่านี้
+# หลีกเลี่ยงโทนเหลือง/ทอง เพื่อไม่ให้ปนกับสี Tool Path / จุดดาว (star marker)
 ZIGZAG_LAYER_COLORS = [
     '#00bcd4', '#ff4d6d', '#7c4dff', '#69f0ae', '#ff9100', '#40c4ff',
     '#f06292', '#aeea00', '#ea80fc', '#ff6e40', '#18ffff', '#b9f6ca',
@@ -25,11 +39,8 @@ _VIEW_ROTATIONS = {
 }
 
 def _build_combined_matrix(view_name: str, screen_rot: int):
-    """
-    Return the combined 4×4 transform that matches what the Projector applies:
-      1. Apply the view rotation (object rotated so the named face points up).
-      2. Apply an additional Z-axis spin of `screen_rot` degrees (on-screen rotation).
-    """
+    """รวม matrix การหมุนของมุมมอง (view) กับการหมุนหน้าจอ (screen_rot)
+    ให้ตรงกับที่ Projector ใช้ เพื่อให้ตำแหน่ง layer ตรงกับ canvas"""
     rx, ry, rz = _VIEW_ROTATIONS.get(view_name, (0, 0, 0))
     m_view = euler_matrix(*np.radians([rx, ry, rz]))
     if screen_rot != 0:
@@ -94,7 +105,7 @@ class CustomizationTab:
         y3 = y3 - (float(np.min(y3)) + float(np.max(y3))) / 2.0
 
         n_tri    = len(tris)
-        MAX_TRIS = 16000
+        MAX_TRIS = 16000   # จำนวนสามเหลี่ยม mesh สูงสุดที่วาด — ลดลงเพื่อความไว/เพิ่มขึ้นเพื่อความละเอียด
         step     = max(1, n_tri // MAX_TRIS)
         sampled  = tris[::step]
 
@@ -180,6 +191,7 @@ class CustomizationTab:
                 z_hi_h   = max(h.bottom_z, r_z) + 0.5
                 radius_h = _hole_max_radius(h)
 
+            # สัดส่วนรัศมี/ระยะขอบที่ใช้ตัดเลือกสามเหลี่ยมผนังรู (wall) และขอบปากรู (rim) — ปรับได้
             mask_wall = ((dist_h <= radius_h * 1.2) & (tri_cz >= z_lo_h - 0.3) & (tri_cz <= z_hi_h))
             mask_rim  = ((dist_h <= radius_h * 1.3) & (tri_cz >= -0.5) & (tri_cz < z_lo_h + 0.3))
             htris = tris[mask_wall | mask_rim]
@@ -282,7 +294,7 @@ class CustomizationTab:
 
                 for lyr in step_layers:
                     z_disp     = lyr['z_display']
-                    r_at_z     = lyr['radius'] * 0.92
+                    r_at_z     = lyr['radius'] * 0.92   # หดรัศมีจุดสัมผัสผนังลงเล็กน้อยจากผิวจริง (กันซ้อนเส้น mesh) — ปรับได้
                     cx_lyr     = lyr['x_display']
                     cy_lyr     = lyr['y_display']
                     ang_offset = lyr.get('angle_offset', 0.0)
@@ -321,6 +333,7 @@ class CustomizationTab:
                 else:
                     def mesh_radius_at_z(target_z_disp): return hole.radius
 
+                # สัดส่วนรัศมีที่ถือว่า "ใกล้ศูนย์กลางรู" ใช้หาก้นรูจาก mesh (ไม่มีข้อมูล STEP) — ปรับได้
                 NEAR_CENTER_RATIO = 0.3
                 if len(vz) == 0:
                     TRUE_TOP_Z = raw_rim_z; TRUE_BOT_Z = raw_bot_z
@@ -416,10 +429,11 @@ class CustomizationTab:
 
             title_str  = (f"Customization — Hole {hole.display_id}  |  R={hole.radius:.1f} mm  Depth={hole.depth:.2f} mm  |  "
                           f"{layer_info}" + (' [STEP]' if has_step_hole else ' [Mesh]') + rot_tag + zigzag_tag + probe_tag + isolate_tag)
+            # มุมกล้อง 3D เริ่มต้น (elevation, azimuth) หน่วยองศา — ปรับเพื่อเปลี่ยนมุมมองเริ่มต้น
             ax3d.view_init(elev=-130, azim=67.5)
 
             hole_z_mid = (z_start + star_z) / 2.0
-            half_zoom  = max(hole.radius * 1.6, abs(star_z - z_start)) * 0.55
+            half_zoom  = max(hole.radius * 1.6, abs(star_z - z_start)) * 0.55   # สัดส่วนซูมเข้าเมื่อโฟกัสรูที่เลือก — ปรับได้
             half_zoom  = max(half_zoom, half * 0.05)
 
             ax3d.set_xlim([hole.x - half_zoom, hole.x + half_zoom])
@@ -447,7 +461,7 @@ class CustomizationTab:
         app.canvas.draw()
 
     def highlight_hole(self, global_idx):
-        """รับค่าจาก Sidebar เพื่อเปลี่ยนสี / Opacity ของตัวเลข 3D แบบเรียลไทม์"""
+        """ไฮไลต์ (สีเหลือง) ตัวเลข 3D ของรูที่ hover จาก Sidebar แบบเรียลไทม์"""
         if not hasattr(self, '_text_objects') or not self._text_objects: return
         need_redraw = False
         

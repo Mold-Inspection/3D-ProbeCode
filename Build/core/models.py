@@ -1,13 +1,25 @@
+# ==============================================================================
+# core/models.py — โครงสร้างข้อมูล (data classes) ของรูและ segment
+# ==============================================================================
+# หน้าที่: เก็บโครงสร้างข้อมูลกลางที่ใช้ส่งต่อกันทั่วโปรแกรม
+#   - HoleSegment        : เรขาคณิตดิบของรู 1 ช่วง (ก่อน merge เป็นรู counterbore)
+#   - HoleSegmentSetting : ค่าตั้งค่าการตรวจสอบต่อ segment เดียว (รูหลายระดับเส้นผ่านศูนย์กลาง)
+#   - HoleFeature        : ข้อมูลรูที่ตรวจพบ ใช้แสดงผลฝั่ง UI
+#   - StepHole           : รูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
+#
+# ตัวแปรสำคัญที่ปรับจูนได้ (ค่าเริ่มต้นการตรวจสอบต่อรู/segment):
+#   layers            = จำนวนชั้น (layer) ที่จะตรวจสอบตามความลึกของรู
+#   points_per_layer  = จำนวนจุดสัมผัสผนังรูต่อ 1 ชั้น
+#   zigzag_inspection = เปิด/ปิดโหมดหมุนมุมโพรบทีละชั้น (ลดจุดบอดจากการสัมผัสซ้ำมุมเดิม)
+#   zigzag_degree     = องศาสะสมที่หมุนต่อ 1 ชั้น เมื่อเปิดโหมด zigzag
+# ==============================================================================
 import numpy as np
 
 
 class HoleSegment:
-    """
-    เก็บเรขาคณิตดิบของรู 1 ช่วง (segment) ก่อนถูก merge ทับใน
-    step_extractor._merge_counterbores() — ใช้เป็นข้อมูลอ้างอิงสำหรับ
-    path planning แบบแยกตามขั้น (แต่ละ segment มีรัศมีเป็นของตัวเอง
-    ไม่ interpolate ข้ามขั้นไปยัง segment อื่น)
-    """
+    """เรขาคณิตดิบของรู 1 ช่วง (segment) ก่อนถูก merge ใน step_extractor.py
+    ใช้เป็นข้อมูลอ้างอิงสำหรับ path planning แบบแยกตามขั้น (แต่ละ segment มี
+    รัศมีเป็นของตัวเอง ไม่ interpolate ข้ามขั้นไปยัง segment อื่น)"""
     def __init__(self, open_3d, deep_3d, radius_open, radius_deep):
         self.open_3d     = tuple(open_3d)
         self.deep_3d     = tuple(deep_3d)
@@ -21,25 +33,19 @@ class HoleSegment:
 
 
 class HoleSegmentSetting:
-    """
-    การตั้งค่าการตรวจสอบ (inspection) ต่อ segment เดียวของรูหลายระดับ
+    """การตั้งค่าการตรวจสอบ (inspection) ต่อ segment เดียวของรูหลายระดับ
     เส้นผ่านศูนย์กลาง — แสดงเป็น sub-tab ที่กางออกมาจากการ์ดรูหลักใน
-    sidebar ขวา (ดีไซน์แบบ "folder": การ์ดรู 1 ใบ = 1 display_id,
-    กดขยายแล้วเห็น segment ย่อยแต่ละอันซ้อนข้างใน)
-
-    layers / points_per_layer / zigzag_inspection / zigzag_degree
-    ตั้งค่าแยกอิสระต่อ segment ไม่ผูกกับ segment อื่นในรูเดียวกัน
-    """
+    sidebar ขวา (การ์ดรู 1 ใบ = 1 display_id, กดขยายแล้วเห็น segment ย่อย)"""
     def __init__(self, seg_idx: int, radius_open: float, radius_deep: float, depth: float):
         self.seg_idx      = seg_idx          # ลำดับ segment: 0 = ใกล้ปากรูสุด
         self.radius_open  = radius_open
         self.radius_deep  = radius_deep
         self.depth        = depth
 
-        self.layers             = 3
-        self.points_per_layer   = 4
-        self.zigzag_inspection  = False
-        self.zigzag_degree      = 45.0
+        self.layers             = 3      # จำนวนชั้นตรวจสอบเริ่มต้น — ปรับได้
+        self.points_per_layer   = 4      # จำนวนจุดสัมผัสผนังต่อชั้นเริ่มต้น — ปรับได้
+        self.zigzag_inspection  = False  # เปิด/ปิดโหมด zigzag เริ่มต้น — ปรับได้
+        self.zigzag_degree      = 45.0   # องศาสะสมต่อชั้นเมื่อเปิด zigzag — ปรับได้
 
         self.is_expanded = False             # UI state: sub-tab กางอยู่หรือไม่
 
@@ -54,25 +60,20 @@ class HoleFeature:
         self.bottom_z = bottom_z
         self.depth = depth
         self.radius = radius
-        self.layers = 3              # ค่า Default ขั้นต่ำ 3 ชั้น
-        self.points_per_layer = 4    # ค่า Default ขั้นต่ำ 4 จุด
+        self.layers = 3              # จำนวนชั้นตรวจสอบเริ่มต้น — ปรับได้
+        self.points_per_layer = 4    # จำนวนจุดสัมผัสผนังต่อชั้นเริ่มต้น — ปรับได้
         self.hole_top_z = surface_z  # ขอบปากรูจริง
         self._step_hole = None       # ลิงก์กลับไปยัง StepHole (ถ้ามาจากไฟล์ STEP)
 
-        # --- Feature: Inspection Selection & Zigzag ---
-        self.selected_for_inspection = False  # ✅ Checkbox: เลือกรูนี้เพื่อ inspect
-        self.zigzag_inspection = False        # ↕ Checkbox: ใช้รูปแบบ zigzag ในการ probe
-        self.zigzag_degree = 45.0             # องศาหมุนสะสมต่อ layer (ค่า default 45°)
+        self.selected_for_inspection = False  # เลือกรูนี้เพื่อตรวจสอบหรือไม่
+        self.zigzag_inspection = False        # ใช้รูปแบบ zigzag ในการ probe หรือไม่
+        self.zigzag_degree = 45.0             # องศาสะสมต่อชั้นเมื่อเปิด zigzag — ปรับได้
 
-        # --- Feature: Unselected/Rejected Hole Tracking (v01) ---
-        self.is_rejected = False        # ⛔ True = ถูก reject โดย depth/occlusion filter
-        self.reject_reason = ""         # เหตุผลสั้น ๆ ที่ถูก reject
-        self.position_unknown = False   # True = ไม่สามารถระบุตำแหน่งบนจอได้เลย
+        self.is_rejected = False        # True = ถูก reject โดยเงื่อนไข depth/occlusion
+        self.reject_reason = ""         # เหตุผลที่ถูก reject
+        self.position_unknown = False   # True = ไม่สามารถระบุตำแหน่งบนจอได้
 
-        # --- Feature: Multi-diameter hole segments (v02) ---
-        # ว่างเปล่า = รูปกติ (segment เดียว) ไม่มี folder UI
-        # มี 2+ รายการ = รูหลายระดับเส้นผ่านศูนย์กลาง -> sidebar แสดงเป็น
-        # การ์ดเดียวที่กดขยายเห็น sub-tab ต่อ segment
+        # segments ว่างเปล่า = รูปกติ (segment เดียว) ; มี 2+ = รูหลายระดับเส้นผ่านศูนย์กลาง
         self.segments: list = []
 
 
@@ -97,5 +98,5 @@ class StepHole:
         ]
 
     def radius_at(self, t: float) -> float:
-        """คำนวณรัศมี ณ ตำแหน่งความลึก t สัดส่วน بين 0.0 (ปากรู) ถึง 1.0 (ก้นรู)"""
+        """รัศมี ณ ตำแหน่งความลึก t สัดส่วนระหว่าง 0.0 (ปากรู) ถึง 1.0 (ก้นรู)"""
         return self.radius_open + t * (self.radius_deep - self.radius_open)

@@ -1,3 +1,22 @@
+# ==============================================================================
+# ui/main_window.py — หน้าต่างหลักของโปรแกรม (UIManager)
+# ==============================================================================
+# หน้าที่หลัก: สร้างหน้าต่างโปรแกรม, Sidebar ซ้าย (ควบคุมมุมมอง/Probe Profile),
+# Sidebar ขวา (รายการรูที่ตรวจพบ), และแท็บกลาง (Selection / Customization /
+# Path Mapper — ไฟล์ใน ui/tabs/) รวมถึงจัดการ state ของรูทั้งหมด
+# (เลือกรู, ตั้งค่า layers/points/zigzag ต่อรู, สลับมุมมอง ฯลฯ)
+#
+# ตัวแปรสำคัญที่ปรับจูนได้:
+#   root.geometry(...)      = ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล)
+#   sidebar_left width       = ความกว้าง Sidebar ซ้าย (แถบควบคุม)
+#   sidebar_right width      = ความกว้าง Sidebar ขวา (รายการรู)
+#   colors (cmap)            = สีไล่ระดับความลึกบนกราฟ 2D (ขาว→เหลือง→ส้ม→แดง)
+#   self.fig = Figure(figsize=...) = ขนาดพื้นที่วาดกราฟ
+#   Z-Layers options          = ตัวเลือกจำนวนชั้นตรวจสอบที่ผู้ใช้เลือกได้ใน dropdown
+#   Points/Layer options      = ตัวเลือกจำนวนจุดตรวจสอบต่อชั้นที่ผู้ใช้เลือกได้
+#   zigzag degree min/max      = ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า (ค่าเริ่มต้น 1–180°)
+#   self.probe_profile        = ค่าเริ่มต้นหัวโพรบ กำหนดจริงใน core/probe_profile.py
+# ==============================================================================
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -35,7 +54,7 @@ class UIManager:
 
         self.current_tab        = "Selection"
         self.selected_hole_idx  = None
-        self.selected_segment_idx = None   # v11: which segment is "isolated" in 3D view (None = whole hole)
+        self.selected_segment_idx = None   # segment ที่ถูก "isolate" ในกราฟ 3D (None = แสดงทั้งรู)
         self.max_physical_dim   = None
 
         self.view_buttons  = {}
@@ -51,12 +70,12 @@ class UIManager:
 
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
-        self.root.geometry("1400x800")
+        self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง พิกเซล) — ปรับได้
 
-        self.sidebar_left = ctk.CTkFrame(self.root, width=250, corner_radius=0)
+        self.sidebar_left = ctk.CTkFrame(self.root, width=250, corner_radius=0)   # ความกว้าง sidebar ซ้าย — ปรับได้
         self.sidebar_left.pack(side="left", fill="y")
 
-        self.sidebar_right = ctk.CTkFrame(self.root, width=350, corner_radius=0, fg_color="#181818")
+        self.sidebar_right = ctk.CTkFrame(self.root, width=350, corner_radius=0, fg_color="#181818")   # ความกว้าง sidebar ขวา — ปรับได้
         self.sidebar_right.pack_propagate(False)
         self.sidebar_right.pack(side="right", fill="y")
 
@@ -77,10 +96,10 @@ class UIManager:
         self.nav_selector.pack(side="top", pady=5)
 
         plt.style.use('dark_background')
-        colors    = ["white", "yellow", "orange", "red"]
+        colors    = ["white", "yellow", "orange", "red"]   # สีไล่ระดับความลึก (Depth colormap) — ปรับลำดับ/เพิ่มสีได้
         self.cmap = LinearSegmentedColormap.from_list("depth_color", colors)
 
-        self.fig = Figure(figsize=(10, 8), facecolor='#242424')
+        self.fig = Figure(figsize=(10, 8), facecolor='#242424')   # ขนาดพื้นที่วาดกราฟ (นิ้ว) — ปรับได้
         self.fig.tight_layout(pad=3.0)
         self.ax  = self.fig.add_subplot(111, facecolor='#1e1e1e')
         self.fig.subplots_adjust(bottom=0.1, right=0.85, left=0.1, top=0.9)
@@ -152,6 +171,7 @@ class UIManager:
         view_frame = ctk.CTkFrame(self._left_scroll, fg_color="transparent")
         view_frame.pack(pady=10, padx=20, fill="x")
 
+        # ตำแหน่งปุ่มมุมมองบน grid (ชื่อ, แถว, คอลัมน์) — ปรับ layout ปุ่มได้ที่นี่
         views = [('Top', 0, 0), ('Bottom', 0, 1), ('Front', 1, 0), ('Back', 1, 1), ('Left', 2, 0), ('Right', 2, 1)]
 
         for name, row, col in views:
@@ -343,7 +363,7 @@ class UIManager:
         if self.geo.mesh is None: return
         if view_name != self.current_view: self.selection_tab.clear_pins()
         self.current_view = view_name
-        self.selected_segment_idx = None   # v11: hole positions can shift between views — never carry a stale isolate index
+        self.selected_segment_idx = None   # เปลี่ยนมุมมอง = ตำแหน่งรูอาจขยับ ต้องเคลียร์ segment ที่ isolate ไว้
         rot = self.screen_rotation
 
         if   view_name == 'Top':    x, y, z_v, z_f, tri = self.geo.get_top_view(rot)
@@ -546,7 +566,7 @@ class UIManager:
         )
         chk.pack(side="right")
 
-        # ✅ Hover Effect: เชื่อมทั้งฝั่ง Selection (2D) และ Customization (3D)
+        # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D) และ Customization (3D)
         def enter_selected(e, gi=idx):
             if self.current_tab == "Selection":
                 self.selection_tab.highlight_hole(gi)
@@ -579,6 +599,7 @@ class UIManager:
             row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row1.pack(fill="x", padx=10, pady=(5,0))
             ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
+            # ตัวเลือกจำนวนชั้นตรวจสอบ (Z-Layers) ใน dropdown — เพิ่ม/ลดตัวเลือกได้
             opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60, 
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_layers.set(str(hole.layers))
@@ -588,6 +609,7 @@ class UIManager:
             row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row2.pack(fill="x", padx=10, pady=(5,0))
             ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5").pack(side="left")
+            # ตัวเลือกจำนวนจุดตรวจสอบต่อชั้น ใน dropdown — เพิ่ม/ลดตัวเลือกได้
             opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_points.set(str(hole.points_per_layer))
@@ -614,6 +636,7 @@ class UIManager:
 
         if widgets['is_expanded']:
             setting_frame.pack(fill="x", pady=(5, 0))
+
     def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
         block = ctk.CTkFrame(parent, fg_color="#141824", corner_radius=6)
         block.pack(fill="x", padx=8, pady=(8 if seg_idx == 0 else 4, 4))
@@ -732,6 +755,7 @@ class UIManager:
         widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
         entry   = widgets['degree_entry']
         try:
+            # ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า Zigzag ได้ (ต่ำสุด–สูงสุด) — ปรับได้
             val = max(1.0, min(180.0, float(entry.get().strip())))
         except ValueError:
             val = cfg.zigzag_degree
@@ -768,7 +792,7 @@ class UIManager:
         )
         chk.pack(side="right")
 
-        # ✅ Hover Effect: เชื่อมทั้งฝั่ง Selection (2D) และ Customization (3D)
+        # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D) และ Customization (3D)
         def enter_unselected(e, gi=idx, h_obj=hole):
             if self.current_tab == "Selection":
                 self.selection_tab.show_unselected_marker(h_obj)
@@ -803,7 +827,7 @@ class UIManager:
                 h.display_id = f"U{unsel_count}"
 
     def _refresh_after_inspection_toggle(self):
-        """กดยืนยันปุ๊บ จัดเรียงหมวดหมู่หมายเลขรูเจาะใหม่ และรีเฟรชกราฟทั้งหมด"""
+        """หลังกดยืนยันเลือกรู: จัดเรียงหมายเลขรูใหม่ตามหมวดหมู่ แล้วรีเฟรชกราฟที่กำลังแสดงอยู่"""
         self._renumber_holes_by_category()
 
         visible_holes = []
@@ -813,20 +837,16 @@ class UIManager:
                 self._visible_hole_map[gi] = len(visible_holes)
                 visible_holes.append(h)
 
-        # 1. ถ้าอยู่หน้า Selection (2D) ให้รีเฟรชวิวทั้งหมด
         if self.current_tab == "Selection":
             saved_pins = list(self.selection_tab._pinned_pin_data)
             self.show_view(self.current_view)
             self.selection_tab._restore_pins(saved_pins)
             return
 
-        # 2. อัปเดตรายการเมนูด้านขวาใหม่
         self.update_treeview(self.current_holes)
 
-        # 3. ✅ ถ้ายืนยันตอนอยู่หน้า Customization (3D) ให้สั่งวาดกราฟ 3D ใหม่ทันที
         if self.current_tab == "Customization":
             self.customization_tab.draw_cross_section()
-        # 4. ถ้ายืนยันตอนอยู่หน้า Path Mapper ก็ให้รีเฟรชเช่นกัน
         elif self.current_tab == "Path Mapper":
             self.path_mapper_tab.draw_path_mapper()
 
@@ -850,6 +870,7 @@ class UIManager:
         hole  = self.current_holes[idx]
         entry = self.hole_widgets[idx]['degree_entry']
         try:
+            # ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า Zigzag ได้ (ต่ำสุด–สูงสุด) — ปรับได้
             val = max(1.0, min(180.0, float(entry.get().strip())))
         except ValueError:
             val = hole.zigzag_degree
@@ -861,7 +882,7 @@ class UIManager:
             self.customization_tab.draw_cross_section()
 
     def on_hole_select(self, idx):
-        self.selected_segment_idx = None   # v11: switching/deselecting a hole always clears any segment isolate
+        self.selected_segment_idx = None   # เลือก/ยกเลิกเลือกรูใหม่ ต้องเคลียร์ segment ที่ isolate ไว้เสมอ
         is_deselecting = (self.selected_hole_idx == idx)
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
