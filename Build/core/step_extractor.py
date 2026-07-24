@@ -1,3 +1,30 @@
+# ==============================================================================
+# core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
+# ==============================================================================
+# หน้าที่หลัก:
+#   1) extract()               อ่านทุก face ที่เป็น CYLINDER/CONE/TORUS/SPHERE
+#      จากไฟล์ STEP แล้วคำนวณตำแหน่ง/รัศมี/ความลึกของรูแต่ละรูด้วยสมการ
+#      วิเคราะห์ (analytical) ก่อน ถ้าล้มเหลวจึงถอยไปใช้วิธีหาเส้นขอบวงกลม (fallback)
+#      จากนั้น merge หน้าตัดครึ่งวง (_merge_half_faces) และ merge รู counterbore
+#      หลายระดับเข้าด้วยกัน (_merge_counterbores)
+#   2) get_step_holes_in_view() แปลงรูที่สกัดได้ให้เป็นตำแหน่งบนจอ 2D ตามมุมมอง
+#      ปัจจุบัน พร้อมตรวจสอบว่ารูถูกบัง/มองไม่เห็น/ตื้นเกินไปหรือไม่
+#
+# ตัวแปรสำคัญที่ปรับจูนได้ (ค่าคลาดเคลื่อน/threshold สำหรับตรวจจับ-รวมรู):
+#   DEBUG               = เปิด/ปิดการพิมพ์ log และบันทึกไฟล์ log
+#   _MIN_SWEEP_RAD       = มุมกวาดขั้นต่ำของเส้นขอบวงกลม (rad) ก่อนนับเป็นวงกลมจริง
+#   _AXIS_TOL            = ค่าความคลาดเคลื่อนแกนขนาน เมื่อเทียบว่า 2 รูอยู่แกนเดียวกัน
+#   _EXTENT_TOL          = ค่าความคลาดเคลื่อนความยาวช่วง (mm) เมื่อ merge หน้าครึ่งวง
+#   _PERP_FRAC_TOL       = สัดส่วนความคลาดเคลื่อนระยะห่างตั้งฉากเมื่อ merge หน้าครึ่งวง
+#   _STRICT_GAP_TOL      = ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รูไม่ coaxial กัน
+#   _MAX_RADIUS_RATIO    = อัตราส่วนรัศมีสูงสุดที่ยอมให้ merge รูไม่ coaxial กัน
+#   _COAXIAL_PERP_TOL    = ระยะห่างตั้งฉากสูงสุด (mm) ที่นับว่า "แกนร่วมกัน" (coaxial)
+#   _COAXIAL_PERP_FRAC   = สัดส่วนรัศมีเพิ่มเติมสำหรับเกณฑ์ coaxial
+#   _COAXIAL_GAP_TOL     = ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รู coaxial กัน
+#   _MIN_TORUS_TUBE_RADIUS / _MIN_SPHERE_CAP_RADIUS = รัศมีขั้นต่ำ (mm) ก่อนนับเป็นรูจริง
+#   MIN_DEPTH (ในฟังก์ชัน)      = ความลึกขั้นต่ำ (mm) ก่อนนับว่าเป็นรูที่วัดได้
+#   SIDE_HOLE_AXIS_THRESHOLD    = มุมแกนขั้นต่ำที่นับว่าเป็น "รูด้านข้าง" เทียบมุมกล้อง
+# ==============================================================================
 import numpy as np
 import math
 import copy
@@ -6,10 +33,10 @@ import datetime
 import cadquery as cq
 from core.models import StepHole, HoleSegment
 
-DEBUG = True
+DEBUG = True   # เปิด/ปิดการพิมพ์ + บันทึก log การสกัดรู — ปิดเพื่อลด overhead ตอนใช้งานจริง
 
 # ---------------------------------------------------------------------------
-# file logging setup
+# ตั้งค่าบันทึกไฟล์ log
 # ---------------------------------------------------------------------------
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Log")
 _LOG_FILE_HANDLE = None
@@ -47,21 +74,21 @@ def _dbg(msg):
         except Exception:
             pass
 
-_MIN_SWEEP_RAD = math.pi
-_AXIS_TOL       = 0.02
-_EXTENT_TOL     = 0.5
-_PERP_FRAC_TOL  = 0.15
+_MIN_SWEEP_RAD = math.pi   # มุมกวาดขั้นต่ำของเส้นขอบวงกลม (rad) ก่อนนับเป็นวงกลมจริง — ปรับได้
+_AXIS_TOL       = 0.02     # ความคลาดเคลื่อนแกนขนาน เมื่อเทียบว่า 2 รูอยู่แกนเดียวกัน — ปรับได้
+_EXTENT_TOL     = 0.5      # ความคลาดเคลื่อนความยาวช่วง (mm) เมื่อ merge หน้าครึ่งวง — ปรับได้
+_PERP_FRAC_TOL  = 0.15     # สัดส่วนความคลาดเคลื่อนระยะห่างตั้งฉากเมื่อ merge หน้าครึ่งวง — ปรับได้
 
-_STRICT_GAP_TOL    = 0.05  
-_MAX_RADIUS_RATIO  = 1.2   
+_STRICT_GAP_TOL    = 0.05  # ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รูไม่ coaxial กัน — ปรับได้
+_MAX_RADIUS_RATIO  = 1.2   # อัตราส่วนรัศมีสูงสุดที่ยอมให้ merge รูไม่ coaxial กัน — ปรับได้
 
-_COAXIAL_PERP_TOL   = 0.3   
-_COAXIAL_PERP_FRAC  = 0.15  
-_COAXIAL_GAP_TOL    = 1.5   
+_COAXIAL_PERP_TOL   = 0.3   # ระยะห่างตั้งฉากสูงสุด (mm) ที่นับว่าแกนร่วมกัน (coaxial) — ปรับได้
+_COAXIAL_PERP_FRAC  = 0.15  # สัดส่วนรัศมีเพิ่มเติมสำหรับเกณฑ์ coaxial — ปรับได้
+_COAXIAL_GAP_TOL    = 1.5   # ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รู coaxial กัน — ปรับได้
 
-_MIN_TORUS_TUBE_RADIUS = 2.0
+_MIN_TORUS_TUBE_RADIUS = 2.0   # รัศมีท่อ torus ขั้นต่ำ (mm) ก่อนนับเป็นรูจริง — ปรับได้
 
-_MIN_SPHERE_CAP_RADIUS = 2.0
+_MIN_SPHERE_CAP_RADIUS = 2.0   # รัศมีขั้นต่ำของ sphere cap (mm) ก่อนนับเป็นรูจริง — ปรับได้
 
 def _sweep_angle(edge) -> float:
     arc_len = edge.Length()
@@ -84,6 +111,7 @@ def _arc_radius(edge) -> float:
     return 0.0
 
 def _merge_half_faces(holes: list) -> list:
+    """รวมรูที่ถูกตัดออกเป็น 2 หน้าครึ่งวง (เกิดจากขอบ B-Rep ขาดตอน) ให้กลับเป็นรูเดียว"""
     if not holes: return holes
     merged = [False] * len(holes)
     for i in range(len(holes)):
@@ -121,6 +149,8 @@ def _merge_half_faces(holes: list) -> list:
     return result
 
 def _merge_counterbores(holes: list) -> list:
+    """รวมรูที่มีหลายระดับเส้นผ่านศูนย์กลาง (counterbore) ที่อยู่แกนเดียวกัน/ต่อเนื่องกัน
+    ให้กลายเป็นรูเดียวที่มีหลาย segment"""
     if not holes: return holes
     current = holes
     while True:
@@ -157,6 +187,8 @@ def _merge_counterbores(holes: list) -> list:
                 gap_tol = _COAXIAL_GAP_TOL if is_coaxial else _STRICT_GAP_TOL
 
                 if is_coaxial and abs(r_large - r_small) < 0.1 and perp_d < _COAXIAL_PERP_TOL:
+                    # กรณีรูขนาดเท่ากันแกนเดียวกันแท้ ๆ (เช่น รูทะลุที่ถูกตัดข้อมูลขาดกลาง)
+                    # ขยาย gap_tol ชั่วคราวเพื่อเชื่อมรูทั้งสองฝั่งเข้าด้วยกัน — ปรับสัดส่วน (×4.0) / ค่าต่ำสุด (50.0) ได้
                     extended_gap = max(gap_tol, r_large * 4.0, 50.0)
                     if gap_tol < extended_gap:
                         _dbg(f"  CROSS-HOLE BRIDGE ACTIVATED: extending gap_tol from {gap_tol} to {extended_gap:.2f}")
@@ -204,6 +236,8 @@ def _merge_counterbores(holes: list) -> list:
     return current
 
 def _orient_segments_by_mesh(h, mesh):
+    """เรียงลำดับ segment ให้ segment แรกอยู่ใกล้ผิว mesh จริง (ปากรู) เสมอ
+    โดยเทียบระยะห่างจากผิว mesh ของปลายทั้งสองด้าน"""
     if mesh is None or not h.segments or len(h.segments) < 2:
         return
     try:
@@ -231,6 +265,8 @@ class StepExtractor:
         self._step_holes_cache = []
 
     def extract(self, step_data, mesh_centroid, mesh=None):
+        """อ่านทุก face ในไฟล์ STEP ที่เป็นทรง CYLINDER/CONE/TORUS/SPHERE
+        แล้วสกัดเป็นรายการ StepHole (ตำแหน่ง/รัศมี/ความลึก/แกน)"""
         if step_data is None: return []
 
         cx_off, cy_off, cz_off = mesh_centroid
@@ -243,13 +279,12 @@ class StepExtractor:
             total_faces += 1
             geom_type = face.geomType()
 
-            # v20: SPHERE added alongside CYLINDER/CONE/TORUS
             if geom_type not in ('CYLINDER', 'CONE', 'TORUS', 'SPHERE'):
                 continue
 
             analytical_success = False
 
-            # V17: PURE ANALYTICAL SURFACE EXTRACTION (ดึงสมการจากคณิตศาสตร์ B-Rep)
+            # วิธีหลัก: ดึงสมการพื้นผิว (analytical) ตรงจากคณิตศาสตร์ B-Rep — แม่นยำและเร็วกว่า
             if geom_type == 'CYLINDER':
                 try:
                     try:
@@ -272,7 +307,7 @@ class StepExtractor:
                     r_a = r_b = float(cyl.Radius())
 
                     projs = []
-                    # 1. ลองฉายแสง (Project) ขอบที่หลงเหลืออยู่ลงบนแกนรู
+                    # ฉายจุดบนขอบที่เหลืออยู่ลงบนแกนรู
                     for f_edge in face.Edges():
                         for t in (0.0, 0.25, 0.5, 0.75, 1.0):
                             try:
@@ -281,7 +316,7 @@ class StepExtractor:
                                 projs.append(float(np.dot(vec, axis_vec)))
                             except: pass
 
-                    # 2. ถ้าขอบถูกทำลายเละหมด ให้ดึงจากจุดตัด (Vertices) แทน
+                    # กรณีขอบถูกทำลายหมด ให้ดึงจากจุดตัด (vertices) แทน
                     if not projs:
                         for v in face.Vertices():
                             try:
@@ -315,7 +350,7 @@ class StepExtractor:
                         adaptor = BRepAdaptor_Surface(face.wrapped)
 
                     tor = adaptor.Torus()
-                    ax1 = tor.Axis()          # main revolution axis of the torus
+                    ax1 = tor.Axis()
                     loc = ax1.Location()
                     d   = ax1.Direction()
 
@@ -414,7 +449,6 @@ class StepExtractor:
                              f"seam/meridian edge(s) (radius≈R={R:.3f}) "
                              f"from sphere rim sampling")
 
-                    # Sample the true rim (boundary) edges only.
                     rim_pts = []
                     for f_edge in rim_edges:
                         for t in (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0):
@@ -459,7 +493,7 @@ class StepExtractor:
                     h_avg      = float(np.mean(proj_len))
                     rim_center = c0 + h_avg * axis_vec
                     r_open     = float(np.mean(np.linalg.norm(perp_vecs, axis=1)))
-                    r_deep     = 0.0  # pole is a single point, same as CONE tip
+                    r_deep     = 0.0  # ขั้วบนเป็นจุดเดียว เหมือนปลายแหลมของ CONE
 
                     end_a      = tuple(rim_center)
                     end_b      = tuple(pole_pt)
@@ -472,8 +506,7 @@ class StepExtractor:
                 except Exception as e:
                     _dbg(f"Sphere analytical extraction failed face#{total_faces}: {e!r}")
 
-            # FALLBACK: ถ้าดึงสมการพลาด (หรือเป็น CONE, หรือ TORUS/SPHERE ที่ดึงสมการไม่สำเร็จ)
-            # จะกลับมาใช้วิธีหาเส้นวงกลม (Edge) — เหมือนเดิม ไม่แก้
+            # วิธีสำรอง (ใช้เมื่อดึงสมการไม่สำเร็จ หรือเป็น CONE): หาเส้นวงกลม (edge) แทน
             if not analytical_success:
                 raw_circle_edges = [e for e in face.Edges() if e.geomType() == 'CIRCLE']
                 if len(raw_circle_edges) < 1:
@@ -569,7 +602,7 @@ class StepExtractor:
         return dx, dy, depth, hit
 
     def _sample_side_hole_breach(self, h, dir_to_viewer, mesh, projector, view_name, screen_rot):
-        MIN_DEPTH = 0.1
+        MIN_DEPTH = 0.1   # ความลึกขั้นต่ำ (mm) ก่อนนับว่าพบจุดทะลุผิวของรูด้านข้าง — ปรับได้
         axis_vec = np.array(h.axis, dtype=float)
         norm = np.linalg.norm(axis_vec)
         if norm < 1e-9: return None
@@ -597,11 +630,13 @@ class StepExtractor:
         return best
 
     def get_step_holes_in_view(self, projector, view_name: str, screen_rot: int = 0, mesh=None):
+        """แปลงรูจาก cache ให้เป็นตำแหน่งบนจอ 2D ตามมุมมองปัจจุบัน พร้อมตรวจสอบ
+        ว่ารูถูกบัง (occluded), ตื้นเกินไป, หรือมองไม่เห็นจากมุมนี้หรือไม่"""
         if not self._step_holes_cache: return []
         p = projector.get_view_params(view_name, screen_rot)
         dir_to_viewer = p['matrix'][:3, :3].T @ np.array([0.0, 0.0, 1.0])
         dir_to_viewer /= np.linalg.norm(dir_to_viewer)
-        MIN_DEPTH, SIDE_HOLE_AXIS_THRESHOLD = 0.1, 0.3
+        MIN_DEPTH, SIDE_HOLE_AXIS_THRESHOLD = 0.1, 0.3   # ความลึกขั้นต่ำ (mm) / มุมแกนขั้นต่ำที่นับเป็น "รูด้านข้าง" — ปรับได้
         result = []
 
         for cache_idx, h in enumerate(self._step_holes_cache):

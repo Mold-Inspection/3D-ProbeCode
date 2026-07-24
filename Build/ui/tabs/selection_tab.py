@@ -1,3 +1,20 @@
+# ==============================================================================
+# ui/tabs/selection_tab.py — แท็บ "Selection" (มุมมอง 2D + เลือก/ปักหมุดรู)
+# ==============================================================================
+# หน้าที่หลักของไฟล์นี้:
+#   - วาดกราฟ 2D (tripcolor) แสดงความลึกของชิ้นงานตามมุมมองที่เลือก
+#   - จัดการ event เมาส์: scroll (ซูม), click (ปักหมุดวัดความลึก), hover (แสดง tooltip)
+#   - ตรวจจับรู (clustering) จากพื้นผิว mesh กรณีไม่มีข้อมูล STEP
+#   - คำนวณความลึก ณ ตำแหน่งเมาส์ ทั้งจากพื้นผิว mesh และจาก step-hole cache
+#
+# ตัวแปรสำคัญที่ปรับจูนได้ (อยู่กระจายในฟังก์ชันต่าง ๆ ด้านล่าง มีคอมเมนต์กำกับจุด):
+#   MAX_PINS            = จำนวนหมุดวัดความลึกสูงสุดที่ปักบนกราฟได้พร้อมกัน
+#   cluster_radius       = รัศมีรวมกลุ่มจุด (mm) สำหรับตรวจจับว่าเป็นรูเดียวกัน
+#   min cluster size (>5)= จำนวนจุดขั้นต่ำในกลุ่มก่อนจะนับว่าเป็น "รู"
+#   NEAR_CENTER_RATIO     = สัดส่วนรัศมีที่ถือว่า "ใกล้ศูนย์กลางรู" (ใช้หาก้นรู)
+#   OPEN_THRESHOLD/FLOOR_TOLERANCE = ค่าความคลาดเคลื่อนตรวจสอบปาก/ก้นรูจาก STEP
+#   base_scale            = อัตราการซูมเข้า/ออกต่อการเลื่อนสกรอลล์ 1 ครั้ง
+# ==============================================================================
 import numpy as np
 
 
@@ -7,9 +24,8 @@ class SelectionTab:
         self._pinned_annotations = []
         self._pin_markers        = []
         self._pinned_pin_data    = []   # [(x, y, depth), …]
-        self.MAX_PINS = 10
+        self.MAX_PINS = 10   # จำนวนหมุดวัดความลึกสูงสุดที่ปักบนกราฟได้พร้อมกัน — ปรับได้
 
-        # v02: hover-feedback state
         self._unselected_marker_artists = []
 
     def setup_events(self):
@@ -62,10 +78,8 @@ class SelectionTab:
 
         if saved_pins:
             self.app.canvas.draw_idle()
+
     def highlight_hole(self, global_idx):
-        """Yellow-highlight the canvas marker for a Selected Hole item on
-        hover. Uses the global->local index map since the scatter array
-        only contains non-rejected holes."""
         app = self.app
         if app.current_tab != "Selection" or not app.scatter_holes:
             return
@@ -83,8 +97,6 @@ class SelectionTab:
         app.canvas.draw_idle()
 
     def clear_hole_highlight(self):
-        """Revert the hover highlight, keeping the click-selection color
-        (if any) intact."""
         app = self.app
         if app.current_tab != "Selection" or not app.scatter_holes:
             return
@@ -96,10 +108,8 @@ class SelectionTab:
                 colors[sel_local] = 'yellow'
         app.scatter_holes.set_facecolors(colors)
         app.canvas.draw_idle()
+
     def show_unselected_marker(self, hole):
-        """Draw a standout white-fill / red-edge / red 'U' marker at a
-        rejected hole's fallback position. Nothing is drawn if the hole's
-        position is unknown (sidebar note already covers that case)."""
         app = self.app
         self.clear_unselected_marker()
         if app.current_tab != "Selection":
@@ -146,11 +156,13 @@ class SelectionTab:
             return surface_depth
 
         view_name  = app.current_view
-        screen_rot = app.screen_rotation          # ← use current rotation
+        screen_rot = app.screen_rotation
         projector  = geo.projector
         total_depth = projector.get_view_params(
             view_name, screen_rot)['total_depth']
 
+        # ค่าคลาดเคลื่อนที่ยอมรับได้เมื่อเทียบตำแหน่งเมาส์กับปาก/ก้นรูจาก STEP (mm)
+        # — ปรับสัดส่วน (0.03 / 0.04) หรือค่าต่ำสุด (1.5 / 1.0) ได้ตามความละเอียดโมเดล
         OPEN_THRESHOLD = max(total_depth * 0.03, 1.5)
         FLOOR_TOLERANCE = max(total_depth * 0.04, 1.0)
 
@@ -176,6 +188,7 @@ class SelectionTab:
             r        = sh.radius_open
             dist_2d  = np.hypot(mx - open_x, my - open_y)
 
+            # ระยะห่างสูงสุด (เท่าของรัศมีปากรู) ที่ยังนับว่าเมาส์ชี้อยู่ในรูนี้ — ปรับได้
             if dist_2d > r * 1.3:
                 continue
 
@@ -224,7 +237,6 @@ class SelectionTab:
         return max(0.0, float(depth_here))
 
     def _get_depth_at(self, mx, my):
-        """Entry point: auto-select STEP or STL depth method."""
         app      = self.app
         has_step = (hasattr(app.geo, 'step_data') and app.geo.step_data is not None)
         if has_step:
@@ -234,25 +246,30 @@ class SelectionTab:
 
     # ------------------------------------------------------------------
     def detect_holes_in_view(self, x, y, z, view_name):
+        """ตรวจจับรูจากพื้นผิว mesh ด้วยการรวมกลุ่มจุด (clustering) — ใช้เฉพาะ
+        กรณีไม่มีข้อมูล STEP (ไฟล์ STL/mesh ล้วน)"""
         if len(z) == 0:
             return []
+
+        # ระยะขอบเขต (mm) ที่ตัดพื้นผิวบนสุด/ล่างสุดออก ก่อนเริ่มหารู — ปรับได้
+        Z_EDGE_MARGIN = 1.0
 
         if view_name in ['Front', 'Right']:
             surface_z        = np.max(z)
             bottom_z         = np.min(z)
-            valid_indices    = np.where((z < surface_z - 1.0) & (z > bottom_z + 1.0))[0]
+            valid_indices    = np.where((z < surface_z - Z_EDGE_MARGIN) & (z > bottom_z + Z_EDGE_MARGIN))[0]
             is_positive_view = True
         else:
             surface_z        = np.min(z)
             bottom_z         = np.max(z)
-            valid_indices    = np.where((z > surface_z + 1.0) & (z < bottom_z - 1.0))[0]
+            valid_indices    = np.where((z > surface_z + Z_EDGE_MARGIN) & (z < bottom_z - Z_EDGE_MARGIN))[0]
             is_positive_view = False
 
         if len(valid_indices) == 0:
             return []
 
         holes          = []
-        cluster_radius = 15.0
+        cluster_radius = 15.0   # รัศมีรวมกลุ่มจุด (mm) ที่ถือว่าอยู่ในรูเดียวกัน — ปรับได้
         remaining      = set(valid_indices)
 
         while remaining:
@@ -274,7 +291,9 @@ class SelectionTab:
                     cluster.append(n)
                     queue.append(n)
 
-            if len(cluster) > 5:
+            # จำนวนจุดขั้นต่ำในกลุ่มก่อนนับว่าเป็น "รู" (กันจุดรบกวน/noise) — ปรับได้
+            MIN_CLUSTER_SIZE = 5
+            if len(cluster) > MIN_CLUSTER_SIZE:
                 cluster_x  = x[cluster]
                 cluster_y  = y[cluster]
                 cluster_z  = z[cluster]
@@ -283,8 +302,9 @@ class SelectionTab:
                 distances  = np.hypot(cluster_x - center_x, cluster_y - center_y)
                 radius     = float(np.percentile(distances, 95))
                 if radius < 1.0:
-                    radius = 2.0
+                    radius = 2.0   # รัศมีขั้นต่ำสำรอง (mm) กรณีคำนวณได้เล็กผิดปกติ — ปรับได้
 
+                # สัดส่วนรัศมีที่ถือว่า "ใกล้ศูนย์กลางรู" ใช้หาความลึกก้นรู — ปรับได้
                 NEAR_CENTER_RATIO = 0.3
                 near_center_mask  = distances < (radius * NEAR_CENTER_RATIO)
                 if near_center_mask.sum() < 1:
@@ -319,7 +339,7 @@ class SelectionTab:
 
         self._pinned_annotations = []
         self._pin_markers        = []
-        self._unselected_marker_artists = []   # v02: stale after ax.clear()
+        self._unselected_marker_artists = []
 
         app.ax.clear()
         if hasattr(app, 'cax') and app.cax is not None:
@@ -375,7 +395,7 @@ class SelectionTab:
         if getattr(app, 'max_physical_dim', None) is not None and len(app.current_x) > 0:
             cx        = (np.min(app.current_x) + np.max(app.current_x)) / 2.0
             cy        = (np.min(app.current_y) + np.max(app.current_y)) / 2.0
-            half_span = (app.max_physical_dim / 2.0) * 1.15
+            half_span = (app.max_physical_dim / 2.0) * 1.15   # margin รอบชิ้นงานเมื่อ fit หน้าจอ (15%) — ปรับได้
             app.ax.set_xlim([cx - half_span, cx + half_span])
             app.ax.set_ylim([cy - half_span, cy + half_span])
 
@@ -458,7 +478,7 @@ class SelectionTab:
         if event.inaxes != self.app.ax:              return
         if self.app.current_tab == "Path Mapper":    return
 
-        base_scale   = 1.2
+        base_scale   = 1.2   # อัตราซูมเข้า/ออกต่อการเลื่อนสกรอลล์ 1 ครั้ง (ยิ่งมาก ยิ่งซูมไว) — ปรับได้
         scale_factor = 1 / base_scale if event.button == 'up' else base_scale
         xdata, ydata = event.xdata, event.ydata
         xlim, ylim   = self.app.ax.get_xlim(), self.app.ax.get_ylim()

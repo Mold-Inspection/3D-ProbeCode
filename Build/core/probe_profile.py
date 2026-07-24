@@ -1,73 +1,42 @@
-# core/probe_profile.py
+# ==============================================================================
+# core/probe_profile.py — ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
+# ==============================================================================
+# หน้าที่: เก็บขนาดหัวโพรบ (ก้าน + ปลายทรงกลม) และตรวจสอบว่าโพรบตัวนี้
+# เข้าไปวัดรู (ความลึก/ขนาด) ที่ต้องการได้จริงหรือไม่ ก่อนจะสั่งวิ่งจริง
+#
+# ตัวแปรสำคัญที่ปรับจูนได้:
+#   stylus_length  = ความยาวก้านโพรบ (mm) — ระยะลึกสุดที่โพรบลงไปวัดได้
+#   tip_diameter   = เส้นผ่าศูนย์กลางหัวโพรบทรงกลม (mm)
+#   DEFAULT_LENGTH = ค่าความยาวก้านเริ่มต้นเมื่อกด "Reset to Default"
+#   DEFAULT_TIP_D  = ค่าเส้นผ่าศูนย์กลางหัวเริ่มต้นเมื่อกด "Reset to Default"
+# ==============================================================================
 from dataclasses import dataclass, field
 
 @dataclass
 class ProbeProfile:
-    """
-    โปรไฟล์ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
-    ใช้สำหรับตรวจสอบว่า probe สามารถเข้าถึงความลึกของรูที่ต้องการวัดได้หรือไม่
+    stylus_length: float = 50.0   # mm — ความยาวก้านโพรบ ปรับได้
+    tip_diameter:  float = 2.0    # mm — เส้นผ่าศูนย์กลางหัวโพรบ ปรับได้
 
-    Attributes
-    ----------
-    stylus_length : float
-        ความยาวก้านโพรบ (mm) — ระยะสูงสุดที่ probe สามารถลงลึกเข้าไปในรูได้
-        ถ้า hole.depth > stylus_length → probe ไม่ถึงก้นรู → แสดงคำเตือนสีแดง
-
-    tip_diameter : float
-        เส้นผ่าศูนย์กลางหัวโพรบทรงกลม (mm) → tip_radius = tip_diameter / 2
-        ถ้า tip_radius > hole.radius → หัว probe ใหญ่เกินไปจนเข้ารูไม่ได้
-
-    DEFAULT_LENGTH : float = 50.0   ความยาวก้าน default (mm)
-    DEFAULT_TIP_D  : float = 2.0    เส้นผ่าศูนย์กลางหัว default (mm)
-    """
-
-    stylus_length: float = 50.0   # mm — ความยาวก้านโพรบ
-    tip_diameter:  float = 2.0    # mm — เส้นผ่าศูนย์กลางหัวโพรบ
-
-    # ค่า default สำรองสำหรับ reset
     DEFAULT_LENGTH: float = field(default=50.0, init=False, repr=False)
     DEFAULT_TIP_D:  float = field(default=2.0,  init=False, repr=False)
 
     # ------------------------------------------------------------------
-    # Derived Properties
-    # ------------------------------------------------------------------
     @property
     def tip_radius(self) -> float:
-        """รัศมีหัวโพรบ (mm) = tip_diameter / 2"""
         return self.tip_diameter / 2.0
 
     # ------------------------------------------------------------------
-    # Validation Helpers
-    # ------------------------------------------------------------------
     def can_reach_depth(self, hole_depth: float) -> bool:
-        """
-        คืน True ถ้า probe ยาวพอที่จะลงไปถึงความลึก hole_depth
-        False = probe สั้นเกินไป → แสดงคำเตือน / popup error
-        """
+        """True ถ้าก้านโพรบยาวพอลงไปถึงความลึก hole_depth"""
         return self.stylus_length >= hole_depth
 
     def can_fit_in_hole(self, hole_radius: float) -> bool:
-        """
-        คืน True ถ้าหัว probe เล็กพอที่จะเข้าไปในรูที่มีรัศมี hole_radius
-        False = หัว probe ใหญ่เกินไป → probe ชนขอบรู
-        """
+        """True ถ้าหัวโพรบเล็กพอที่จะเข้ารูรัศมี hole_radius ได้"""
         return self.tip_radius <= hole_radius
 
     def check_hole(self, hole_depth: float, hole_radius: float) -> dict:
-        """
-        ตรวจสอบทั้งความลึกและขนาดหัวโพรบสำหรับรูหนึ่งรู
-        คืนค่า dict ที่มีผลการตรวจสอบและข้อความเตือน
-
-        Returns
-        -------
-        {
-            'ok'            : bool   — True ถ้าผ่านทุกเงื่อนไข
-            'depth_ok'      : bool   — probe ยาวพอหรือไม่
-            'fit_ok'        : bool   — หัวโพรบเล็กพอหรือไม่
-            'depth_warning' : str    — ข้อความเตือนเรื่องความลึก ('' ถ้าไม่มีปัญหา)
-            'fit_warning'   : str    — ข้อความเตือนเรื่องขนาดหัว ('' ถ้าไม่มีปัญหา)
-        }
-        """
+        """ตรวจสอบทั้งความลึกและขนาดหัวโพรบสำหรับรูหนึ่งรู คืนค่า dict:
+        {ok, depth_ok, fit_ok, depth_warning, fit_warning}"""
         depth_ok = self.can_reach_depth(hole_depth)
         fit_ok   = self.can_fit_in_hole(hole_radius)
 

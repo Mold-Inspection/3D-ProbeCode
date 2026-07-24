@@ -1,37 +1,34 @@
+# ==============================================================================
+# core/path_planner.py — คำนวณเส้นทางโพรบ (probe path) แบบทีละชั้น
+# ==============================================================================
+# หน้าที่: จากข้อมูลรู (open_3d → deep_3d) คำนวณตำแหน่งจุดสัมผัสผนังรูในแต่ละ
+# "ชั้น" (layer) ตามความลึก เพื่อนำไปวาดเส้นทางโพรบและจุดวัด
+#   - get_probe_path_layers()       ใช้กับรูปกติ (segment เดียว หรือรูเรียว/กรวยต่อเนื่อง)
+#   - get_probe_path_layers_multi() ใช้กับรูหลายระดับเส้นผ่านศูนย์กลาง (counterbore)
+#     คำนวณแยกทีละ segment ไม่ interpolate รัศมีข้ามขั้น
+#
+# ตัวแปรสำคัญที่ปรับจูนได้ (ส่งเข้ามาจาก UI ต่อรู/segment ไม่ใช่ค่าคงที่ในไฟล์นี้):
+#   n_layers / cfg.layers            = จำนวนชั้นตรวจสอบ
+#   zigzag_inspection / cfg.zigzag_inspection = เปิด/ปิดการหมุนมุมโพรบต่อชั้น
+#   zigzag_degree / cfg.zigzag_degree = องศาสะสมที่หมุนต่อ 1 ชั้น
+# ==============================================================================
 import numpy as np
 
 
 class PathPlanner:
-    """Compute layer-by-layer probe paths for hole inspection."""
+    """คำนวณเส้นทางโพรบสำหรับตรวจสอบรูทีละชั้น (layer-by-layer)"""
 
     def get_probe_path_layers(self, hole, n_layers: int, projector, view_name: str,
                                screen_rot: int = 0,
                                zigzag_inspection: bool = False,
                                zigzag_degree: float = 45.0) -> list:
-        """
-        Return a list of layer dicts for drawing the probe path.
+        """คืนรายการ dict ของแต่ละ layer สำหรับวาดเส้นทางโพรบ
 
-        Parameters
-        ----------
-        hole              : StepHole (or any object with open_3d / deep_3d / radius_at)
-        n_layers          : number of inspection layers
-        projector         : Projector instance
-        view_name         : current view name ('Top', 'Front', …)
-        screen_rot        : current on-screen rotation (degrees) — must match
-                            the value used when the view was rendered so that
-                            projected layer positions align with the canvas
-        zigzag_inspection : rotate probe angle per layer
-        zigzag_degree     : cumulative rotation per layer (degrees)
+        โหมด Zigzag: layer 0 → offset มุม 0°, layer N → offset = N × zigzag_degree
 
-        Zigzag mode
-        -----------
-        Layer 0 → offset = 0°
-        Layer N → offset = N × zigzag_degree
-
-        NOTE: this treats the hole as ONE continuous radius taper from
-        open_3d to deep_3d (hole.radius_at). Correct for ordinary holes
-        and true cones/tapers. For a hole with a real step in diameter,
-        use get_probe_path_layers_multi() instead (see v02 changelog).
+        หมายเหตุ: ฟังก์ชันนี้มองรูเป็นความเรียวต่อเนื่องเดียว (open_3d → deep_3d,
+        ใช้ hole.radius_at) เหมาะกับรูปกติและรูเรียว/กรวยแท้ ถ้ารูมีขั้นเส้นผ่าน
+        ศูนย์กลางจริง ให้ใช้ get_probe_path_layers_multi() แทน
         """
         t_vals = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
         o = np.array(hole.open_3d)
@@ -60,34 +57,25 @@ class PathPlanner:
     def get_probe_path_layers_multi(self, hole, segment_settings: list,
                                      projector, view_name: str,
                                      screen_rot: int = 0) -> list:
-        """
-        Segment-aware version of get_probe_path_layers() for multi-diameter
-        ("counterbore-style") holes.
+        """เวอร์ชันแยกตาม segment ของ get_probe_path_layers() สำหรับรูหลายระดับ
+        เส้นผ่านศูนย์กลาง (แบบ counterbore)
 
         Parameters
         ----------
-        hole              : StepHole whose .segments is a list of
-                            core.models.HoleSegment (raw geometry, sorted
-                            open-end first — see step_extractor.py v24)
-        segment_settings  : list of core.models.HoleSegmentSetting, SAME
-                            length and order as hole.segments — carries
-                            each segment's own layers/points_per_layer/
-                            zigzag_inspection/zigzag_degree
-        projector, view_name, screen_rot : same as get_probe_path_layers()
+        hole              : StepHole ที่มี .segments เป็นเรขาคณิตดิบ (เรียงจากปากรูก่อน)
+        segment_settings  : list ของ core.models.HoleSegmentSetting ความยาว/ลำดับ
+                            ตรงกับ hole.segments — เก็บค่า layers/points_per_layer/
+                            zigzag ต่อ segment
+        projector, view_name, screen_rot : เหมือนกับ get_probe_path_layers()
 
-        Returns
-        -------
-        Flat list of layer dicts (open end -> deep end, continuous), each
-        with the same keys as get_probe_path_layers() PLUS:
-          - 'seg_idx'          : which segment this layer belongs to
-          - 'seg_local_idx'    : layer index WITHIN that segment (zigzag
-                                  angle offset is computed from this, so
-                                  every segment's zigzag restarts at 0°)
-          - 'points_per_layer' : that segment's own point count, so the
-                                  caller doesn't need a second lookup
-        Radius is only ever interpolated between a segment's own
-        radius_open/radius_deep — never across a step boundary into the
-        next segment.
+        คืนค่า: list แบบเรียงราบ (ปากรู → ก้นรู) แต่ละอันมี key เหมือน
+        get_probe_path_layers() บวกเพิ่ม:
+          - 'seg_idx'          : segment ที่ layer นี้อยู่
+          - 'seg_local_idx'    : ลำดับ layer ภายใน segment นั้น (มุม zigzag จะเริ่ม
+                                  นับ 0° ใหม่ทุก segment)
+          - 'points_per_layer' : จำนวนจุดของ segment นั้น
+        รัศมี interpolate เฉพาะภายใน radius_open/radius_deep ของ segment ตัวเอง
+        เท่านั้น ไม่ข้ามขั้นไปยัง segment ถัดไป
         """
         if len(segment_settings) != len(hole.segments):
             raise ValueError(

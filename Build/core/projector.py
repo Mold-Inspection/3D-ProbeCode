@@ -1,26 +1,23 @@
-# core/projector.py
+# ==============================================================================
+# core/projector.py — แปลงพิกัด 3D ของ mesh เป็นภาพ 2D สำหรับแต่ละมุมมอง
+# ==============================================================================
+# หน้าที่: หมุนโมเดล 3D ตามมุมมองที่เลือก (Top/Bottom/Front/Back/Left/Right)
+# แล้วฉาย (project) ลงเป็นพิกัดจอ 2D (x2d, y2d) พร้อมค่าความลึก (depth) —
+# ใช้เป็นแกนหลักในการวาดกราฟ 2D และคำนวณตำแหน่งจุดวัด/ปักหมุดทุกจุดในโปรแกรม
+#
+# แนวคิดพิกัด: ผู้สังเกตอยู่นิ่งมองลงมาตามแกน −Z เสมอ ตารางด้านล่างคือมุมหมุน
+# "วัตถุ" ให้หน้าที่ต้องการหันขึ้นมาหาผู้สังเกต (หน่วยองศา, ลำดับ sxyz)
+#
+# ตัวแปรสำคัญที่ปรับจูนได้:
+#   _VIEW_ROTATIONS = ตารางมุมหมุน (rx, ry, rz) ของแต่ละมุมมอง — แก้ไขเฉพาะกรณี
+#                      ต้องการเปลี่ยนนิยามทิศทางมุมมอง (ต้องเข้าใจคณิตศาสตร์การหมุนก่อนแก้)
+#   front-face threshold (0.001, 1e-5) = ค่าความคลาดเคลื่อนขั้นต่ำในการตัดสินว่า
+#                      สามเหลี่ยมหน้าไหน "หันเข้าหาผู้สังเกต" (หน้าที่มองเห็นได้)
+# ==============================================================================
 import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
 
-# -----------------------------------------------------------------------
-# View rotation table  (euler angles in degrees, sxyz / static X→Y→Z order)
-#
-# Coordinate convention after trimesh loads:
-#   The observer is FIXED looking straight DOWN the −Z axis.
-#   Each entry rotates the OBJECT so the named face points UP toward the observer.
-#
-#   Top    : no rotation — whatever face is on +Z greets the observer  (0,  0,   0)
-#   Bottom : flip 180° around X — bottom face now faces up            (180, 0,   0)
-#   Front  : tilt −90° around X — front face (−Y) now faces up        (−90, 0,   0)
-#   Back   : tilt −90° around X then spin 180° around Z               (−90, 0, 180)
-#   Left   : tilt −90° around X then spin −90° around Z (−X faces up) (−90, 0, −90)
-#   Right  : tilt −90° around X then spin +90° around Z (+X faces up) (−90, 0,  90)
-#
-# Why Left = (−90, 0, −90) and Right = (−90, 0, +90)?
-#   After the −90° X tilt, the model is standing up.  Spinning −90° around Z
-#   brings the LEFT side (−X) to face the observer; +90° brings the RIGHT side (+X).
-# -----------------------------------------------------------------------
 _VIEW_ROTATIONS = {
     'Top':    (  0,  0,   0),
     'Bottom': (180,  0,   0),
@@ -32,11 +29,11 @@ _VIEW_ROTATIONS = {
 
 
 class Projector:
-    """Manages 3-D → 2-D projection for each named view.
+    """จัดการการแปลงพิกัด 3D → 2D สำหรับแต่ละมุมมอง
 
-    All public methods accept an optional ``screen_rot`` (int, degrees) for
-    the on-screen rotation from the "Rotate 90°" button.
-    The view-params cache is keyed on (view_name, screen_rot).
+    เมธอดสาธารณะทุกตัวรับ ``screen_rot`` (int, องศา) แบบ optional สำหรับ
+    การหมุนหน้าจอเพิ่มเติมจากปุ่ม "Rotate 90°"
+    แคช view-params อ้างอิงด้วยคีย์ (view_name, screen_rot)
     """
 
     def __init__(self):
@@ -51,7 +48,7 @@ class Projector:
 
     # ------------------------------------------------------------------
     def get_view(self, view_name: str, screen_rot: int = 0):
-        """Return (x2d, y2d, z_depth_verts, z_depth_faces, vis_triangles)."""
+        """คืนค่า (x2d, y2d, z_depth_verts, z_depth_faces, vis_triangles)"""
         rx, ry, rz = _VIEW_ROTATIONS.get(view_name, (0, 0, 0))
         return self.get_2d_projection(rx, ry, rz, screen_rot)
 
@@ -69,6 +66,7 @@ class Projector:
         area = ((v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) -
                 (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0]))
 
+        # ค่าความคลาดเคลื่อนขั้นต่ำสำหรับตัดสินว่าหน้าสามเหลี่ยมหันเข้าหาผู้สังเกต — ปรับได้
         front = (rn[:, 2] > 0.001) & (np.abs(area) > 1e-5)
         if front.sum() == 0:
             front = (rn[:, 2] < -0.001) & (np.abs(area) > 1e-5)
@@ -120,7 +118,7 @@ class Projector:
     # ------------------------------------------------------------------
     def project_point_to_view(self, x_mesh, y_mesh, z_mesh,
                                view_name: str, screen_rot: int = 0):
-        """Return (display_x, display_y, depth_mm)."""
+        """คืนค่า (display_x, display_y, depth_mm) ของจุด 3D หนึ่งจุดในมุมมองที่ระบุ"""
         p  = self.get_view_params(view_name, screen_rot)
         pt = np.array([[x_mesh, y_mesh, z_mesh]])
         rp = trimesh.transformations.transform_points(pt, p['matrix'])[0]
