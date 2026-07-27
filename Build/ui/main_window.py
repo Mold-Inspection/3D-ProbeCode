@@ -16,7 +16,17 @@
 #   Points/Layer options      = ตัวเลือกจำนวนจุดตรวจสอบต่อชั้นที่ผู้ใช้เลือกได้
 #   zigzag degree min/max      = ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า (ค่าเริ่มต้น 1–180°)
 #   self.probe_profile        = ค่าเริ่มต้นหัวโพรบ กำหนดจริงใน core/probe_profile.py
-# ==============================================================================
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   FEATURE: Segment-level "selected_for_inspection" checkbox added to
+#   each segment block in the right sidebar (_build_segment_block()) —
+#   same visual pattern as the hole-level checkbox. Wired to new
+#   _on_segment_inspection_toggle(). _build_segment_settings() now
+#   calls core/models.py's validate_segment_reachability() right after
+#   building the fresh HoleSegmentSetting list, so a deeper segment
+#   that's physically unreachable (its widest point bigger than the
+#   narrowest point of the segment above it) starts pre-unchecked with
+#   a red warning label + "⚠" header tag — still user-overridable.
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -24,7 +34,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
-from core.models import HoleFeature, HoleSegmentSetting
+from core.models import HoleFeature, HoleSegmentSetting, validate_segment_reachability
 from core.probe_profile import ProbeProfile
 from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
@@ -36,10 +46,12 @@ def _build_segment_settings(sh) -> list:
     segs = getattr(sh, 'segments', None)
     if not segs or len(segs) <= 1:
         return []
-    return [
+    result = [
         HoleSegmentSetting(idx, seg.radius_open, seg.radius_deep, seg.depth)
         for idx, seg in enumerate(segs)
     ]
+    validate_segment_reachability(result)   # v06: auto-flag unreachable segments
+    return result
 
 
 class UIManager:
@@ -73,10 +85,10 @@ class UIManager:
         self.root.title("3D ProbeCode")
         self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง พิกเซล) — ปรับได้
 
-        self.sidebar_left = ctk.CTkFrame(self.root, width=250, corner_radius=0)   # ความกว้าง sidebar ซ้าย — ปรับได้
+        self.sidebar_left = ctk.CTkFrame(self.root, width=300, corner_radius=0)   # ความกว้าง sidebar ซ้าย — ปรับได้
         self.sidebar_left.pack(side="left", fill="y")
 
-        self.sidebar_right = ctk.CTkFrame(self.root, width=350, corner_radius=0, fg_color="#181818")   # ความกว้าง sidebar ขวา — ปรับได้
+        self.sidebar_right = ctk.CTkFrame(self.root, width=430, corner_radius=0, fg_color="#181818")   # ความกว้าง sidebar ขวา — ปรับได้
         self.sidebar_right.pack_propagate(False)
         self.sidebar_right.pack(side="right", fill="y")
 
@@ -572,18 +584,23 @@ class UIManager:
         )
         chk.pack(side="right")
 
-        # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D) และ Customization (3D)
+        # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D), Customization (3D)
+        # และ Path Mapper (overview) — ทุกแท็บแค่ไฮไลต์ ไม่สลับหน้า
         def enter_selected(e, gi=idx):
             if self.current_tab == "Selection":
                 self.selection_tab.highlight_hole(gi)
             elif self.current_tab == "Customization":
                 self.customization_tab.highlight_hole(gi)
+            elif self.current_tab == "Path Mapper":
+                self.path_mapper_tab.highlight_hole(gi)
 
         def leave_selected(e):
             if self.current_tab == "Selection":
                 self.selection_tab.clear_hole_highlight()
             elif self.current_tab == "Customization":
                 self.customization_tab.clear_hole_highlight()
+            elif self.current_tab == "Path Mapper":
+                self.path_mapper_tab.clear_hole_highlight()
 
         self._bind_hover_recursive(item_frame, enter_selected, leave_selected)
 
@@ -644,23 +661,40 @@ class UIManager:
             setting_frame.pack(fill="x", pady=(5, 0))
 
     def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
-        block = ctk.CTkFrame(parent, fg_color="#141824", corner_radius=6)
+        block = ctk.CTkFrame(parent, fg_color="#000000", corner_radius=6)
         block.pack(fill="x", padx=8, pady=(8 if seg_idx == 0 else 4, 4))
 
         seg_header = ctk.CTkFrame(block, fg_color="transparent")
         seg_header.pack(fill="x", padx=6, pady=6)
 
-        arrow = "▾" if cfg.is_expanded else "▸"
+        arrow    = "▾" if cfg.is_expanded else "▸"
+        warn_tag = "  ⚠" if cfg.size_warning else ""
         label_text = (f"{arrow} Segment {seg_idx + 1}  "
                       f"⌀{cfg.radius_open*2:.1f}→⌀{cfg.radius_deep*2:.1f} mm  "
-                      f"D={cfg.depth:.1f} mm")
+                      f"D={cfg.depth:.1f} mm{warn_tag}")
+        header_fg = "#22283a" if cfg.selected_for_inspection else "#3a1f1f"
+
+        # pack checkbox FIRST so it always claims its space before the
+        # button's fill="x"+expand="True" eats the row (v07 fix) —
+        # this is the ONLY checkbox widget created in this method
+        sel_var = ctk.BooleanVar(value=cfg.selected_for_inspection)
+        sel_chk = ctk.CTkCheckBox(
+            seg_header, text="", width=22, variable=sel_var,
+            command=lambda: self._on_segment_inspection_toggle(hole_idx, seg_idx, sel_var))
+        sel_chk.pack(side="right")
+
         seg_btn = ctk.CTkButton(
             seg_header, text=label_text, anchor="w",
-            fg_color="#22283a", hover_color="#2c3348", font=("", 12),
+            fg_color=header_fg, hover_color="#2c3348", font=("", 12),
             command=lambda: self._toggle_segment_expand(hole_idx, seg_idx))
-        seg_btn.pack(fill="x")
+        seg_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         seg_body = ctk.CTkFrame(block, fg_color="transparent")
+
+        if cfg.size_warning:
+            lbl_seg_warn = ctk.CTkLabel(seg_body, text=cfg.size_warning, text_color="#ef5350",
+                                        font=("", 10, "bold"), wraplength=210, justify="left")
+            lbl_seg_warn.pack(anchor="w", padx=8, pady=(6, 0))
 
         row1 = ctk.CTkFrame(seg_body, fg_color="transparent")
         row1.pack(fill="x", padx=8, pady=(6, 0))
@@ -701,8 +735,8 @@ class UIManager:
             'btn': seg_btn, 'body': seg_body, 'opt_layers': opt_layers,
             'opt_points': opt_points, 'chk_zigzag': chk_zig,
             'degree_frame': deg_row, 'degree_entry': deg_ent,
+            'chk_select': sel_chk,
         }
-
     def _toggle_segment_expand(self, hole_idx, seg_idx):
         if hole_idx >= len(self.current_holes): return
         hole = self.current_holes[hole_idx]
@@ -717,10 +751,11 @@ class UIManager:
         for i, cfg in enumerate(segments):
             blk = seg_blocks.get(i)
             if not blk: continue
-            arrow = "▾" if cfg.is_expanded else "▸"
+            arrow    = "▾" if cfg.is_expanded else "▸"
+            warn_tag = "  ⚠" if cfg.size_warning else ""
             blk['btn'].configure(text=(f"{arrow} Segment {i + 1}  "
                                         f"⌀{cfg.radius_open*2:.1f}→⌀{cfg.radius_deep*2:.1f} mm  "
-                                        f"D={cfg.depth:.1f} mm"))
+                                        f"D={cfg.depth:.1f} mm{warn_tag}"))
             if cfg.is_expanded:
                 blk['body'].pack(fill="x", pady=(0, 6))
             else:
@@ -742,6 +777,19 @@ class UIManager:
         elif self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
             self.customization_tab.draw_cross_section()
 
+    def _on_segment_inspection_toggle(self, hole_idx, seg_idx, var):
+        """v06: toggle segment เข้า/ออกจาก probe path (Customization/Path Mapper) และ G-code"""
+        if hole_idx >= len(self.current_holes): return
+        cfg = self.current_holes[hole_idx].segments[seg_idx]
+        cfg.selected_for_inspection = var.get()
+
+        blk = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
+        blk['btn'].configure(fg_color="#22283a" if cfg.selected_for_inspection else "#3a1f1f")
+
+        if self.current_tab == "Path Mapper":
+            self.path_mapper_tab.draw_path_mapper()
+        elif self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
+            self.customization_tab.draw_cross_section()
     def _on_segment_zigzag_toggle(self, hole_idx, seg_idx, var):
         if hole_idx >= len(self.current_holes): return
         cfg = self.current_holes[hole_idx].segments[seg_idx]
@@ -791,12 +839,16 @@ class UIManager:
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
         widgets['btn'] = header_btn
 
+# v07: pack checkbox FIRST (same fix as _build_selected_item)
         chk_var = ctk.BooleanVar(value=hole.selected_for_inspection)
         chk = ctk.CTkCheckBox(
             header_row, text="", width=24, variable=chk_var,
             command=lambda: self._on_inspection_select_toggle(idx, chk_var)
         )
         chk.pack(side="right")
+
+        header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        widgets['btn'] = header_btn
 
         # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D) และ Customization (3D)
         def enter_unselected(e, gi=idx, h_obj=hole):
@@ -929,7 +981,12 @@ class UIManager:
         elif self.current_tab == "Customization":
             self.customization_tab.draw_cross_section()
         elif self.current_tab == "Path Mapper":
-            self.path_mapper_tab.draw_path_mapper()
+            # v05: click ไม่สลับหน้าใน Path Mapper อีกต่อไป — คง overview เดิม
+            # แค่ไฮไลต์ marker ของรูที่กด (หรือเคลียร์ไฮไลต์ถ้ายกเลิกเลือก)
+            if self.selected_hole_idx is not None:
+                self.path_mapper_tab.highlight_hole(self.selected_hole_idx)
+            else:
+                self.path_mapper_tab.clear_hole_highlight()
 
     def on_config_change_for_hole(self, idx):
         if idx >= len(self.current_holes): return

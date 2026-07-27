@@ -12,6 +12,17 @@
 #   zigzag_inspection / cfg.zigzag_inspection = เปิด/ปิดการหมุนมุมโพรบต่อชั้น
 #   zigzag_degree / cfg.zigzag_degree = องศาสะสมที่หมุนต่อ 1 ชั้น
 # ==============================================================================
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FIX: get_probe_path_layers_multi() now SKIPS any segment whose
+#   cfg.selected_for_inspection is False (see core/models.py
+#   HoleSegmentSetting + validate_segment_reachability()) — a segment
+#   the UI has marked unreachable/deselected no longer produces any
+#   layer points, so it's excluded from both the on-screen preview
+#   (Customization tab / Path Mapper) and — since G-code export walks
+#   the same per-segment cfg list — from the exported program too.
+#   layer_idx numbering only counts included (selected) layers, so
+#   numbering stays contiguous for whatever actually gets probed.
 import numpy as np
 
 
@@ -65,10 +76,11 @@ class PathPlanner:
         hole              : StepHole ที่มี .segments เป็นเรขาคณิตดิบ (เรียงจากปากรูก่อน)
         segment_settings  : list ของ core.models.HoleSegmentSetting ความยาว/ลำดับ
                             ตรงกับ hole.segments — เก็บค่า layers/points_per_layer/
-                            zigzag ต่อ segment
+                            zigzag/selected_for_inspection ต่อ segment
         projector, view_name, screen_rot : เหมือนกับ get_probe_path_layers()
 
-        คืนค่า: list แบบเรียงราบ (ปากรู → ก้นรู) แต่ละอันมี key เหมือน
+        คืนค่า: list แบบเรียงราบ (ปากรู → ก้นรู) เฉพาะ segment ที่
+        cfg.selected_for_inspection == True เท่านั้น แต่ละอันมี key เหมือน
         get_probe_path_layers() บวกเพิ่ม:
           - 'seg_idx'          : segment ที่ layer นี้อยู่
           - 'seg_local_idx'    : ลำดับ layer ภายใน segment นั้น (มุม zigzag จะเริ่ม
@@ -86,6 +98,9 @@ class PathPlanner:
         global_idx = 0
 
         for seg_idx, (seg, cfg) in enumerate(zip(hole.segments, segment_settings)):
+            if not getattr(cfg, 'selected_for_inspection', True):
+                continue   # segment ถูกเลือกออก (unreachable/manual uncheck) — ข้ามทั้ง segment
+
             o = np.array(seg.open_3d)
             d = np.array(seg.deep_3d)
             t_vals = np.linspace(0.0, 1.0, cfg.layers + 2)[1:-1]

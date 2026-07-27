@@ -12,6 +12,30 @@
 #   elev / azim (view_init)= มุมกล้อง 3D เริ่มต้นของกราฟ (องศา)
 #   half_zoom factor      = สัดส่วนการซูมเข้าเมื่อแสดงรูที่เลือก (มากขึ้น = ซูมออกกว้างขึ้น)
 # ==============================================================================
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FIX: deepest_seg_idx now only considers segments where the matching
+#   HoleSegmentSetting.selected_for_inspection is True — an unselected
+#   (unreachable/manually-unchecked) segment can no longer "win" the
+#   bottom-star position. Combined with core/path_planner.py's v02
+#   skip, this means: 2-segment hole, lower segment smaller -> both
+#   selected, star sits at the lower (deeper) segment. 2-segment hole,
+#   lower segment BIGGER -> lower auto-deselected (core/models.py
+#   validate_segment_reachability()), star sits at the upper segment
+#   instead. Matches requested behavior exactly.
+#   FIX: star_z/star_x/star_y for the non-isolated multi-segment case
+#   used to always be sh.depth_bot (the WHOLE hole's deepest point),
+#   ignoring segment selection entirely — now computed from the actual
+#   deepest SELECTED raw segment.
+#   FIX: star depth label used to always print hole.depth (the whole
+#   assembled hole's geometric depth) even when isolating a single
+#   segment or when a deeper segment got excluded — now prints the
+#   actual reachable depth (isolate: that segment's own .depth; multi:
+#   sum of selected segments' .depth up to the deepest selected one).
+#   FIX: show_bottom_star while isolating a segment is now always True
+#   (previously only true if that segment happened to also be the
+#   overall deepest one — meant isolating a shallower segment silently
+#   hid its own star, which was confusing during manual inspection).
 import numpy as np
 import trimesh
 from trimesh.transformations import euler_matrix
@@ -136,6 +160,8 @@ class CustomizationTab:
         half       = max(xmax - xmin, ymax - ymin, zmax_d - zmin_d) / 2.0 * 1.1
         isolate_raw_seg  = None
         deepest_seg_idx  = None
+        raw_segments     = None
+        sel_segments     = None
         if has_hole:
             sel_hole      = app.current_holes[app.selected_hole_idx]
             sel_segments  = getattr(sel_hole, 'segments', None)
@@ -150,6 +176,11 @@ class CustomizationTab:
             if raw_segments and len(raw_segments) > 1:
                 deepest_depth = None
                 for si, seg in enumerate(raw_segments):
+                    # ข้าม segment ที่ไม่ถูกเลือก (unreachable/manual uncheck) —
+                    # ดาวต้องอยู่ที่ segment ที่ "เลือกไว้" ที่ลึกที่สุดเท่านั้น
+                    if sel_segments and si < len(sel_segments):
+                        if not getattr(sel_segments[si], 'selected_for_inspection', True):
+                            continue
                     d_open = app.geo.projector.project_point_to_view(*seg.open_3d, app.current_view, screen_rot)[2]
                     d_deep = app.geo.projector.project_point_to_view(*seg.deep_3d, app.current_view, screen_rot)[2]
                     seg_deepest = max(d_open, d_deep)
@@ -226,9 +257,12 @@ class CustomizationTab:
             isolate_active = (is_multi_seg and isolate_raw_seg is not None)
             isolate_cfg    = hole.segments[app.selected_segment_idx] if isolate_active else None
             multi_seg_display = is_multi_seg and not isolate_active
+
             show_bottom_star = True
             if isolate_active:
-                show_bottom_star = (app.selected_segment_idx == deepest_seg_idx)
+                show_bottom_star = True   # กำลัง isolate segment เดียว — โชว์ดาวของ segment นี้เสมอ
+            elif multi_seg_display:
+                show_bottom_star = (deepest_seg_idx is not None)
 
             if isolate_active:
                 layers     = isolate_cfg.layers
@@ -266,9 +300,26 @@ class CustomizationTab:
                         *isolate_raw_seg.deep_3d, app.current_view, screen_rot)
                     z_start = min(d_open[2], d_deep[2])
                     star_z  = max(d_open[2], d_deep[2])
+                    star_depth_display = isolate_raw_seg.depth
+                elif multi_seg_display and raw_segments and deepest_seg_idx is not None:
+                    deepest_raw_seg = raw_segments[deepest_seg_idx]
+                    dr_open = app.geo.projector.project_point_to_view(
+                        *deepest_raw_seg.open_3d, app.current_view, screen_rot)
+                    dr_deep = app.geo.projector.project_point_to_view(
+                        *deepest_raw_seg.deep_3d, app.current_view, screen_rot)
+                    z_start = sh.depth_top
+                    star_z  = max(dr_open[2], dr_deep[2])
+                    star_depth_display = sum(seg.depth for seg in raw_segments[:deepest_seg_idx + 1])
+                elif multi_seg_display:
+                    # ไม่มี segment ไหนถูกเลือกเลย (ผู้ใช้ปิด checkbox หมด) — ไม่มีจุดให้แสดง
+                    z_start = sh.depth_top
+                    star_z  = sh.depth_top
+                    star_depth_display = 0.0
                 else:
                     z_start = sh.depth_top
                     star_z  = sh.depth_bot
+                    star_depth_display = hole.depth
+
                 star_x  = hole.x
                 star_y  = hole.y
                 if isolate_active:
@@ -348,6 +399,7 @@ class CustomizationTab:
                 star_z        = min(z_start + hole.depth, dz(TRUE_BOT_Z))
                 star_x        = hole.x
                 star_y        = hole.y
+                star_depth_display = hole.depth
                 z_levels_path = np.linspace(z_start, star_z, layers)
 
                 px_list, py_list, pz_list = [hole.x], [hole.y], [z_start]
@@ -404,7 +456,7 @@ class CustomizationTab:
                 text_color = '#ff3333' if has_step_hole else '#ffea00'
                 source_tag = ' [STEP]' if has_step_hole else ' [Mesh]'
                 ax3d.text(star_x, star_y, star_z,
-                          f" ★{source_tag} X={star_x:.2f}, Y={star_y:.2f}\n   Depth={hole.depth:.2f} mm",
+                          f" ★{source_tag} X={star_x:.2f}, Y={star_y:.2f}\n   Depth={star_depth_display:.2f} mm",
                           color=text_color, fontsize=7, zorder=11)
 
             if probe_warn_lines:

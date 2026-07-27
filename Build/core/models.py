@@ -6,12 +6,31 @@
 #   - HoleSegmentSetting : ค่าตั้งค่าการตรวจสอบต่อ segment เดียว (รูหลายระดับเส้นผ่านศูนย์กลาง)
 #   - HoleFeature        : ข้อมูลรูที่ตรวจพบ ใช้แสดงผลฝั่ง UI
 #   - StepHole           : รูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
+#   - validate_segment_reachability() : ตรวจสอบว่า segment ที่ลึกกว่าจะถูก
+#     probe เข้าไปถึงได้จริงหรือไม่ เทียบกับคอขวดของ segment ที่ตื้นกว่า
 #
 # ตัวแปรสำคัญที่ปรับจูนได้ (ค่าเริ่มต้นการตรวจสอบต่อรู/segment):
 #   layers            = จำนวนชั้น (layer) ที่จะตรวจสอบตามความลึกของรู
 #   points_per_layer  = จำนวนจุดสัมผัสผนังรูต่อ 1 ชั้น
 #   zigzag_inspection = เปิด/ปิดโหมดหมุนมุมโพรบทีละชั้น (ลดจุดบอดจากการสัมผัสซ้ำมุมเดิม)
 #   zigzag_degree     = องศาสะสมที่หมุนต่อ 1 ชั้น เมื่อเปิดโหมด zigzag
+#   selected_for_inspection (HoleSegmentSetting) = segment นี้ถูกรวมใน
+#     probe path / G-code หรือไม่ (ผู้ใช้ปรับได้ผ่าน checkbox ใน sidebar
+#     ขวา — ค่าเริ่มต้นคำนวณจาก validate_segment_reachability())
+# ==============================================================================
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FEATURE: HoleSegmentSetting ได้ field ใหม่ 2 ตัว:
+#     - selected_for_inspection (bool) : segment นี้ถูกเลือกตรวจสอบหรือไม่
+#       (ค่าเริ่มต้น True, ผู้ใช้กด checkbox ใน sidebar ขวาปรับเองได้)
+#     - size_warning (str)             : ข้อความเตือนถ้า segment นี้ probe
+#       เข้าไม่ถึง (คอขวดของ segment ด้านบนแคบกว่า) — "" ถ้าไม่มีปัญหา
+#   FEATURE: ฟังก์ชันใหม่ validate_segment_reachability(segments) — เทียบ
+#     แต่ละ segment กับ segment ที่ตื้นกว่าติดกัน (index ก่อนหน้า) ถ้า
+#     "จุดกว้างสุด" ของ segment ที่ลึกกว่า มากกว่า "จุดแคบสุด" ของ segment
+#     ที่ตื้นกว่า → segment ลึกนั้นถูก probe เข้าไม่ถึง (ชนคอขวด) → ตั้ง
+#     selected_for_inspection=False + size_warning อัตโนมัติ เรียกครั้งเดียว
+#     ตอนสร้างรายการ segment สด (ui/main_window.py _build_segment_settings())
 # ==============================================================================
 import numpy as np
 
@@ -47,7 +66,40 @@ class HoleSegmentSetting:
         self.zigzag_inspection  = False  # เปิด/ปิดโหมด zigzag เริ่มต้น — ปรับได้
         self.zigzag_degree      = 45.0   # องศาสะสมต่อชั้นเมื่อเปิด zigzag — ปรับได้
 
+        self.selected_for_inspection = True  # segment นี้ถูกรวมใน probe path / G-code หรือไม่
+        self.size_warning            = ""    # ข้อความเตือนถ้า probe เข้าไม่ถึง segment นี้ (คอขวด)
+
         self.is_expanded = False             # UI state: sub-tab กางอยู่หรือไม่
+
+
+def validate_segment_reachability(segments: list) -> None:
+    """ตรวจสอบว่าแต่ละ segment (เรียงจากปากรูก่อน index 0 = ตื้นสุด) จะถูก
+    probe เข้าไปถึงได้จริงหรือไม่ เทียบกับ segment ที่ตื้นกว่าติดกัน
+
+    หลักการ: probe ต้องสอดผ่าน segment ที่ตื้นกว่าก่อนถึงจะไปแตะผนัง
+    segment ที่ลึกกว่าได้ — ถ้า "จุดกว้างสุด" ของ segment ที่ลึกกว่า
+    มากกว่า "จุดแคบสุด" ของ segment ที่ตื้นกว่า (คอขวด) แสดงว่า probe
+    ชนขอบคอขวดตอนเข้า/ถอยแนวรัศมีกว้างกว่าช่องที่ผ่านได้ → segment ลึก
+    นั้นถูกตั้ง selected_for_inspection=False + size_warning อัตโนมัติ
+    (ผู้ใช้ยัง override เปิดกลับได้เองผ่าน checkbox ใน sidebar)
+
+    Parameters
+    ----------
+    segments : list ของ HoleSegmentSetting เรียงจากปากรู (index 0) ไปก้นรู
+               ฟังก์ชันนี้ mutate ตัว object ใน list โดยตรง ไม่ return ค่า
+    """
+    for i in range(1, len(segments)):
+        shallow = segments[i - 1]
+        deep    = segments[i]
+
+        shallow_narrow = min(shallow.radius_open, shallow.radius_deep)
+        deep_wide      = max(deep.radius_open, deep.radius_deep)
+
+        if deep_wide > shallow_narrow:
+            deep.selected_for_inspection = False
+            deep.size_warning = (
+                f"⚠ Counterbore ด้านบน (Segment {i}) มีขนาดเล็กกว่า — "
+                f"probe เข้าไม่ถึง Segment {i + 1} นี้ (auto-unselected)")
 
 
 class HoleFeature:

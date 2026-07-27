@@ -1,9 +1,35 @@
 # core/gcode_generator.py
-# VERSION: 01
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FIX: _raw_layers_for_hole() multi-segment branch now SKIPS any
+#   segment whose cfg.selected_for_inspection is False — same rule as
+#   core/path_planner.py get_probe_path_layers_multi() (see
+#   core/models.py validate_segment_reachability()), so a segment
+#   deemed unreachable (counterbore neck too narrow above it) never
+#   gets probed by the actual machine either. A comment line is emitted
+#   per hole listing which segment(s) were excluded, for traceability
+#   in the exported .gcode file itself.
+#
+# CHANGE LOG (v01 -> v02):
+#   FIX: Per-point probing pattern now returns FULLY to the layer center
+#   after every point (center -> probe touch -> pull-off -> RAPID BACK
+#   TO CENTER -> next point), instead of the old pattern where the tool
+#   only pulled off by `backoff` mm and then jumped diagonally, near the
+#   wall, straight to the next point's probe target. Matches the
+#   requested machine motion pattern exactly and removes the near-wall
+#   diagonal travel risk. Layer visiting order (top -> bottom, i.e.
+#   open_3d -> deep_3d) was already correct — no change there.
+#   REFACTOR: Nearest-neighbor visit ordering (was local
+#   _order_holes_nearest_neighbor) and the STEP-ready/skip split moved
+#   to new shared module core/hole_ordering.py, so
+#   ui/tabs/path_mapper_tab.py can compute the IDENTICAL travel order
+#   for its preview — one source of truth for "which order do we visit
+#   holes in", instead of two independent implementations.
+#
 # CHANGE LOG (v01):
-#   FEATURE: Phase 2 — G-code Export (GRBL dialect).
-#     New file. Builds a real, downloadable probe program from the
-#     currently selected_for_inspection holes.
+#   FEATURE: Phase 2 — G-code Export (GRBL dialect). New file. Builds a
+#   real, downloadable probe program from the currently
+#   selected_for_inspection holes.
 #
 #     KEY DESIGN POINT: this file deliberately does NOT reuse
 #     path_planner.py's get_probe_path_layers()/..._multi(). Those
@@ -30,21 +56,26 @@
 #       - Only holes with STEP geometry (h._step_hole is not None) can
 #         be exported; mesh-only holes are skipped and reported back to
 #         the caller so the UI can warn the user.
+#       - Segment-level: any segment marked selected_for_inspection=False
+#         (auto or manual, see core/models.py) is excluded from export.
 #
 #     Per-hole G-code pattern:
 #       G0 Z[SafeZ]                      ; retract before travel
 #       G0 X.. Y..                       ; travel over next hole (safe Z)
 #       G0 X.. Y.. Z..                   ; plunge to entry point (open_3d
 #                                           + entry_clearance along axis)
-#       --- per layer ---
+#       --- per layer (top -> bottom, selected segments only) ---
 #         G0 X.. Y.. Z..                 ; move to layer center
 #         --- per point (angle + zigzag offset) ---
 #           G38.2 X.. Y.. Z.. F[feed]    ; probe outward to radius+overtravel
-#           G91 / G0 (relative back-off toward center) / G90
+#           G91 / G0 (relative pull-off) / G90
+#           G0 X.. Y.. Z..               ; rapid back to layer center
 #     Full Safe-Z retract is only ever emitted between holes (start of
 #     each hole's block) and once at program end — matching the user's
 #     explicit "safety distance when hole changes" requirement.
 import numpy as np
+
+from core.hole_ordering import order_holes_nearest_neighbor, split_step_ready
 
 
 class GCodeSettings:
@@ -88,6 +119,9 @@ def _raw_layers_for_hole(hole_feature):
     """
     Raw-3D (non-projected) layer/point plan for one hole. Mirrors
     path_planner.py's t-parameterization but works purely in CAD-space.
+    t goes 0 (open_3d / mouth / top) -> 1 (deep_3d / bottom), so layers
+    already come out top -> bottom in traversal order. Segments with
+    selected_for_inspection == False are skipped entirely.
 
     Returns a list of dicts:
         seg_idx, layer_idx, center (np.array3), radius,
@@ -100,6 +134,9 @@ def _raw_layers_for_hole(hole_feature):
     if is_multi:
         global_idx = 0
         for seg_idx, (seg, cfg) in enumerate(zip(sh.segments, hole_feature.segments)):
+            if not getattr(cfg, 'selected_for_inspection', True):
+                continue   # segment ถูกเลือกออก (unreachable/manual uncheck)
+
             axis, u, v = _orthonormal_basis(np.array(seg.deep_3d) - np.array(seg.open_3d))
             o = np.array(seg.open_3d)
             d = np.array(seg.deep_3d)
@@ -134,25 +171,6 @@ def _raw_layers_for_hole(hole_feature):
     return layers
 
 
-def _order_holes_nearest_neighbor(holes):
-    """Greedy nearest-neighbor visit order over raw XY (open_3d),
-    starting from whichever hole is closest to (0, 0)."""
-    def open_xy(h):
-        return np.array(h._step_hole.open_3d[:2])
-
-    remaining = list(holes)
-    remaining.sort(key=lambda h: float(np.linalg.norm(open_xy(h))))
-    if not remaining:
-        return []
-
-    ordered = [remaining.pop(0)]
-    while remaining:
-        cur_xy = open_xy(ordered[-1])
-        remaining.sort(key=lambda h: float(np.linalg.norm(open_xy(h) - cur_xy)))
-        ordered.append(remaining.pop(0))
-    return ordered
-
-
 # ---------------------------------------------------------------------
 def generate_gcode(holes, probe_profile, settings: GCodeSettings):
     """
@@ -163,9 +181,8 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
     with no STEP geometry (_step_hole is None), which cannot be exported
     since this file works entirely from raw B-Rep data.
     """
-    valid   = [h for h in holes if getattr(h, '_step_hole', None) is not None]
-    skipped = [h for h in holes if getattr(h, '_step_hole', None) is None]
-    ordered = _order_holes_nearest_neighbor(valid)
+    valid, skipped = split_step_ready(holes)
+    ordered = order_holes_nearest_neighbor(valid)
 
     lines = []
     lines.append("; ============================================")
@@ -174,6 +191,7 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
                  f"Probe Feed: {settings.probe_feedrate:.0f} mm/min")
     lines.append("; NOTE: work zero = mesh centroid (no G54 offset applied)")
     lines.append("; NOTE: assumes hole axis suits a straight-line G38.2 approach")
+    lines.append("; NOTE: per-point motion = center -> probe touch -> pull-off -> return to center")
     if skipped:
         names = ", ".join(str(getattr(h, 'display_id', '?')) for h in skipped)
         lines.append(f"; WARNING: {len(skipped)} hole(s) skipped (no STEP geometry): {names}")
@@ -190,6 +208,12 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
         entry_pt = np.array(sh.open_3d) + settings.entry_clearance * axis
 
         lines.append(f"; --- Hole {hole.display_id} ({hi + 1}/{len(ordered)}) ---")
+
+        excluded_segs = [i + 1 for i, cfg in enumerate(getattr(hole, 'segments', []))
+                          if not getattr(cfg, 'selected_for_inspection', True)]
+        if excluded_segs:
+            lines.append(f"; NOTE: segment(s) {excluded_segs} excluded (unreachable — see UI warning)")
+
         lines.append(f"G0 Z{settings.safe_z:.3f}")
         lines.append(f"G0 X{sh.open_3d[0]:.3f} Y{sh.open_3d[1]:.3f}")
         lines.append(f"G0 X{entry_pt[0]:.3f} Y{entry_pt[1]:.3f} Z{entry_pt[2]:.3f}")
@@ -201,19 +225,21 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
             seg_tag       = f" seg {lyr['seg_idx'] + 1}" if 'seg_idx' in lyr else ""
 
             lines.append(f"G0 X{c[0]:.3f} Y{c[1]:.3f} Z{c[2]:.3f} "
-                         f"; layer {lyr['layer_idx'] + 1}{seg_tag}")
+                         f"; layer {lyr['layer_idx'] + 1}{seg_tag} — center")
 
             angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
-            for a in angles:
+            for pt_i, a in enumerate(angles):
                 radial = np.cos(a) * u + np.sin(a) * v
                 target = c + (r + settings.overtravel) * radial
                 back   = -radial * settings.backoff
 
                 lines.append(f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} "
-                             f"Z{target[2]:.3f} F{settings.probe_feedrate:.0f}")
+                             f"Z{target[2]:.3f} F{settings.probe_feedrate:.0f} "
+                             f"; point {pt_i + 1}/{n} — touch")
                 lines.append("G91")
-                lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f}")
+                lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f} ; pull-off from wall")
                 lines.append("G90")
+                lines.append(f"G0 X{c[0]:.3f} Y{c[1]:.3f} Z{c[2]:.3f} ; return to center")
         lines.append("")
 
     lines.append(f"G0 Z{settings.safe_z:.3f}")
