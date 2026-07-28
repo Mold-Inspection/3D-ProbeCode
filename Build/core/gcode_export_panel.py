@@ -132,7 +132,7 @@ class GCodeExportPanel:
             return
 
         try:
-            gcode_text, skipped = generate_gcode(selected, app.probe_profile, settings)
+            gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings)
         except Exception as e:
             _mb.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
             return

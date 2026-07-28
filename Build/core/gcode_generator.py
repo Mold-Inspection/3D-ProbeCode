@@ -117,22 +117,15 @@ def _orthonormal_basis(axis_vec):
 
 def _raw_layers_for_hole(hole_feature):
     """
-    Raw-3D (non-projected) layer/point plan for one hole. Mirrors
-    path_planner.py's t-parameterization but works purely in CAD-space.
-    t goes 0 (open_3d / mouth / top) -> 1 (deep_3d / bottom), so layers
-    already come out top -> bottom in traversal order. Segments with
-    selected_for_inspection == False are skipped entirely.
-
-    Returns a list of dicts:
-        seg_idx, layer_idx, center (np.array3), radius,
-        axis, u, v, angle_offset, points_n
+    Raw-3D (non-projected) layer/point plan for one hole.
+    Sorts layers to guarantee Top-to-Bottom traversal (closest to mouth first).
+    Segments with selected_for_inspection == False are skipped entirely.
     """
     sh = hole_feature._step_hole
     is_multi = bool(getattr(hole_feature, 'segments', None))
     layers = []
 
     if is_multi:
-        global_idx = 0
         for seg_idx, (seg, cfg) in enumerate(zip(sh.segments, hole_feature.segments)):
             if not getattr(cfg, 'selected_for_inspection', True):
                 continue   # segment ถูกเลือกออก (unreachable/manual uncheck)
@@ -147,10 +140,9 @@ def _raw_layers_for_hole(hole_feature):
                 offset = (np.radians(local_idx * cfg.zigzag_degree)
                          if cfg.zigzag_inspection else 0.0)
                 layers.append(dict(
-                    seg_idx=seg_idx, layer_idx=global_idx, center=center, radius=r,
+                    seg_idx=seg_idx, center=center, radius=r,
                     axis=axis, u=u, v=v, angle_offset=offset,
                     points_n=cfg.points_per_layer))
-                global_idx += 1
     else:
         axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
         o = np.array(sh.open_3d)
@@ -164,9 +156,74 @@ def _raw_layers_for_hole(hole_feature):
             r      = sh.radius_at(t)
             offset = np.radians(idx * deg) if use_zz else 0.0
             layers.append(dict(
-                seg_idx=0, layer_idx=idx, center=center, radius=r,
+                seg_idx=0, center=center, radius=r,
                 axis=axis, u=u, v=v, angle_offset=offset,
                 points_n=hole_feature.points_per_layer))
+
+    # [FIX] การันตีลำดับชั้นจาก "บนลงล่าง" (Top to Bottom) เสมอ 
+    # โดยอิงระยะห่างจากตำแหน่งปากรูบนสุด (sh.open_3d) ของชิ้นงาน
+    top_pt = np.array(sh.open_3d)
+    layers.sort(key=lambda lyr: float(np.linalg.norm(lyr['center'] - top_pt)))
+
+    # [FIX] รันหมายเลข layer_idx ใหม่ให้คอมเมนต์ใน G-code เรียงต่อเนื่องสวยงามตามการวิ่งจริง
+    for i, lyr in enumerate(layers):
+        lyr['layer_idx'] = i
+
+    return layers
+
+# ---------------------------------------------------------------------
+def _raw_layers_for_hole(hole_feature):
+    """
+    Raw-3D (non-projected) layer/point plan for one hole.
+    Sorts layers to guarantee Top-to-Bottom traversal (closest to mouth first).
+    Segments with selected_for_inspection == False are skipped entirely.
+    """
+    sh = hole_feature._step_hole
+    is_multi = bool(getattr(hole_feature, 'segments', None))
+    layers = []
+
+    if is_multi:
+        for seg_idx, (seg, cfg) in enumerate(zip(sh.segments, hole_feature.segments)):
+            if not getattr(cfg, 'selected_for_inspection', True):
+                continue   # segment ถูกเลือกออก (unreachable/manual uncheck)
+
+            axis, u, v = _orthonormal_basis(np.array(seg.deep_3d) - np.array(seg.open_3d))
+            o = np.array(seg.open_3d)
+            d = np.array(seg.deep_3d)
+            t_vals = np.linspace(0.0, 1.0, cfg.layers + 2)[1:-1]
+            for local_idx, t in enumerate(t_vals):
+                center = o + t * (d - o)
+                r      = seg.radius_at(t)
+                offset = (np.radians(local_idx * cfg.zigzag_degree)
+                         if cfg.zigzag_inspection else 0.0)
+                layers.append(dict(
+                    seg_idx=seg_idx, center=center, radius=r,
+                    axis=axis, u=u, v=v, angle_offset=offset,
+                    points_n=cfg.points_per_layer))
+    else:
+        axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
+        o = np.array(sh.open_3d)
+        d = np.array(sh.deep_3d)
+        n_layers = hole_feature.layers
+        use_zz   = getattr(hole_feature, 'zigzag_inspection', False)
+        deg      = getattr(hole_feature, 'zigzag_degree', 45.0)
+        t_vals   = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
+        for idx, t in enumerate(t_vals):
+            center = o + t * (d - o)
+            r      = sh.radius_at(t)
+            offset = np.radians(idx * deg) if use_zz else 0.0
+            layers.append(dict(
+                seg_idx=0, center=center, radius=r,
+                axis=axis, u=u, v=v, angle_offset=offset,
+                points_n=hole_feature.points_per_layer))
+
+    # จัดเรียงลำดับชั้นจาก "บนลงล่าง" (Top to Bottom) เสมอ โดยอิงระยะห่างจากปากรู
+    top_pt = np.array(sh.open_3d)
+    layers.sort(key=lambda lyr: float(np.linalg.norm(lyr['center'] - top_pt)))
+
+    # รันหมายเลข layer_idx ใหม่ให้เรียงต่อเนื่องตามระยะจริง
+    for i, lyr in enumerate(layers):
+        lyr['layer_idx'] = i
 
     return layers
 
@@ -177,14 +234,15 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
     Build a GRBL probe program from `holes` (HoleFeature list, already
     filtered to selected_for_inspection by the caller).
 
-    Returns (gcode_text: str, skipped: list) — `skipped` holds any hole
-    with no STEP geometry (_step_hole is None), which cannot be exported
-    since this file works entirely from raw B-Rep data.
+    Returns (gcode_text: str, skipped: list, point_map: list)
+    `point_map` holds metadata for every single G38.2 probe touch for post-processing.
     """
     valid, skipped = split_step_ready(holes)
     ordered = order_holes_nearest_neighbor(valid)
 
     lines = []
+    point_map = []  # ตัวแปรสำหรับจัดเก็บลำดับการโพรบ
+
     lines.append("; ============================================")
     lines.append("; 3D ProbeCode - GRBL Probe Program (Phase 2)")
     lines.append(f"; Holes: {len(ordered)}  Safe Z: {settings.safe_z:.2f} mm  "
@@ -207,7 +265,7 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
         axis, _, _ = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
         entry_pt = np.array(sh.open_3d) + settings.entry_clearance * axis
 
-        lines.append(f"; --- Hole {hole.display_id} ({hi + 1}/{len(ordered)}) ---")
+        lines.append(f"; --- Hole {getattr(hole, 'display_id', '?')} ({hi + 1}/{len(ordered)}) ---")
 
         excluded_segs = [i + 1 for i, cfg in enumerate(getattr(hole, 'segments', []))
                           if not getattr(cfg, 'selected_for_inspection', True)]
@@ -236,6 +294,17 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
                 lines.append(f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} "
                              f"Z{target[2]:.3f} F{settings.probe_feedrate:.0f} "
                              f"; point {pt_i + 1}/{n} — touch")
+                
+                # บันทึกข้อมูลของจุดนี้ลงใน List
+                point_map.append({
+                    "hole_id": getattr(hole, 'display_id', '?'),
+                    "layer_idx": lyr['layer_idx'] + 1,
+                    "point_idx": pt_i + 1,
+                    "expected_x": round(target[0], 3),
+                    "expected_y": round(target[1], 3),
+                    "expected_z": round(target[2], 3)
+                })
+
                 lines.append("G91")
                 lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f} ; pull-off from wall")
                 lines.append("G90")
@@ -245,4 +314,4 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings):
     lines.append(f"G0 Z{settings.safe_z:.3f}")
     lines.append("M30 ; program end")
 
-    return "\n".join(lines), skipped
+    return "\n".join(lines), skipped, point_map
