@@ -1,18 +1,11 @@
 # ui/gcode_export_panel.py
-# VERSION: 01
-# CHANGE LOG (v01):
-#   FEATURE: Phase 2 — G-code Export (GRBL) UI panel.
-#   New collapsible section in the left sidebar (same visual pattern as
-#   the existing Probe Stylus Profile panel). Collects the settings
-#   core.gcode_generator.GCodeSettings needs (Safe Z, Entry Clearance,
-#   Probe Feedrate, Overtravel, Back-off), pulls every currently
-#   selected_for_inspection hole from app.current_holes, and calls
-#   generate_gcode() -> writes the result to a user-chosen .gcode file.
-#   Holes with no STEP geometry are reported back and shown as a warning
-#   (they're also listed in a comment block inside the generated file
-#   itself, by gcode_generator.py). A "↻ Suggest" button next to Safe Z
-#   fills in a sensible default (part's top Z + margin) once a model is
-#   loaded, since that value can't be known before then.
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FIX: dropdown body (_body) now pack()s with after=self._header_frame
+#   instead of a bare pack() — fixes both this panel and the Probe
+#   Stylus Profile panel opening their dropdowns in the same location
+#   in the left sidebar. See ui/main_window.py v07 changelog for the
+#   matching fix on that panel.
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
@@ -28,6 +21,7 @@ class GCodeExportPanel:
     def build(self, parent):
         header_frame = ctk.CTkFrame(parent, fg_color="#1a1a2e", corner_radius=6)
         header_frame.pack(pady=(10, 0), padx=12, fill="x")
+        self._header_frame = header_frame   # v02: keep ref so dropdown can anchor after it
 
         self._toggle_btn = ctk.CTkButton(
             header_frame, text="🖨 G-code Export (GRBL)  ▸",
@@ -79,7 +73,10 @@ class GCodeExportPanel:
     def _toggle_panel(self):
         self._expanded = not self._expanded
         if self._expanded:
-            self._body.pack(pady=(0, 10), padx=12, fill="x")
+        # v02 FIX: anchor with after=self._header_frame, same fix as
+        # ui/main_window.py's Probe Stylus panel — guarantees this
+        # dropdown opens directly under its own header.
+            self._body.pack(pady=(0, 10), padx=12, fill="x", after=self._header_frame)
             self._toggle_btn.configure(text="🖨 G-code Export (GRBL)  ▾")
         else:
             self._body.pack_forget()

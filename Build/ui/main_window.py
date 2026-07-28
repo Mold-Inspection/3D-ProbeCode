@@ -16,17 +16,38 @@
 #   Points/Layer options      = ตัวเลือกจำนวนจุดตรวจสอบต่อชั้นที่ผู้ใช้เลือกได้
 #   zigzag degree min/max      = ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า (ค่าเริ่มต้น 1–180°)
 #   self.probe_profile        = ค่าเริ่มต้นหัวโพรบ กำหนดจริงใน core/probe_profile.py
-# VERSION: 06
-# CHANGE LOG (v05 -> v06):
-#   FEATURE: Segment-level "selected_for_inspection" checkbox added to
-#   each segment block in the right sidebar (_build_segment_block()) —
-#   same visual pattern as the hole-level checkbox. Wired to new
-#   _on_segment_inspection_toggle(). _build_segment_settings() now
-#   calls core/models.py's validate_segment_reachability() right after
-#   building the fresh HoleSegmentSetting list, so a deeper segment
-#   that's physically unreachable (its widest point bigger than the
-#   narrowest point of the segment above it) starts pre-unchecked with
-#   a red warning label + "⚠" header tag — still user-overridable.
+#   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
+#                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
+# ==============================================================================
+# VERSION: 08
+# CHANGE LOG (v07 -> v08):
+#   FEATURE: Hole-card warning system now has two independent signals,
+#   shown together and reflected in the card's resting (unselected) tab
+#   color:
+#     1) SIZE warning (red) — aggregated from any segment whose
+#        cfg.size_warning is set (core/models.py
+#        validate_segment_reachability() — "upper segment narrower than
+#        a lower one -> probe can't physically reach it"). Rendered as
+#        its own red label ABOVE the existing probe-profile warning,
+#        inside _build_selected_item()'s setting_frame.
+#     2) PROBE warning (yellow) — the existing probe_profile.check_hole()
+#        result (depth/fit). Text color changed #ef5350 -> #eed202.
+#   New helper _hole_tab_default_color(hole): red (size warning present)
+#   > yellow (probe warning present, no size warning) > original blue
+#   (#1a3a5c, no warnings). Used both when a hole card is first built
+#   (_build_selected_item) and whenever card colors are reset after a
+#   selection change (on_hole_select), so the tab color always reflects
+#   current warning state regardless of click history.
+#
+# CHANGE LOG (v06 -> v07):
+#   FIX: Probe Stylus Profile dropdown (_probe_body) now pack()s with
+#   after=self._probe_header_frame instead of a bare pack() — previously,
+#   since the body was never packed at setup time, Tkinter appended it
+#   after whichever sidebar widget was packed last at the moment of the
+#   first expand (which could be the G-code Export panel's header),
+#   making both dropdowns appear to open in the same spot. Now it always
+#   opens directly under its own header no matter what else was toggled.
+# ==============================================================================
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -201,6 +222,7 @@ class UIManager:
     def _setup_probe_profile_panel(self):
         probe_header_frame = ctk.CTkFrame(self._left_scroll, fg_color="#1a1a2e", corner_radius=6)
         probe_header_frame.pack(pady=(18, 0), padx=12, fill="x")
+        self._probe_header_frame = probe_header_frame   # v07: keep ref so dropdown can anchor after it
 
         self._probe_panel_expanded = False
 
@@ -252,11 +274,14 @@ class UIManager:
     def _setup_gcode_export_panel(self):
         self.gcode_export_panel = GCodeExportPanel(self)
         self.gcode_export_panel.build(self._left_scroll)
-        
+
     def _toggle_probe_panel(self):
         self._probe_panel_expanded = not self._probe_panel_expanded
         if self._probe_panel_expanded:
-            self._probe_body.pack(pady=(0, 10), padx=12, fill="x")
+            # v07 FIX: anchor with after=self._probe_header_frame so this dropdown
+            # always appears directly under ITS OWN header, regardless of what
+            # else has been packed/toggled elsewhere in the sidebar since.
+            self._probe_body.pack(pady=(0, 10), padx=12, fill="x", after=self._probe_header_frame)
             self._probe_toggle_btn.configure(text="🔩 Probe Stylus Profile  ▾")
         else:
             self._probe_body.pack_forget()
@@ -517,6 +542,31 @@ class UIManager:
         self.show_view(self.current_view)
         self.selection_tab._restore_pins(saved_pins)
 
+    # ------------------------------------------------------------------
+    # v08: Warning-driven tab (card) color
+    # ------------------------------------------------------------------
+    def _hole_tab_default_color(self, hole) -> str:
+        """สีพื้นหลัง (resting state, ตอนไม่ได้เลือกอยู่) ของการ์ดรู
+        เปลี่ยนไปตามระดับ warning ของรูนั้น เรียงลำดับความสำคัญ:
+          1) แดง  — มี segment ที่ขนาดขวางกัน (probe เข้าไปไม่ถึง เพราะรู
+             ด้านบนแคบกว่ารูด้านล่าง) — ดู core/models.py
+             validate_segment_reachability()
+          2) เหลือง — ไม่มีปัญหาเรื่องขนาด segment แต่ probe_profile
+             ตรวจแล้วเข้าไม่ถึง (Probe too short) หรือหัวโพรบใหญ่เกินไป
+             (Tip too large)
+          3) ฟ้า (ค่าเดิม) — ไม่มี warning ใดๆ
+        แก้ไข hex สี 3 ค่านี้ได้โดยตรงที่นี่"""
+        segs = getattr(hole, 'segments', None) or []
+        if any(getattr(seg, 'size_warning', '') for seg in segs):
+            return "#b71c1c"   # แดง — ปัญหาเรื่องขนาดรู (bottleneck)
+
+        if hasattr(self, 'probe_profile'):
+            chk = self.probe_profile.check_hole(hole.depth, hole.radius)
+            if not chk['ok']:
+                return "#8a6d00"   # เหลือง (เข้ม เพื่อให้ตัวหนังสือขาวยังอ่านออก) — probe too short / tip too large
+
+        return "#1a3a5c"   # ฟ้า (ค่าเดิม) — ไม่มี warning
+
     def update_treeview(self, holes):
         for widget in self.holes_list_frame.winfo_children():
             widget.destroy()
@@ -564,7 +614,8 @@ class UIManager:
         header_row = ctk.CTkFrame(item_frame, fg_color="transparent")
         header_row.pack(fill="x")
 
-        default_color = "#1a3a5c"
+        # v08: resting-state tab color now reflects this hole's current warning level
+        default_color = self._hole_tab_default_color(hole)
         current_color = "#1f538d" if self.selected_hole_idx == idx else default_color
 
         is_multi_seg = bool(getattr(hole, 'segments', None))
@@ -607,11 +658,24 @@ class UIManager:
         setting_frame = ctk.CTkFrame(item_frame, fg_color="#1c212c", corner_radius=6)
         widgets['settings_frame'] = setting_frame
 
+        # v08: SIZE warning (segment bottleneck — upper hole narrower than
+        # lower one) shown ABOVE the probe-profile warning, always in red,
+        # regardless of the probe check result below it.
+        segs_for_warn = getattr(hole, 'segments', None) or []
+        size_warnings = [seg.size_warning for seg in segs_for_warn if getattr(seg, 'size_warning', '')]
+        if size_warnings:
+            combined_size_warn = "\n".join(size_warnings)
+            lbl_size_warn = ctk.CTkLabel(
+                setting_frame, text=combined_size_warn, text_color="#ff1744",
+                font=("", 11, "bold"), wraplength=280, justify="left")
+            lbl_size_warn.pack(anchor="w", padx=10, pady=(5, 0))
+
         if hasattr(self, 'probe_profile'):
             chk_res = self.probe_profile.check_hole(hole.depth, hole.radius)
             if not chk_res['ok']:
                 warn_text = chk_res['depth_warning'] or chk_res['fit_warning']
-                lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color="#ef5350", font=("", 11, "bold"))
+                # สีข้อความแจ้งเตือน probe too short / tip too large — ปรับได้ที่นี่
+                lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color="#eed202", font=("", 11, "bold"))
                 lbl_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
         if is_multi_seg:
@@ -737,6 +801,7 @@ class UIManager:
             'degree_frame': deg_row, 'degree_entry': deg_ent,
             'chk_select': sel_chk,
         }
+
     def _toggle_segment_expand(self, hole_idx, seg_idx):
         if hole_idx >= len(self.current_holes): return
         hole = self.current_holes[hole_idx]
@@ -790,6 +855,7 @@ class UIManager:
             self.path_mapper_tab.draw_path_mapper()
         elif self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
             self.customization_tab.draw_cross_section()
+
     def _on_segment_zigzag_toggle(self, hole_idx, seg_idx, var):
         if hole_idx >= len(self.current_holes): return
         cfg = self.current_holes[hole_idx].segments[seg_idx]
@@ -839,7 +905,7 @@ class UIManager:
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
         widgets['btn'] = header_btn
 
-# v07: pack checkbox FIRST (same fix as _build_selected_item)
+        # v07: pack checkbox FIRST (same fix as _build_selected_item)
         chk_var = ctk.BooleanVar(value=hole.selected_for_inspection)
         chk = ctk.CTkCheckBox(
             header_row, text="", width=24, variable=chk_var,
@@ -945,7 +1011,12 @@ class UIManager:
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
             hole_i = self.current_holes[i] if i < len(self.current_holes) else None
-            default_color = "#1a3a5c" if (hole_i and hole_i.selected_for_inspection) else "#1f1f1f"
+            # v08: resting color now driven by warning level instead of a
+            # single fixed blue — red (size) > yellow (probe) > blue (none)
+            if hole_i is not None and hole_i.selected_for_inspection:
+                default_color = self._hole_tab_default_color(hole_i)
+            else:
+                default_color = "#1f1f1f"
             widgets['btn'].configure(fg_color=default_color)
             if widgets.get('is_expanded') and i != idx:
                 if 'settings_frame' in widgets:
