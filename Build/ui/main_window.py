@@ -19,7 +19,40 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 08
+# VERSION: 10
+# CHANGE LOG (v09 -> v10):
+#   CHANGE: Selected/expanded hole card no longer switches to a flat
+#   unrelated blue (#1f538d). It now keeps its own warning color (red =
+#   size bottleneck, yellow = probe too short/tip too large, blue = no
+#   warning) from _hole_tab_default_color() and brightens it via new
+#   helper _lighten_hex()/_hole_tab_selected_color() — so the warning
+#   level stays visible at a glance even while a card is selected,
+#   instead of being masked by an unrelated selection color. Applied both
+#   at card build time (_build_selected_item, for a card that's already
+#   selected when the list rebuilds) and in on_hole_select()'s select
+#   branch. Adjust brighten amount via _lighten_hex()'s `factor` param.
+#
+# CHANGE LOG (v08 -> v09):
+#   FIX: Hole-card header button (_build_selected_item's header_btn) never
+#   set an explicit hover_color, so it fell back to CTk's theme default
+#   (blue). Opening the Z-Layers / Points-per-Layer CTkOptionMenu popup on
+#   an expanded card steals the mouse-release/leave event from other
+#   cards, leaving them stuck in that default-blue hover state until some
+#   other widget interaction forced a redraw — this is exactly the "row
+#   turns blue after opening a dropdown, need to click another dropdown to
+#   fix it back" symptom reported. hover_color is now always kept in sync
+#   with fg_color everywhere the button's color is set/reset (creation +
+#   on_hole_select), so there's no default-blue fallback to get stuck in.
+#   FIX: on_hole_select's "select" branch had been changed to reuse
+#   _hole_tab_default_color() instead of the intended "#1f538d" selection
+#   highlight, so a selected/expanded card lost its distinct blue
+#   indicator and blended into whatever warning color it already had.
+#   Restored "#1f538d" for the actively-selected card; other cards still
+#   reset to their warning-based resting color as before.
+#   FIX: typo "##1f1f1f" (double-hash, invalid hex) in the select-branch
+#   fallback color — was silently swallowed by CTk but not a valid color.
+#   CLEANUP: removed a leftover debug print() from on_hole_select.
+#
 # CHANGE LOG (v07 -> v08):
 #   FEATURE: Hole-card warning system now has two independent signals,
 #   shown together and reflected in the card's resting (unselected) tab
@@ -567,6 +600,24 @@ class UIManager:
 
         return "#1a3a5c"   # ฟ้า (ค่าเดิม) — ไม่มี warning
 
+    def _lighten_hex(self, hex_color: str, factor: float = 0.38) -> str:
+        """เพิ่มความสว่างของสี hex โดยผสมกับสีขาวตามสัดส่วน factor (0.0–1.0)
+        ใช้ทำสีการ์ดตอน "กำลังเลือกอยู่" จากสี warning เดิม ให้สว่างขึ้นแทนที่
+        จะเปลี่ยนเป็นสีฟ้าที่ไม่เกี่ยวกับ warning เลย — ปรับสัดส่วนความสว่างได้ที่นี่"""
+        h = hex_color.lstrip('#')
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        r = int(r + (255 - r) * factor)
+        g = int(g + (255 - g) * factor)
+        b = int(b + (255 - b) * factor)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _hole_tab_selected_color(self, hole) -> str:
+        """สีการ์ดรูตอน "กำลังเลือกอยู่" (expanded) — ใช้สี warning เดิมของรู
+        นั้น (แดง/เหลือง/ฟ้า จาก _hole_tab_default_color) แล้วเพิ่มความสว่าง
+        เข้าไป เพื่อให้ยังบ่งบอกระดับ warning ได้ พร้อมกับดูรู้ว่าการ์ดนี้ถูก
+        เลือกอยู่ (ต่างจากการ์ดอื่นที่ยังเป็นสีเข้มปกติ)"""
+        return self._lighten_hex(self._hole_tab_default_color(hole))
+
     def update_treeview(self, holes):
         for widget in self.holes_list_frame.winfo_children():
             widget.destroy()
@@ -616,13 +667,14 @@ class UIManager:
 
         # v08: resting-state tab color now reflects this hole's current warning level
         default_color = self._hole_tab_default_color(hole)
-        current_color = "#1f538d" if self.selected_hole_idx == idx else default_color
+        current_color = self._hole_tab_selected_color(hole) if self.selected_hole_idx == idx else default_color
 
         is_multi_seg = bool(getattr(hole, 'segments', None))
         folder_tag = f" 📂×{len(hole.segments)}" if is_multi_seg else ""
         btn_text = f"🎯 Hole {hole.display_id}{folder_tag} [X: {hole.x:.2f}, Y: {hole.y:.2f}] D: {hole.depth:.2f}"
         header_btn = ctk.CTkButton(
             header_row, text=btn_text, anchor="w", fg_color=current_color,
+            hover_color=current_color,   # BUGFIX v09: กัน CTk fallback เป็นสีฟ้า default ตอน hover ค้าง (ดู CHANGE LOG v08->v09)
             command=lambda: self.on_hole_select(idx)
         )
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
@@ -1017,7 +1069,12 @@ class UIManager:
                 default_color = self._hole_tab_default_color(hole_i)
             else:
                 default_color = "#1f1f1f"
-            widgets['btn'].configure(fg_color=default_color)
+            # BUGFIX v09: hover_color ต้องตามสี fg_color เสมอ — ไม่งั้น CTk จะ
+            # fallback ไปใช้สีฟ้า default ตอนปุ่มค้าง hover (เกิดตอนกด
+            # dropdown Z-Layers/Points ของการ์ดที่ขยายอยู่ แล้ว popup ของ
+            # CTkOptionMenu ไปแย่ง mouse-release/leave event จากปุ่มการ์ดอื่น
+            # ทำให้ค้างสถานะ hover-blue จนกว่าจะไปกด dropdown อื่นมา resync)
+            widgets['btn'].configure(fg_color=default_color, hover_color=default_color)
             if widgets.get('is_expanded') and i != idx:
                 if 'settings_frame' in widgets:
                     widgets['settings_frame'].pack_forget()
@@ -1025,16 +1082,23 @@ class UIManager:
 
         if idx not in self.hole_widgets or 'btn' not in self.hole_widgets[idx]: return
 
+        sel = self.hole_widgets[idx]
         if is_deselecting:
-            sel = self.hole_widgets[idx]
+            sel_hole_obj = self.current_holes[idx] if idx < len(self.current_holes) else None
+            resting_color = self._hole_tab_default_color(sel_hole_obj) if sel_hole_obj else "#1f1f1f"
+            sel['btn'].configure(fg_color=resting_color, hover_color=resting_color)
             if sel.get('is_expanded'):
                 if 'settings_frame' in sel:
                     sel['settings_frame'].pack_forget()
                 sel['is_expanded'] = False
             self.selected_hole_idx = None
         else:
-            sel = self.hole_widgets[idx]
-            sel['btn'].configure(fg_color="#1f538d")
+            # การ์ดที่กำลังเลือกอยู่: ใช้สี warning เดิม (แดง/เหลือง/ฟ้า) แต่เพิ่ม
+            # ความสว่างเข้าไป — ยังบอกระดับ warning ได้ พร้อมดูออกว่าถูกเลือกอยู่
+            sel_hole_obj = self.current_holes[idx] if idx < len(self.current_holes) else None
+            selected_color = self._hole_tab_selected_color(sel_hole_obj) if sel_hole_obj else "#1f538d"
+            sel['btn'].configure(fg_color=selected_color, hover_color=selected_color)
+
             if not sel.get('is_expanded'):
                 if 'settings_frame' in sel:
                     sel['settings_frame'].pack(fill="x", pady=(5, 0))
