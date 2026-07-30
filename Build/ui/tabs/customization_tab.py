@@ -12,7 +12,21 @@
 #   elev / azim (view_init)= มุมกล้อง 3D เริ่มต้นของกราฟ (องศา)
 #   half_zoom factor      = สัดส่วนการซูมเข้าเมื่อแสดงรูที่เลือก (มากขึ้น = ซูมออกกว้างขึ้น)
 # ==============================================================================
-# VERSION: 03
+# VERSION: 04
+# CHANGE LOG (v03 -> v04):
+#   FIX: show_bottom_star while isolating a segment used to always be
+#   True — meant expanding/isolating ANY segment card (even a shallow
+#   one that isn't the hole's deepest reachable point) showed its own
+#   star, so a single hole could effectively show a star at more than
+#   one Z position depending on which segment card the user had open.
+#   Now isolate mode only shows the star if the isolated segment IS
+#   deepest_seg_idx (the deepest SELECTED segment, same one the
+#   non-isolated multi-segment view already stars) — so a hole has
+#   exactly one possible star position regardless of which segment
+#   card is currently expanded. Isolating a non-deepest segment now
+#   shows no star at all (correct: that segment isn't the hole's
+#   bottom depth point).
+#
 # CHANGE LOG (v02 -> v03):
 #   FIX: deepest_seg_idx now only considers segments where the matching
 #   HoleSegmentSetting.selected_for_inspection is True — an unselected
@@ -258,9 +272,16 @@ class CustomizationTab:
             isolate_cfg    = hole.segments[app.selected_segment_idx] if isolate_active else None
             multi_seg_display = is_multi_seg and not isolate_active
 
+            # v04 FIX: a hole may only ever show ONE star, sitting at the
+            # deepest SELECTED segment (deepest_seg_idx). Isolating a
+            # segment card no longer forces its own star into view —
+            # only the isolated segment that also happens to BE
+            # deepest_seg_idx gets one. Isolating a shallower segment
+            # shows no star at all.
             show_bottom_star = True
             if isolate_active:
-                show_bottom_star = True   # กำลัง isolate segment เดียว — โชว์ดาวของ segment นี้เสมอ
+                show_bottom_star = (deepest_seg_idx is not None and
+                                     app.selected_segment_idx == deepest_seg_idx)
             elif multi_seg_display:
                 show_bottom_star = (deepest_seg_idx is not None)
 
