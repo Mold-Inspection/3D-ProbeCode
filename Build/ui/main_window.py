@@ -19,7 +19,32 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 10
+# VERSION: 11
+# CHANGE LOG (v10 -> v11):
+#   FIX: Unchecking a hole's inspection checkbox used to repaint that
+#   card's resting color IMMEDIATELY on the next click of any other
+#   card — because the reset loop in on_hole_select() recomputed the
+#   resting color live from hole.selected_for_inspection /
+#   _hole_tab_default_color() every time. That meant a card visually
+#   flipped to black the instant you clicked elsewhere, BEFORE the user
+#   ever pressed "✅ Apply Selection" — not the intended behavior.
+#   Now every card's resting color is decided ONCE at build time
+#   (_build_selected_item / _build_unselected_item) and stored in
+#   widgets['resting_color']. on_hole_select()'s reset loop and its
+#   select/deselect branches now read that stored value instead of
+#   recomputing it live — so a card's color only actually changes when
+#   update_treeview() rebuilds the list, which only happens after
+#   "Apply Selection" is pressed (_refresh_after_inspection_toggle) or
+#   another state-changing rebuild (view change, hole regen, etc).
+#   FIX: An unselected (unchecked) hole's resting color is now always
+#   flat black (#1f1f1f), ignoring any size/probe warning it may carry
+#   — previously _build_unselected_item already used a fixed color for
+#   the button itself, but the reset loop in on_hole_select() special-
+#   cased "still selected_for_inspection" holes to recompute a warning
+#   color live, which is the exact bug being fixed here. Unselected
+#   cards now consistently show #1f1f1f until Apply is pressed and they
+#   either get rebuilt as selected (colored) or stay unselected (black).
+#
 # CHANGE LOG (v09 -> v10):
 #   CHANGE: Selected/expanded hole card no longer switches to a flat
 #   unrelated blue (#1f538d). It now keeps its own warning color (red =
@@ -588,6 +613,14 @@ class UIManager:
              ตรวจแล้วเข้าไม่ถึง (Probe too short) หรือหัวโพรบใหญ่เกินไป
              (Tip too large)
           3) ฟ้า (ค่าเดิม) — ไม่มี warning ใดๆ
+
+        v11 NOTE: this function computes the color a SELECTED hole
+        SHOULD have based on its current warning state. It is only
+        called at card-build time (inside update_treeview()'s rebuild)
+        and its result is frozen into widgets['resting_color'] — it is
+        deliberately NOT called again inside on_hole_select()'s reset
+        loop, so toggling the inspection checkbox can never repaint a
+        card's color before "Apply Selection" triggers a real rebuild.
         แก้ไข hex สี 3 ค่านี้ได้โดยตรงที่นี่"""
         segs = getattr(hole, 'segments', None) or []
         if any(getattr(seg, 'size_warning', '') for seg in segs):
@@ -666,7 +699,11 @@ class UIManager:
         header_row.pack(fill="x")
 
         # v08: resting-state tab color now reflects this hole's current warning level
+        # v11: computed ONCE here and frozen into widgets['resting_color'] — this
+        # is the single source of truth on_hole_select() reads from later, so a
+        # checkbox toggle alone (before "Apply Selection") can never repaint it.
         default_color = self._hole_tab_default_color(hole)
+        widgets['resting_color'] = default_color
         current_color = self._hole_tab_selected_color(hole) if self.selected_hole_idx == idx else default_color
 
         is_multi_seg = bool(getattr(hole, 'segments', None))
@@ -949,13 +986,18 @@ class UIManager:
         header_row.pack(fill="x")
 
         btn_text = f"Hole {hole.display_id} [X: {hole.x:.2f}, Y: {hole.y:.2f}]"
+        # v11: unselected cards always default to flat black (#1f1f1f),
+        # ignoring any size/probe warning it may carry — was already the
+        # visual here, now also frozen into widgets['resting_color'] so
+        # on_hole_select()'s reset loop can't repaint it to something else.
         header_btn = ctk.CTkButton(
             header_row, text=btn_text, anchor="w",
-            fg_color="#2a2f3a", hover_color="#3a404d", text_color="#9aa4b2",
+            fg_color="#1f1f1f", hover_color="#1f1f1f", text_color="#9aa4b2",
             command=lambda: self.on_hole_select(idx) if not hole.position_unknown else None
         )
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
         widgets['btn'] = header_btn
+        widgets['resting_color'] = "#1f1f1f"
 
         # v07: pack checkbox FIRST (same fix as _build_selected_item)
         chk_var = ctk.BooleanVar(value=hole.selected_for_inspection)
@@ -1003,7 +1045,14 @@ class UIManager:
                 h.display_id = f"U{unsel_count}"
 
     def _refresh_after_inspection_toggle(self):
-        """หลังกดยืนยันเลือกรู: จัดเรียงหมายเลขรูใหม่ตามหมวดหมู่ แล้วรีเฟรชกราฟที่กำลังแสดงอยู่"""
+        """หลังกดยืนยันเลือกรู: จัดเรียงหมายเลขรูใหม่ตามหมวดหมู่ แล้วรีเฟรชกราฟที่กำลังแสดงอยู่
+
+        v11: this is the ONLY place a hole card's resting color is
+        allowed to actually change after a checkbox toggle — it flows
+        into update_treeview() (Customization/Path Mapper tabs) or
+        show_view() (Selection tab), both of which fully rebuild the
+        hole cards via _build_selected_item()/_build_unselected_item(),
+        which freeze a fresh widgets['resting_color'] at build time."""
         self._renumber_holes_by_category()
 
         visible_holes = []
@@ -1062,13 +1111,16 @@ class UIManager:
         is_deselecting = (self.selected_hole_idx == idx)
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
-            hole_i = self.current_holes[i] if i < len(self.current_holes) else None
-            # v08: resting color now driven by warning level instead of a
-            # single fixed blue — red (size) > yellow (probe) > blue (none)
-            if hole_i is not None and hole_i.selected_for_inspection:
-                default_color = self._hole_tab_default_color(hole_i)
-            else:
-                default_color = "#1f1f1f"
+            # v11 FIX: read the color FROZEN at card-build time instead of
+            # recomputing it live from hole.selected_for_inspection /
+            # _hole_tab_default_color(). Previously this branch repainted
+            # a hole's card the instant ANY other card was clicked, even
+            # though the user had only toggled the checkbox and not yet
+            # pressed "Apply Selection" — the color would flip to black
+            # early. Now it just restores whatever color the card was
+            # built with, which only changes on a real rebuild
+            # (update_treeview()/show_view(), triggered by Apply).
+            default_color = widgets.get('resting_color', "#1f1f1f")
             # BUGFIX v09: hover_color ต้องตามสี fg_color เสมอ — ไม่งั้น CTk จะ
             # fallback ไปใช้สีฟ้า default ตอนปุ่มค้าง hover (เกิดตอนกด
             # dropdown Z-Layers/Points ของการ์ดที่ขยายอยู่ แล้ว popup ของ
@@ -1084,8 +1136,9 @@ class UIManager:
 
         sel = self.hole_widgets[idx]
         if is_deselecting:
-            sel_hole_obj = self.current_holes[idx] if idx < len(self.current_holes) else None
-            resting_color = self._hole_tab_default_color(sel_hole_obj) if sel_hole_obj else "#1f1f1f"
+            # v11: same frozen-color read as the reset loop above — no live
+            # recompute from hole state, just restore the card's own resting color.
+            resting_color = sel.get('resting_color', "#1f1f1f")
             sel['btn'].configure(fg_color=resting_color, hover_color=resting_color)
             if sel.get('is_expanded'):
                 if 'settings_frame' in sel:
@@ -1095,8 +1148,12 @@ class UIManager:
         else:
             # การ์ดที่กำลังเลือกอยู่: ใช้สี warning เดิม (แดง/เหลือง/ฟ้า) แต่เพิ่ม
             # ความสว่างเข้าไป — ยังบอกระดับ warning ได้ พร้อมดูออกว่าถูกเลือกอยู่
-            sel_hole_obj = self.current_holes[idx] if idx < len(self.current_holes) else None
-            selected_color = self._hole_tab_selected_color(sel_hole_obj) if sel_hole_obj else "#1f538d"
+            # v11: brighten from the FROZEN resting_color instead of calling
+            # _hole_tab_selected_color(hole) (which internally recomputes
+            # _hole_tab_default_color(hole) live) — keeps this consistent
+            # with the "no repaint until Apply" rule above.
+            resting_color  = sel.get('resting_color', "#1f1f1f")
+            selected_color = self._lighten_hex(resting_color)
             sel['btn'].configure(fg_color=selected_color, hover_color=selected_color)
 
             if not sel.get('is_expanded'):
