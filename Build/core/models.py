@@ -17,20 +17,12 @@
 #   selected_for_inspection (HoleSegmentSetting) = segment นี้ถูกรวมใน
 #     probe path / G-code หรือไม่ (ผู้ใช้ปรับได้ผ่าน checkbox ใน sidebar
 #     ขวา — ค่าเริ่มต้นคำนวณจาก validate_segment_reachability())
-# ==============================================================================
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   FEATURE: HoleSegmentSetting ได้ field ใหม่ 2 ตัว:
-#     - selected_for_inspection (bool) : segment นี้ถูกเลือกตรวจสอบหรือไม่
-#       (ค่าเริ่มต้น True, ผู้ใช้กด checkbox ใน sidebar ขวาปรับเองได้)
-#     - size_warning (str)             : ข้อความเตือนถ้า segment นี้ probe
-#       เข้าไม่ถึง (คอขวดของ segment ด้านบนแคบกว่า) — "" ถ้าไม่มีปัญหา
-#   FEATURE: ฟังก์ชันใหม่ validate_segment_reachability(segments) — เทียบ
-#     แต่ละ segment กับ segment ที่ตื้นกว่าติดกัน (index ก่อนหน้า) ถ้า
-#     "จุดกว้างสุด" ของ segment ที่ลึกกว่า มากกว่า "จุดแคบสุด" ของ segment
-#     ที่ตื้นกว่า → segment ลึกนั้นถูก probe เข้าไม่ถึง (ชนคอขวด) → ตั้ง
-#     selected_for_inspection=False + size_warning อัตโนมัติ เรียกครั้งเดียว
-#     ตอนสร้างรายการ segment สด (ui/main_window.py _build_segment_settings())
+#
+# NOTE (v03): hole.segments / sh.segments ถูกเรียงโดย
+# core/step_extractor.py :: _order_segments_deepest_first() เสมอ ให้
+# index 0 = segment ที่ลึกที่สุด และ index สุดท้าย = segment ที่ตื้นที่สุด
+# (ปากรู) — validate_segment_reachability() ด้านล่างถูกปรับให้ตรงกับ
+# ลำดับนี้แล้ว
 # ==============================================================================
 import numpy as np
 
@@ -54,9 +46,10 @@ class HoleSegment:
 class HoleSegmentSetting:
     """การตั้งค่าการตรวจสอบ (inspection) ต่อ segment เดียวของรูหลายระดับ
     เส้นผ่านศูนย์กลาง — แสดงเป็น sub-tab ที่กางออกมาจากการ์ดรูหลักใน
-    sidebar ขวา (การ์ดรู 1 ใบ = 1 display_id, กดขยายแล้วเห็น segment ย่อย)"""
+    sidebar ขวา (การ์ดรู 1 ใบ = 1 display_id, กดขยายแล้วเห็น segment ย่อย)
+    v03: seg_idx=0 ตอนนี้คือ segment ที่ลึกที่สุด (mouth = seg_idx สุดท้าย)"""
     def __init__(self, seg_idx: int, radius_open: float, radius_deep: float, depth: float):
-        self.seg_idx      = seg_idx          # ลำดับ segment: 0 = ใกล้ปากรูสุด
+        self.seg_idx      = seg_idx          # ลำดับ segment: 0 = ลึกที่สุด (v03)
         self.radius_open  = radius_open
         self.radius_deep  = radius_deep
         self.depth        = depth
@@ -73,32 +66,25 @@ class HoleSegmentSetting:
 
 
 def validate_segment_reachability(segments: list) -> None:
-    """ตรวจสอบว่าแต่ละ segment (เรียงจากปากรูก่อน index 0 = ตื้นสุด) จะถูก
-    probe เข้าไปถึงได้จริงหรือไม่ เทียบกับ segment ที่ตื้นกว่าติดกัน
+    """ตรวจสอบว่าแต่ละ segment จะถูก probe เข้าไปถึงได้จริงหรือไม่ เทียบกับ
+    segment ที่ตื้นกว่าติดกัน"""
+    
+    # ค่าเผื่อความคลาดเคลื่อน (Tolerance) 1 ไมครอน ป้องกันปัญหา Floating-point precision
+    # เวลารอยต่อของ Segment มีขนาดเท่ากันพอดี
+    TOLERANCE = 0.001 
 
-    หลักการ: probe ต้องสอดผ่าน segment ที่ตื้นกว่าก่อนถึงจะไปแตะผนัง
-    segment ที่ลึกกว่าได้ — ถ้า "จุดกว้างสุด" ของ segment ที่ลึกกว่า
-    มากกว่า "จุดแคบสุด" ของ segment ที่ตื้นกว่า (คอขวด) แสดงว่า probe
-    ชนขอบคอขวดตอนเข้า/ถอยแนวรัศมีกว้างกว่าช่องที่ผ่านได้ → segment ลึก
-    นั้นถูกตั้ง selected_for_inspection=False + size_warning อัตโนมัติ
-    (ผู้ใช้ยัง override เปิดกลับได้เองผ่าน checkbox ใน sidebar)
-
-    Parameters
-    ----------
-    segments : list ของ HoleSegmentSetting เรียงจากปากรู (index 0) ไปก้นรู
-               ฟังก์ชันนี้ mutate ตัว object ใน list โดยตรง ไม่ return ค่า
-    """
-    for i in range(1, len(segments)):
-        shallow = segments[i - 1]
-        deep    = segments[i]
+    for i in range(len(segments) - 1):
+        deep    = segments[i]       # segment นี้กำลังถูกตรวจสอบว่าเข้าถึงได้ไหม
+        shallow = segments[i + 1]   # เพื่อนบ้านที่ตื้นกว่า/ใกล้ปากรูกว่า (v03: i+1 ไม่ใช่ i-1)
 
         shallow_narrow = min(shallow.radius_open, shallow.radius_deep)
         deep_wide      = max(deep.radius_open, deep.radius_deep)
 
-        if deep_wide > shallow_narrow:
+        # เพิ่ม TOLERANCE เข้าไปในการเปรียบเทียบ
+        if (deep_wide - shallow_narrow) > TOLERANCE:
             deep.selected_for_inspection = False
             deep.size_warning = (
-                f"⚠ Counterbore ด้านบน (Segment {i}) มีขนาดเล็กกว่า — "
+                f"⚠ Counterbore ด้านบน (Segment {i + 2}) มีขนาดเล็กกว่า — "
                 f"probe เข้าไม่ถึง Segment {i + 1} นี้ (auto-unselected)")
 
 
@@ -112,25 +98,28 @@ class HoleFeature:
         self.bottom_z = bottom_z
         self.depth = depth
         self.radius = radius
-        self.layers = 3              # จำนวนชั้นตรวจสอบเริ่มต้น — ปรับได้
-        self.points_per_layer = 4    # จำนวนจุดสัมผัสผนังต่อชั้นเริ่มต้น — ปรับได้
-        self.hole_top_z = surface_z  # ขอบปากรูจริง
-        self._step_hole = None       # ลิงก์กลับไปยัง StepHole (ถ้ามาจากไฟล์ STEP)
+        self.layers = 3
+        self.points_per_layer = 4
+        self.hole_top_z = surface_z
+        self._step_hole = None
 
-        self.selected_for_inspection = False  # เลือกรูนี้เพื่อตรวจสอบหรือไม่
-        self.zigzag_inspection = False        # ใช้รูปแบบ zigzag ในการ probe หรือไม่
-        self.zigzag_degree = 45.0             # องศาสะสมต่อชั้นเมื่อเปิด zigzag — ปรับได้
+        self.selected_for_inspection = False
+        self.zigzag_inspection = False
+        self.zigzag_degree = 45.0
 
-        self.is_rejected = False        # True = ถูก reject โดยเงื่อนไข depth/occlusion
-        self.reject_reason = ""         # เหตุผลที่ถูก reject
-        self.position_unknown = False   # True = ไม่สามารถระบุตำแหน่งบนจอได้
+        self.is_rejected = False
+        self.reject_reason = ""
+        self.position_unknown = False
 
         # segments ว่างเปล่า = รูปกติ (segment เดียว) ; มี 2+ = รูหลายระดับเส้นผ่านศูนย์กลาง
+        # v03: segments[0] = segment ที่ลึกที่สุด
         self.segments: list = []
 
 
 class StepHole:
-    """โครงสร้างข้อมูลรูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP"""
+    """โครงสร้างข้อมูลรูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
+    v03: self.segments ถูกเรียงแบบ "ลึกสุดก่อน" เสมอโดย
+    core/step_extractor.py :: _order_segments_deepest_first()"""
     def __init__(self, open_3d, deep_3d, radius_open, radius_deep, axis_vec, segments=None):
         self.open_3d     = tuple(open_3d)
         self.deep_3d     = tuple(deep_3d)
