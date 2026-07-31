@@ -455,10 +455,40 @@ class UIManager:
         if self.geo.mesh is not None:
             extents = self.geo.get_physical_dimensions()
             self.max_physical_dim = max(extents)
-            self.lbl_width.configure(text=f"Width (X): {extents[0]:.2f} mm", text_color="white")
-            self.lbl_length.configure(text=f"Length (Y): {extents[1]:.2f} mm", text_color="white")
-            self.lbl_thick.configure(text=f"Thickness (Z): {extents[2]:.2f} mm", text_color="white")
+            # เอาการอัปเดต Label เดิมออก เพราะเราจะไปทำใน _update_dimensions_for_view ตอนเรียก show_view แทน
+            
         self.show_view('Top')
+
+    def _update_dimensions_for_view(self, view_name):
+        """อัปเดต Label ข้อมูลขนาดชิ้นงาน (Width, Length, Thickness) ให้สอดคล้องกับแกนในมุมมองปัจจุบัน"""
+        if self.geo.mesh is None:
+            return
+            
+        extents = self.geo.get_physical_dimensions()
+        dx, dy, dz = extents[0], extents[1], extents[2]
+
+        # สลับการแสดงผลแกนตามมุมมอง (View)
+        if view_name in ['Top', 'Bottom']:
+            w_lbl, w_val = "X", dx
+            l_lbl, l_val = "Y", dy
+            t_lbl, t_val = "Z", dz
+        elif view_name in ['Front', 'Back']:
+            w_lbl, w_val = "X", dx
+            l_lbl, l_val = "Z", dz  # มองจากด้านหน้า ความสูงบนจอคือแกน Z
+            t_lbl, t_val = "Y", dy  # ความลึก (หนา) เข้าไปในจอคือแกน Y
+        elif view_name in ['Left', 'Right']:
+            w_lbl, w_val = "Y", dy  # มองจากด้านข้าง ความกว้างบนจอคือแกน Y
+            l_lbl, l_val = "Z", dz
+            t_lbl, t_val = "X", dx  # ความลึก (หนา) เข้าไปในจอคือแกน X
+        else:
+            w_lbl, w_val = "X", dx
+            l_lbl, l_val = "Y", dy
+            t_lbl, t_val = "Z", dz
+
+        # อัปเดตข้อความบน UI Sidebar ด้านซ้าย
+        self.lbl_width.configure(text=f"Width ({w_lbl}): {w_val:.2f} mm", text_color="white")
+        self.lbl_length.configure(text=f"Length ({l_lbl}): {l_val:.2f} mm", text_color="white")
+        self.lbl_thick.configure(text=f"Thickness ({t_lbl}): {t_val:.2f} mm", text_color="white")
 
     def show_view(self, view_name):
         if self.geo.mesh is None: return
@@ -466,6 +496,9 @@ class UIManager:
         self.current_view = view_name
         self.selected_segment_idx = None   # เปลี่ยนมุมมอง = ตำแหน่งรูอาจขยับ ต้องเคลียร์ segment ที่ isolate ไว้
         rot = self.screen_rotation
+
+        # อัปเดต Sidebar Info (Width, Length, Thickness) ตามมุมมองใหม่
+        self._update_dimensions_for_view(view_name)
 
         if   view_name == 'Top':    x, y, z_v, z_f, tri = self.geo.get_top_view(rot)
         elif view_name == 'Bottom': x, y, z_v, z_f, tri = self.geo.get_bottom_view(rot)
@@ -545,7 +578,7 @@ class UIManager:
         title = f"{view_name} View"
         self.selection_tab.update_plot(x, y, z_v, z_f, tri, title, holes=visible_holes)
         self.update_treeview(self.current_holes)
-
+        
     def on_generate_holes(self):
         if self.geo.mesh is None: return
         rot = self.screen_rotation

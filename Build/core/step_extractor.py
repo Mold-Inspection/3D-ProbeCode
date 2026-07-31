@@ -1,29 +1,19 @@
 # ==============================================================================
 # core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# หน้าที่หลัก:
-#   1) extract()               อ่านทุก face ที่เป็น CYLINDER/CONE/TORUS/SPHERE
-#      จากไฟล์ STEP แล้วคำนวณตำแหน่ง/รัศมี/ความลึกของรูแต่ละรูด้วยสมการ
-#      วิเคราะห์ (analytical) ก่อน ถ้าล้มเหลวจึงถอยไปใช้วิธีหาเส้นขอบวงกลม (fallback)
-#      จากนั้น merge หน้าตัดครึ่งวง (_merge_half_faces) และ merge รู counterbore
-#      หลายระดับเข้าด้วยกัน (_merge_counterbores)
-#   2) get_step_holes_in_view() แปลงรูที่สกัดได้ให้เป็นตำแหน่งบนจอ 2D ตามมุมมอง
-#      ปัจจุบัน พร้อมตรวจสอบว่ารูถูกบัง/มองไม่เห็น/ตื้นเกินไปหรือไม่
-#
-# ตัวแปรสำคัญที่ปรับจูนได้ (ค่าคลาดเคลื่อน/threshold สำหรับตรวจจับ-รวมรู):
-#   DEBUG               = เปิด/ปิดการพิมพ์ log และบันทึกไฟล์ log
-#   _MIN_SWEEP_RAD       = มุมกวาดขั้นต่ำของเส้นขอบวงกลม (rad) ก่อนนับเป็นวงกลมจริง
-#   _AXIS_TOL            = ค่าความคลาดเคลื่อนแกนขนาน เมื่อเทียบว่า 2 รูอยู่แกนเดียวกัน
-#   _EXTENT_TOL          = ค่าความคลาดเคลื่อนความยาวช่วง (mm) เมื่อ merge หน้าครึ่งวง
-#   _PERP_FRAC_TOL       = สัดส่วนความคลาดเคลื่อนระยะห่างตั้งฉากเมื่อ merge หน้าครึ่งวง
-#   _STRICT_GAP_TOL      = ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รูไม่ coaxial กัน
-#   _MAX_RADIUS_RATIO    = อัตราส่วนรัศมีสูงสุดที่ยอมให้ merge รูไม่ coaxial กัน
-#   _COAXIAL_PERP_TOL    = ระยะห่างตั้งฉากสูงสุด (mm) ที่นับว่า "แกนร่วมกัน" (coaxial)
-#   _COAXIAL_PERP_FRAC   = สัดส่วนรัศมีเพิ่มเติมสำหรับเกณฑ์ coaxial
-#   _COAXIAL_GAP_TOL     = ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รู coaxial กัน
-#   _MIN_TORUS_TUBE_RADIUS / _MIN_SPHERE_CAP_RADIUS = รัศมีขั้นต่ำ (mm) ก่อนนับเป็นรูจริง
-#   MIN_DEPTH (ในฟังก์ชัน)      = ความลึกขั้นต่ำ (mm) ก่อนนับว่าเป็นรูที่วัดได้
-#   SIDE_HOLE_AXIS_THRESHOLD    = มุมแกนขั้นต่ำที่นับว่าเป็น "รูด้านข้าง" เทียบมุมกล้อง
+# VERSION: 01
+# CHANGE LOG (no marker -> v01):
+#   FEATURE (Fix 1 of PLAN_segment-order-and-rotation-fixes.md): new helper
+#   _order_segments_deepest_first(h) — always re-sorts h.segments so index 0
+#   is the DEEPEST segment (farthest along h.axis from h.open_3d) and the
+#   LAST index is the shallowest/mouth segment, regardless of whether a mesh
+#   was available. Called unconditionally right after
+#   _orient_segments_by_mesh(h, mesh) for every hole in extract(), since by
+#   that point h.open_3d (mouth) and h.axis are already correctly established
+#   at the whole-hole level. This is a pure ordering fix — does not change
+#   which end is the mouth (that's still _orient_segments_by_mesh's job).
+#   See core/models.py v03 for the matching downstream fix in
+#   validate_segment_reachability().
 # ==============================================================================
 import numpy as np
 import math
@@ -33,11 +23,8 @@ import datetime
 import cadquery as cq
 from core.models import StepHole, HoleSegment
 
-DEBUG = True   # เปิด/ปิดการพิมพ์ + บันทึก log การสกัดรู — ปิดเพื่อลด overhead ตอนใช้งานจริง
+DEBUG = True
 
-# ---------------------------------------------------------------------------
-# ตั้งค่าบันทึกไฟล์ log
-# ---------------------------------------------------------------------------
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Log")
 _LOG_FILE_HANDLE = None
 _LOG_FILE_PATH = None
@@ -74,21 +61,20 @@ def _dbg(msg):
         except Exception:
             pass
 
-_MIN_SWEEP_RAD = math.pi   # มุมกวาดขั้นต่ำของเส้นขอบวงกลม (rad) ก่อนนับเป็นวงกลมจริง — ปรับได้
-_AXIS_TOL       = 0.02     # ความคลาดเคลื่อนแกนขนาน เมื่อเทียบว่า 2 รูอยู่แกนเดียวกัน — ปรับได้
-_EXTENT_TOL     = 0.5      # ความคลาดเคลื่อนความยาวช่วง (mm) เมื่อ merge หน้าครึ่งวง — ปรับได้
-_PERP_FRAC_TOL  = 0.15     # สัดส่วนความคลาดเคลื่อนระยะห่างตั้งฉากเมื่อ merge หน้าครึ่งวง — ปรับได้
+_MIN_SWEEP_RAD = math.pi
+_AXIS_TOL       = 0.02
+_EXTENT_TOL     = 0.5
+_PERP_FRAC_TOL  = 0.15
 
-_STRICT_GAP_TOL    = 0.05  # ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รูไม่ coaxial กัน — ปรับได้
-_MAX_RADIUS_RATIO  = 1.2   # อัตราส่วนรัศมีสูงสุดที่ยอมให้ merge รูไม่ coaxial กัน — ปรับได้
+_STRICT_GAP_TOL    = 0.05
+_MAX_RADIUS_RATIO  = 1.2
 
-_COAXIAL_PERP_TOL   = 0.3   # ระยะห่างตั้งฉากสูงสุด (mm) ที่นับว่าแกนร่วมกัน (coaxial) — ปรับได้
-_COAXIAL_PERP_FRAC  = 0.15  # สัดส่วนรัศมีเพิ่มเติมสำหรับเกณฑ์ coaxial — ปรับได้
-_COAXIAL_GAP_TOL    = 1.5   # ระยะห่างสูงสุด (mm) ที่ยอมให้ merge รู coaxial กัน — ปรับได้
+_COAXIAL_PERP_TOL   = 0.3
+_COAXIAL_PERP_FRAC  = 0.15
+_COAXIAL_GAP_TOL    = 1.5
 
-_MIN_TORUS_TUBE_RADIUS = 2.0   # รัศมีท่อ torus ขั้นต่ำ (mm) ก่อนนับเป็นรูจริง — ปรับได้
-
-_MIN_SPHERE_CAP_RADIUS = 2.0   # รัศมีขั้นต่ำของ sphere cap (mm) ก่อนนับเป็นรูจริง — ปรับได้
+_MIN_TORUS_TUBE_RADIUS = 2.0
+_MIN_SPHERE_CAP_RADIUS = 2.0
 
 def _sweep_angle(edge) -> float:
     arc_len = edge.Length()
@@ -111,7 +97,6 @@ def _arc_radius(edge) -> float:
     return 0.0
 
 def _merge_half_faces(holes: list) -> list:
-    """รวมรูที่ถูกตัดออกเป็น 2 หน้าครึ่งวง (เกิดจากขอบ B-Rep ขาดตอน) ให้กลับเป็นรูเดียว"""
     if not holes: return holes
     merged = [False] * len(holes)
     for i in range(len(holes)):
@@ -149,8 +134,6 @@ def _merge_half_faces(holes: list) -> list:
     return result
 
 def _merge_counterbores(holes: list) -> list:
-    """รวมรูที่มีหลายระดับเส้นผ่านศูนย์กลาง (counterbore) ที่อยู่แกนเดียวกัน/ต่อเนื่องกัน
-    ให้กลายเป็นรูเดียวที่มีหลาย segment"""
     if not holes: return holes
     current = holes
     while True:
@@ -187,8 +170,6 @@ def _merge_counterbores(holes: list) -> list:
                 gap_tol = _COAXIAL_GAP_TOL if is_coaxial else _STRICT_GAP_TOL
 
                 if is_coaxial and abs(r_large - r_small) < 0.1 and perp_d < _COAXIAL_PERP_TOL:
-                    # กรณีรูขนาดเท่ากันแกนเดียวกันแท้ ๆ (เช่น รูทะลุที่ถูกตัดข้อมูลขาดกลาง)
-                    # ขยาย gap_tol ชั่วคราวเพื่อเชื่อมรูทั้งสองฝั่งเข้าด้วยกัน — ปรับสัดส่วน (×4.0) / ค่าต่ำสุด (50.0) ได้
                     extended_gap = max(gap_tol, r_large * 4.0, 50.0)
                     if gap_tol < extended_gap:
                         _dbg(f"  CROSS-HOLE BRIDGE ACTIVATED: extending gap_tol from {gap_tol} to {extended_gap:.2f}")
@@ -237,7 +218,10 @@ def _merge_counterbores(holes: list) -> list:
 
 def _orient_segments_by_mesh(h, mesh):
     """เรียงลำดับ segment ให้ segment แรกอยู่ใกล้ผิว mesh จริง (ปากรู) เสมอ
-    โดยเทียบระยะห่างจากผิว mesh ของปลายทั้งสองด้าน"""
+    โดยเทียบระยะห่างจากผิว mesh ของปลายทั้งสองด้าน — หมายเหตุ: ฟังก์ชันนี้
+    จัดการเฉพาะ "ปลายไหนคือปาก" (h.open_3d) เท่านั้น ส่วนลำดับ index ใน
+    h.segments list จะถูกจัดใหม่อีกทีโดย _order_segments_deepest_first()
+    ที่ทำงานต่อจากนี้เสมอ (ดู extract())"""
     if mesh is None or not h.segments or len(h.segments) < 2:
         return
     try:
@@ -260,13 +244,30 @@ def _orient_segments_by_mesh(h, mesh):
         h.radius_open, h.radius_deep = h.radius_deep, h.radius_open
         h.radius                     = h.radius_open
 
+def _order_segments_deepest_first(h):
+    """เรียง h.segments ใหม่เสมอให้ index 0 = segment ที่ลึกที่สุด (ไกลจากปากรู
+    h.open_3d ที่สุดตามแกน h.axis) และ index สุดท้าย = segment ที่ตื้นที่สุด
+    (ปากรู) โดยไม่พึ่งพา mesh — ใช้ระยะ projection ตามแกนรู เทียบกับ h.open_3d
+    ที่ถูกกำหนดไว้แล้วในระดับรูทั้งก้อน (มาจาก _merge_counterbores /
+    _orient_segments_by_mesh) ทำงานเสมอไม่ว่าจะมี mesh หรือไม่"""
+    if not h.segments or len(h.segments) < 2:
+        return
+    axis = np.array(h.axis, dtype=float)
+    ref  = np.array(h.open_3d, dtype=float)   # known mouth point at hole level
+
+    def _proj_depth(seg):
+        mid = (np.array(seg.open_3d) + np.array(seg.deep_3d)) / 2.0
+        return float(np.dot(mid - ref, axis))
+
+    h.segments.sort(key=_proj_depth, reverse=True)   # largest projected distance = deepest -> index 0
+    _dbg(f"  SEGMENT ORDER: sorted {len(h.segments)} segment(s) deepest-first "
+         f"(index 0 = deepest, index {len(h.segments)-1} = mouth)")
+
 class StepExtractor:
     def __init__(self):
         self._step_holes_cache = []
 
     def extract(self, step_data, mesh_centroid, mesh=None):
-        """อ่านทุก face ในไฟล์ STEP ที่เป็นทรง CYLINDER/CONE/TORUS/SPHERE
-        แล้วสกัดเป็นรายการ StepHole (ตำแหน่ง/รัศมี/ความลึก/แกน)"""
         if step_data is None: return []
 
         cx_off, cy_off, cz_off = mesh_centroid
@@ -284,7 +285,6 @@ class StepExtractor:
 
             analytical_success = False
 
-            # วิธีหลัก: ดึงสมการพื้นผิว (analytical) ตรงจากคณิตศาสตร์ B-Rep — แม่นยำและเร็วกว่า
             if geom_type == 'CYLINDER':
                 try:
                     try:
@@ -307,7 +307,6 @@ class StepExtractor:
                     r_a = r_b = float(cyl.Radius())
 
                     projs = []
-                    # ฉายจุดบนขอบที่เหลืออยู่ลงบนแกนรู
                     for f_edge in face.Edges():
                         for t in (0.0, 0.25, 0.5, 0.75, 1.0):
                             try:
@@ -316,7 +315,6 @@ class StepExtractor:
                                 projs.append(float(np.dot(vec, axis_vec)))
                             except: pass
 
-                    # กรณีขอบถูกทำลายหมด ให้ดึงจากจุดตัด (vertices) แทน
                     if not projs:
                         for v in face.Vertices():
                             try:
@@ -363,7 +361,7 @@ class StepExtractor:
                     R_major = float(tor.MajorRadius())
                     r_minor = float(tor.MinorRadius())
 
-                    samples = []  # (axial_coord, local_radius_at_that_point)
+                    samples = []
                     for f_edge in face.Edges():
                         for t in (0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0):
                             try:
@@ -493,7 +491,7 @@ class StepExtractor:
                     h_avg      = float(np.mean(proj_len))
                     rim_center = c0 + h_avg * axis_vec
                     r_open     = float(np.mean(np.linalg.norm(perp_vecs, axis=1)))
-                    r_deep     = 0.0  # ขั้วบนเป็นจุดเดียว เหมือนปลายแหลมของ CONE
+                    r_deep     = 0.0
 
                     end_a      = tuple(rim_center)
                     end_b      = tuple(pole_pt)
@@ -506,7 +504,6 @@ class StepExtractor:
                 except Exception as e:
                     _dbg(f"Sphere analytical extraction failed face#{total_faces}: {e!r}")
 
-            # วิธีสำรอง (ใช้เมื่อดึงสมการไม่สำเร็จ หรือเป็น CONE): หาเส้นวงกลม (edge) แทน
             if not analytical_success:
                 raw_circle_edges = [e for e in face.Edges() if e.geomType() == 'CIRCLE']
                 if len(raw_circle_edges) < 1:
@@ -550,7 +547,7 @@ class StepExtractor:
                             continue
                         axis_vec = raw_axis / ax_norm
                         ax, ay, az = axis_vec
-                        
+
                         projs = [0.0]
                         for f_edge in face.Edges():
                             for t in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -585,6 +582,7 @@ class StepExtractor:
         holes = _merge_counterbores(holes)
         for h in holes:
             _orient_segments_by_mesh(h, mesh)
+            _order_segments_deepest_first(h)   # v01: always run — mesh-independent, keeps segments[0] = deepest
 
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)}")
@@ -602,7 +600,7 @@ class StepExtractor:
         return dx, dy, depth, hit
 
     def _sample_side_hole_breach(self, h, dir_to_viewer, mesh, projector, view_name, screen_rot):
-        MIN_DEPTH = 0.1   # ความลึกขั้นต่ำ (mm) ก่อนนับว่าพบจุดทะลุผิวของรูด้านข้าง — ปรับได้
+        MIN_DEPTH = 0.1
         axis_vec = np.array(h.axis, dtype=float)
         norm = np.linalg.norm(axis_vec)
         if norm < 1e-9: return None
@@ -630,77 +628,84 @@ class StepExtractor:
         return best
 
     def get_step_holes_in_view(self, projector, view_name: str, screen_rot: int = 0, mesh=None):
-        """แปลงรูจาก cache ให้เป็นตำแหน่งบนจอ 2D ตามมุมมองปัจจุบัน พร้อมตรวจสอบ
-        ว่ารูถูกบัง (occluded), ตื้นเกินไป, หรือมองไม่เห็นจากมุมนี้หรือไม่"""
         if not self._step_holes_cache: return []
         p = projector.get_view_params(view_name, screen_rot)
         dir_to_viewer = p['matrix'][:3, :3].T @ np.array([0.0, 0.0, 1.0])
         dir_to_viewer /= np.linalg.norm(dir_to_viewer)
-        MIN_DEPTH, SIDE_HOLE_AXIS_THRESHOLD = 0.1, 0.3   # ความลึกขั้นต่ำ (mm) / มุมแกนขั้นต่ำที่นับเป็น "รูด้านข้าง" — ปรับได้
+        MIN_DEPTH, SIDE_HOLE_AXIS_THRESHOLD = 0.1, 0.3
         result = []
 
         for cache_idx, h in enumerate(self._step_holes_cache):
             dx_a, dy_a, d_a = projector.project_point_to_view(*h.open_3d, view_name, screen_rot)
             dx_b, dy_b, d_b = projector.project_point_to_view(*h.deep_3d, view_name, screen_rot)
 
-            if d_a <= d_b:
+            hc = copy.deepcopy(h) # Deep copy เพื่อปรับแต่ง segment สำหรับ view นี้โดยเฉพาะ
+
+            # ถ้ากล้องมองมาจากอีกด้านของปากรูหลัก (ทะลุ) ให้ดึงปากรูมาอยู่ฝั่งที่ใกล้กล้อง
+            is_facing_away = d_a > d_b
+            
+            if not is_facing_away:
                 open_depth, deep_depth, display_x, display_y = d_a, d_b, dx_a, dy_a
-                r_open, r_deep, open_3d, deep_3d = h.radius_open, h.radius_deep, h.open_3d, h.deep_3d
             else:
+                # 1. สลับคุณสมบัติของรูหลักให้ปากรูมาอยู่ฝั่งมุมมองกล้อง
                 open_depth, deep_depth, display_x, display_y = d_b, d_a, dx_b, dy_b
-                r_open, r_deep, open_3d, deep_3d = h.radius_deep, h.radius_open, h.deep_3d, h.open_3d
+                hc.open_3d, hc.deep_3d = hc.deep_3d, hc.open_3d
+                hc.radius_open, hc.radius_deep = hc.radius_deep, hc.radius_open
+                
+                # 2. แก้ไขจุดที่เป็นบั๊ก: สลับ Segment ย่อยทั้งหมดให้ตรงกับปากรูใหม่
+                hc.segments.reverse() # สลับ Segment เดิมที่ลึกสุด ให้ขึ้นมาตื้นสุด
+                for seg in hc.segments:
+                    # สลับ open/deep ของแต่ละ Segment ให้สอดคล้องกับทิศทางใหม่
+                    seg.open_3d, seg.deep_3d = seg.deep_3d, seg.open_3d
+                    seg.radius_open, seg.radius_deep = seg.radius_deep, seg.radius_open
 
             actual_depth = deep_depth - open_depth
 
             def _make_rejected(reason: str):
-                mid_3d = (np.array(open_3d) + np.array(deep_3d)) / 2.0
+                mid_3d = (np.array(hc.open_3d) + np.array(hc.deep_3d)) / 2.0
                 try:
                     fx, fy, fdepth = projector.project_point_to_view(*mid_3d, view_name, screen_rot)
                     pos_ok = (math.isfinite(fx) and math.isfinite(fy) and math.isfinite(fdepth))
                 except: pos_ok = False
-                hc = copy.copy(h)
-                hc.open_3d, hc.deep_3d, hc.radius_open, hc.radius_deep, hc.radius = open_3d, deep_3d, r_open, r_deep, r_open
-                hc.is_rejected, hc.reject_reason, hc.position_unknown = True, reason, not pos_ok
+                
+                hr = copy.deepcopy(hc)
+                hr.is_rejected, hr.reject_reason, hr.position_unknown = True, reason, not pos_ok
                 if pos_ok:
-                    hc.display_x, hc.display_y, hc.depth_top, hc.depth_bot = fx, fy, max(0.0, fdepth - r_open), fdepth
-                    hc.depth = max(0.0, hc.depth_bot - hc.depth_top)
+                    hr.display_x, hr.display_y = fx, fy
+                    hr.depth_top, hr.depth_bot = max(0.0, fdepth - hr.radius_open), fdepth
+                    hr.depth = max(0.0, hr.depth_bot - hr.depth_top)
                 else:
-                    hc.display_x, hc.display_y, hc.depth_top, hc.depth_bot, hc.depth = None, None, 0.0, 0.0, 0.0
-                return hc
+                    hr.display_x, hr.display_y, hr.depth_top, hr.depth_bot, hr.depth = None, None, 0.0, 0.0, 0.0
+                return hr
 
             if actual_depth < MIN_DEPTH:
-                axis_align = abs(float(np.dot(np.array(h.axis), dir_to_viewer)))
+                axis_align = abs(float(np.dot(np.array(hc.axis), dir_to_viewer)))
                 if mesh is not None and axis_align < SIDE_HOLE_AXIS_THRESHOLD:
-                    best = self._sample_side_hole_breach(h, dir_to_viewer, mesh, projector, view_name, screen_rot)
+                    best = self._sample_side_hole_breach(hc, dir_to_viewer, mesh, projector, view_name, screen_rot)
                     if best is not None:
                         fb_x, fb_y, fb_depth, fb_hit, perp_dist = best
-                        hc = copy.copy(h)
-                        hc.open_3d, hc.deep_3d, hc.radius_open, hc.radius_deep, hc.radius = open_3d, deep_3d, r_open, r_deep, r_open
-                        hc.display_x, hc.display_y, hc.depth_top, hc.depth_bot = fb_x, fb_y, max(0.0, fb_depth - max(r_open, r_deep)), fb_depth
+                        hc.display_x, hc.display_y = fb_x, fb_y
+                        hc.depth_top = max(0.0, fb_depth - max(hc.radius_open, hc.radius_deep))
+                        hc.depth_bot = fb_depth
                         hc.depth = max(MIN_DEPTH, hc.depth_bot - hc.depth_top)
                         hc.is_rejected, hc.reject_reason, hc.position_unknown = False, "", False
                         result.append(hc)
                         continue
 
                 if axis_align < SIDE_HOLE_AXIS_THRESHOLD:
-                    _dbg(f"  cache[{cache_idx}] DROPPED: irrelevant side-hole for this view.")
-                    continue
-                
-                if open_depth > deep_depth:
-                    _dbg(f"  cache[{cache_idx}] DROPPED: hole faces away from camera.")
                     continue
 
                 result.append(_make_rejected("Too shallow / no breach found"))
                 continue
 
             if mesh is not None:
-                if mesh.ray.intersects_any(ray_origins=[np.array(open_3d) + (dir_to_viewer * 0.1)], ray_directions=[dir_to_viewer])[0]:
+                if mesh.ray.intersects_any(ray_origins=[np.array(hc.open_3d) + (dir_to_viewer * 0.1)], ray_directions=[dir_to_viewer])[0]:
                     result.append(_make_rejected("Occluded by mesh from this view"))
                     continue
 
-            hc = copy.copy(h)
-            hc.open_3d, hc.deep_3d, hc.radius_open, hc.radius_deep, hc.radius = open_3d, deep_3d, r_open, r_deep, r_open
-            hc.display_x, hc.display_y, hc.depth_top, hc.depth_bot, hc.depth = display_x, display_y, open_depth, deep_depth, actual_depth
+            hc.display_x, hc.display_y = display_x, display_y
+            hc.depth_top, hc.depth_bot = open_depth, deep_depth
+            hc.depth = actual_depth
             hc.is_rejected, hc.reject_reason, hc.position_unknown = False, "", False
             result.append(hc)
 

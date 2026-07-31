@@ -1,11 +1,5 @@
 # ui/gcode_export_panel.py
 # VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   FIX: dropdown body (_body) now pack()s with after=self._header_frame
-#   instead of a bare pack() — fixes both this panel and the Probe
-#   Stylus Profile panel opening their dropdowns in the same location
-#   in the left sidebar. See ui/main_window.py v07 changelog for the
-#   matching fix on that panel.
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
@@ -73,9 +67,6 @@ class GCodeExportPanel:
     def _toggle_panel(self):
         self._expanded = not self._expanded
         if self._expanded:
-        # v02 FIX: anchor with after=self._header_frame, same fix as
-        # ui/main_window.py's Probe Stylus panel — guarantees this
-        # dropdown opens directly under its own header.
             self._body.pack(pady=(0, 10), padx=12, fill="x", after=self._header_frame)
             self._toggle_btn.configure(text="🖨 G-code Export (GRBL)  ▾")
         else:
@@ -88,7 +79,15 @@ class GCodeExportPanel:
         if app.geo.mesh is None:
             _mb.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
             return
-        z = suggest_safe_z(app.geo.mesh)
+            
+        # ดึงมุมมองปัจจุบันเพื่อส่งไปคำนวณ Safe Z ให้ล้อตามความหนาในด้านนั้นๆ
+        view_name = "Top"
+        if hasattr(app, 'current_view'):
+            view_name = app.current_view
+            
+        # เรียกคำนวณค่า Z ที่ปลอดภัย โดยอิงจากการหมุนแกน
+        z = suggest_safe_z(app.geo.mesh, margin=10.0, view_name=view_name)
+        
         self._entries["safe_z"].delete(0, "end")
         self._entries["safe_z"].insert(0, f"{z:.2f}")
 
@@ -128,8 +127,18 @@ class GCodeExportPanel:
         if settings is None:
             return
 
+        # ดึงชื่อมุมมองปัจจุบันจาก UI เพื่อส่งไปจำลองการพลิกชิ้นงาน
+        view_name = "Top"
+        if hasattr(app, 'current_view'):
+            view_name = app.current_view
+        elif hasattr(app, 'view_name'):
+            view_name = app.view_name
+        elif hasattr(app, 'view_combobox'): 
+            view_name = app.view_combobox.get()
+
         try:
-            gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings)
+            # เพิ่มการส่ง view_name เข้าไปในฟังก์ชัน
+            gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name)
         except Exception as e:
             _mb.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
             return
