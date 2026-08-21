@@ -1,5 +1,23 @@
 # ui/gcode_export_panel.py
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE (PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §6 —
+#   stale-settings guard): after a successful export, capture a snapshot
+#   of the hole/segment inspection settings that were actually used to
+#   produce this G-code — see new _capture_export_snapshot(). Stored
+#   in-memory as app.last_export_snapshot (compared later by the
+#   Evaluation tab against the CURRENT configuration, so the user is
+#   warned if they change layers/points/zigzag/segment-selection after
+#   exporting but before loading the matching .log file) and written
+#   best-effort to a sidecar "<gcode_name>.snapshot.json" next to the
+#   saved .gcode file, so the guard can optionally be restored across an
+#   app restart via the Evaluation left panel's "Load export snapshot"
+#   button. Uses core/evaluation_engine.py::build_settings_snapshot(),
+#   imported lazily and guarded — a missing/failing snapshot must never
+#   affect the export that already succeeded (see _capture_export_
+#   snapshot()'s docstring).
+import os
+import json
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
@@ -162,4 +180,46 @@ class GCodeExportPanel:
             _mb.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
+        # v03: §6 stale-settings guard — remember what was actually exported
+        self._capture_export_snapshot(selected, view_name, filepath)
+
         _mb.showinfo("Export Complete", f"บันทึก G-code แล้ว:\n{filepath}")
+
+    # ------------------------------------------------------------------
+    def _capture_export_snapshot(self, selected_holes, view_name, gcode_filepath):
+        """v03: หลัง export สำเร็จ — จับภาพค่าตั้งค่าการตรวจสอบ (layers/
+        points_per_layer/zigzag/segment-selection) ของรูที่เพิ่ง export ไป
+        ทั้งแบบเก็บใน memory (app.last_export_snapshot — ใช้เทียบได้ทันที
+        ถ้ายังอยู่ session เดิม) และเขียนเป็นไฟล์ sidecar
+        "<ชื่อ .gcode>.snapshot.json" ไว้ข้าง ๆ ไฟล์ .gcode (best-effort —
+        ใช้กู้คืนการ์ดเตือนนี้ได้แม้ปิดโปรแกรมไปแล้ว ผ่านปุ่ม "Load export
+        snapshot" ใน ui/evaluation_left_panel.py)
+
+        สำคัญ: ฟังก์ชันนี้ต้องไม่มีทางทำให้การ export ที่เพิ่งสำเร็จไปแล้ว
+        (ไฟล์ .gcode ถูกเขียนและบันทึกเรียบร้อยแล้วก่อนจะมาถึงจุดนี้) ล้มเหลว
+        หรือแสดง error กวนใจผู้ใช้ — ทุกความล้มเหลวที่นี่เงียบ (แค่ print
+        แจ้งใน console) เพราะ snapshot เป็นแค่ฟีเจอร์เสริม ไม่ใช่ส่วนหลักของ
+        การ export"""
+        app = self.app
+        try:
+            from core.evaluation_engine import build_settings_snapshot
+        except ImportError as e:
+            print(f"[gcode_export_panel] snapshot skipped — "
+                  f"core/evaluation_engine.py not available yet ({e!r})")
+            return
+
+        try:
+            snapshot = build_settings_snapshot(selected_holes, view_name)
+        except Exception as e:
+            print(f"[gcode_export_panel] snapshot build failed (non-blocking): {e!r}")
+            return
+
+        app.last_export_snapshot = snapshot
+
+        try:
+            sidecar_path = os.path.splitext(gcode_filepath)[0] + ".snapshot.json"
+            with open(sidecar_path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+            print(f"[gcode_export_panel] export snapshot written to {sidecar_path}")
+        except Exception as e:
+            print(f"[gcode_export_panel] sidecar snapshot write failed (non-blocking): {e!r}")

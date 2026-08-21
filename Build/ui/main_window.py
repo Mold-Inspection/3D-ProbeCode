@@ -19,7 +19,56 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 11
+# VERSION: 12
+# CHANGE LOG (v11 -> v12):
+#   FEATURE: New "Evaluation" tab (PLAN_evaluation-tab-openbuilds-log-
+#   comparison_v02.md) — compares real probe touches from an OpenBuilds
+#   Control .log file against expected points computed from the current
+#   STEP hole/segment configuration. This change only wires the UI layer:
+#     - Added "Evaluation" entry to nav_selector, with the same kind of
+#       gating on_nav_change() already does for "Customization" (requires
+#       a STEP file with step_data AND holes_detected==True), reverting
+#       nav_selector back to the previous tab with a warning dialog if not.
+#     - Both sidebars can now be swapped out entirely while on the
+#       Evaluation tab: the normal left sidebar (self._left_scroll) and
+#       normal right sidebar (new wrapper self.normal_right_frame — see
+#       _setup_right_sidebar()) are pack_forget()'d and replaced by
+#       self.evaluation_left_frame / self.evaluation_right_frame, built by
+#       the new ui/evaluation_left_panel.py::EvaluationLeftPanel and
+#       ui/evaluation_sidebar_panel.py::EvaluationSidebarPanel. New helpers
+#       _show_normal_sidebars() / _show_evaluation_sidebars() do the swap;
+#       switching back to any other tab restores the normal sidebars
+#       exactly as before (no behavior change to Selection/Customization/
+#       Path Mapper).
+#     - New state on UIManager: self.loaded_step_filepath /
+#       self.loaded_step_filename (set in open_file_dialog(), needed by
+#       the Evaluation left panel's "STEP File" readout — previously
+#       discarded after use), self.evaluation_result (None until a .log
+#       is loaded — see ui/tabs/evaluation_tab.py's docstring for the
+#       expected contract), self.evaluation_tolerance_mm (default 0.5,
+#       shared between the left/right evaluation panels), and
+#       self.last_export_snapshot (None here — populated by
+#       core/gcode_export_panel.py in a later change per §6 of the plan;
+#       left panel handles the "no in-session snapshot" case gracefully
+#       via its optional "Load export snapshot (.json)" button).
+#     - Instantiated self.evaluation_tab / self.evaluation_left_panel /
+#       self.evaluation_sidebar_panel. All three new UI files
+#       (ui/tabs/evaluation_tab.py, ui/evaluation_left_panel.py,
+#       ui/evaluation_sidebar_panel.py) reference core/log_parser.py and
+#       core/evaluation_engine.py, which do not exist yet per the plan's
+#       implementation order — they import those modules lazily (only
+#       when the user actually presses "Load .log"/"Apply tolerance") and
+#       fail gracefully with an info dialog rather than crashing the app,
+#       so the UI is fully testable before the backend/core files land.
+#     - open_file_dialog() now also resets self.evaluation_result and
+#       self.last_export_snapshot to None on a new STEP load (a fresh
+#       model invalidates any previous evaluation).
+#     - _build_selected_item()'s hover binding gained an "Evaluation"
+#       branch (mirrors the existing Selection/Customization/Path Mapper
+#       branches) for consistency, though it's inert in practice since
+#       the normal right sidebar those cards live in is hidden while on
+#       the Evaluation tab.
+#
 # CHANGE LOG (v10 -> v11):
 #   FIX: Unchecking a hole's inspection checkbox used to repaint that
 #   card's resting color IMMEDIATELY on the next click of any other
@@ -44,68 +93,8 @@
 #   color live, which is the exact bug being fixed here. Unselected
 #   cards now consistently show #1f1f1f until Apply is pressed and they
 #   either get rebuilt as selected (colored) or stay unselected (black).
-#
-# CHANGE LOG (v09 -> v10):
-#   CHANGE: Selected/expanded hole card no longer switches to a flat
-#   unrelated blue (#1f538d). It now keeps its own warning color (red =
-#   size bottleneck, yellow = probe too short/tip too large, blue = no
-#   warning) from _hole_tab_default_color() and brightens it via new
-#   helper _lighten_hex()/_hole_tab_selected_color() — so the warning
-#   level stays visible at a glance even while a card is selected,
-#   instead of being masked by an unrelated selection color. Applied both
-#   at card build time (_build_selected_item, for a card that's already
-#   selected when the list rebuilds) and in on_hole_select()'s select
-#   branch. Adjust brighten amount via _lighten_hex()'s `factor` param.
-#
-# CHANGE LOG (v08 -> v09):
-#   FIX: Hole-card header button (_build_selected_item's header_btn) never
-#   set an explicit hover_color, so it fell back to CTk's theme default
-#   (blue). Opening the Z-Layers / Points-per-Layer CTkOptionMenu popup on
-#   an expanded card steals the mouse-release/leave event from other
-#   cards, leaving them stuck in that default-blue hover state until some
-#   other widget interaction forced a redraw — this is exactly the "row
-#   turns blue after opening a dropdown, need to click another dropdown to
-#   fix it back" symptom reported. hover_color is now always kept in sync
-#   with fg_color everywhere the button's color is set/reset (creation +
-#   on_hole_select), so there's no default-blue fallback to get stuck in.
-#   FIX: on_hole_select's "select" branch had been changed to reuse
-#   _hole_tab_default_color() instead of the intended "#1f538d" selection
-#   highlight, so a selected/expanded card lost its distinct blue
-#   indicator and blended into whatever warning color it already had.
-#   Restored "#1f538d" for the actively-selected card; other cards still
-#   reset to their warning-based resting color as before.
-#   FIX: typo "##1f1f1f" (double-hash, invalid hex) in the select-branch
-#   fallback color — was silently swallowed by CTk but not a valid color.
-#   CLEANUP: removed a leftover debug print() from on_hole_select.
-#
-# CHANGE LOG (v07 -> v08):
-#   FEATURE: Hole-card warning system now has two independent signals,
-#   shown together and reflected in the card's resting (unselected) tab
-#   color:
-#     1) SIZE warning (red) — aggregated from any segment whose
-#        cfg.size_warning is set (core/models.py
-#        validate_segment_reachability() — "upper segment narrower than
-#        a lower one -> probe can't physically reach it"). Rendered as
-#        its own red label ABOVE the existing probe-profile warning,
-#        inside _build_selected_item()'s setting_frame.
-#     2) PROBE warning (yellow) — the existing probe_profile.check_hole()
-#        result (depth/fit). Text color changed #ef5350 -> #eed202.
-#   New helper _hole_tab_default_color(hole): red (size warning present)
-#   > yellow (probe warning present, no size warning) > original blue
-#   (#1a3a5c, no warnings). Used both when a hole card is first built
-#   (_build_selected_item) and whenever card colors are reset after a
-#   selection change (on_hole_select), so the tab color always reflects
-#   current warning state regardless of click history.
-#
-# CHANGE LOG (v06 -> v07):
-#   FIX: Probe Stylus Profile dropdown (_probe_body) now pack()s with
-#   after=self._probe_header_frame instead of a bare pack() — previously,
-#   since the body was never packed at setup time, Tkinter appended it
-#   after whichever sidebar widget was packed last at the moment of the
-#   first expand (which could be the G-code Export panel's header),
-#   making both dropdowns appear to open in the same spot. Now it always
-#   opens directly under its own header no matter what else was toggled.
 # ==============================================================================
+import os
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -118,6 +107,9 @@ from core.probe_profile import ProbeProfile
 from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
+from ui.tabs.evaluation_tab import EvaluationTab
+from ui.evaluation_left_panel import EvaluationLeftPanel
+from ui.evaluation_sidebar_panel import EvaluationSidebarPanel
 from core.gcode_export_panel import GCodeExportPanel
 
 
@@ -156,9 +148,17 @@ class UIManager:
         self.probe_profile = ProbeProfile()
         self.inspection_selected_holes = []
 
+        # v12: Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
+        self.loaded_step_filepath  = None   # เต็ม path ของไฟล์ STEP ที่โหลดล่าสุด (None ถ้ายังไม่โหลด)
+        self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel
+        self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
+        self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
+        self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด (§6 ของแผน) — ยังไม่ถูกเขียนโดยไฟล์นี้
+
         self.selection_tab     = SelectionTab(self)
         self.customization_tab = CustomizationTab(self)
         self.path_mapper_tab   = PathMapperTab(self)
+        self.evaluation_tab    = EvaluationTab(self)
 
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
@@ -179,7 +179,7 @@ class UIManager:
 
         self.nav_selector = ctk.CTkSegmentedButton(
             self.top_bar,
-            values=["Selection", "Customization", "Path Mapper"],
+            values=["Selection", "Customization", "Path Mapper", "Evaluation"],
             command=self.on_nav_change,
             height=35,
             font=ctk.CTkFont(size=14, weight="bold")
@@ -211,6 +211,20 @@ class UIManager:
         self._setup_left_sidebar()
         self._setup_right_sidebar()
         self.selection_tab.setup_events()
+
+        # v12: Evaluation tab's own sidebars — built as siblings of the
+        # normal sidebar content (self._left_scroll / self.normal_right_frame)
+        # so on_nav_change() can pack_forget() one pair and pack() the other.
+        # Not packed here — _show_normal_sidebars() (called at startup below)
+        # leaves the normal sidebars visible by default.
+        self.evaluation_left_panel    = EvaluationLeftPanel(self)
+        self.evaluation_sidebar_panel = EvaluationSidebarPanel(self)
+
+        self.evaluation_left_frame = ctk.CTkFrame(self.sidebar_left, fg_color="transparent")
+        self.evaluation_left_panel.build(self.evaluation_left_frame)
+
+        self.evaluation_right_frame = ctk.CTkFrame(self.sidebar_right, fg_color="transparent")
+        self.evaluation_sidebar_panel.build(self.evaluation_right_frame)
 
         if self.geo.mesh is not None:
             self.show_view('Top')
@@ -377,7 +391,13 @@ class UIManager:
             self.update_treeview(self.current_holes)
 
     def _setup_right_sidebar(self):
-        header_frame = ctk.CTkFrame(self.sidebar_right, fg_color="transparent")
+        # v12: wrapped in normal_right_frame so the whole "Detected Holes"
+        # sidebar (header + list) can be pack_forget()'d as one unit and
+        # swapped for self.evaluation_right_frame while on the Evaluation tab.
+        self.normal_right_frame = ctk.CTkFrame(self.sidebar_right, fg_color="transparent")
+        self.normal_right_frame.pack(fill="both", expand=True, padx=0, pady=0)
+
+        header_frame = ctk.CTkFrame(self.normal_right_frame, fg_color="transparent")
         header_frame.pack(pady=(20, 4), padx=20, fill="x")
 
         self.right_header = ctk.CTkLabel(header_frame, text="Detected Holes", font=ctk.CTkFont(size=16, weight="bold"))
@@ -386,7 +406,7 @@ class UIManager:
         self.lbl_selected_count = ctk.CTkLabel(header_frame, text="", font=ctk.CTkFont(size=11), text_color="#3694ED")
         self.lbl_selected_count.pack(side="right")
 
-        self.holes_list_frame = ctk.CTkScrollableFrame(self.sidebar_right, fg_color="transparent")
+        self.holes_list_frame = ctk.CTkScrollableFrame(self.normal_right_frame, fg_color="transparent")
         self.holes_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
     def _refresh_selected_count_label(self):
@@ -401,6 +421,29 @@ class UIManager:
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
         self.btn_clear.configure(state="normal" if is_locked else "disabled")
 
+    # ------------------------------------------------------------------
+    # v12: sidebar swap for the Evaluation tab
+    # ------------------------------------------------------------------
+    def _show_normal_sidebars(self):
+        """คืน sidebar ซ้าย/ขวาปกติ (Upload/Dimensions/View/Probe/G-code panel
+        ซ้าย, Detected Holes ขวา) — เรียกทุกครั้งที่ออกจากแท็บ Evaluation"""
+        if hasattr(self, 'evaluation_left_frame'):
+            self.evaluation_left_frame.pack_forget()
+        if hasattr(self, 'evaluation_right_frame'):
+            self.evaluation_right_frame.pack_forget()
+        self._left_scroll.pack(fill="both", expand=True, padx=0, pady=0)
+        self.normal_right_frame.pack(fill="both", expand=True, padx=0, pady=0)
+
+    def _show_evaluation_sidebars(self):
+        """สลับ sidebar ซ้าย/ขวาเป็นชุดของแท็บ Evaluation (§4, §5 ของแผน)
+        และรีเฟรชทั้งสองแผงให้ตรงกับ state ล่าสุดทุกครั้งที่เข้าแท็บนี้"""
+        self._left_scroll.pack_forget()
+        self.normal_right_frame.pack_forget()
+        self.evaluation_left_frame.pack(fill="both", expand=True, padx=0, pady=0)
+        self.evaluation_right_frame.pack(fill="both", expand=True, padx=0, pady=0)
+        self.evaluation_left_panel.refresh()
+        self.evaluation_sidebar_panel.refresh()
+
     def on_nav_change(self, selected_tab):
         if selected_tab == "Customization":
             if not self.holes_detected or len(self.current_holes) == 0:
@@ -408,14 +451,32 @@ class UIManager:
                 self.nav_selector.set(self.current_tab)
                 return
 
+        if selected_tab == "Evaluation":
+            # v12: same style of gating as Customization above — STEP + holes
+            # required, since Evaluation compares real probes against expected
+            # points computed from the current STEP hole/segment configuration.
+            if self.geo.mesh is None or self.geo.step_data is None:
+                _mb.showwarning("ไม่มีไฟล์ STEP", "กรุณาโหลดไฟล์ STEP ก่อนใช้งานแท็บ Evaluation")
+                self.nav_selector.set(self.current_tab)
+                return
+            if not self.holes_detected or len(self.current_holes) == 0:
+                _mb.showwarning("ไม่พบรูในโมเดล", "กรุณากด 'Generate Holes' ก่อนใช้งานแท็บ Evaluation")
+                self.nav_selector.set(self.current_tab)
+                return
+
         self.selection_tab.clear_pins()
         self.current_tab = selected_tab
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
 
-        if selected_tab == "Customization":
+        if selected_tab in ("Customization", "Evaluation"):
             self.btn_reset.configure(state="disabled")
         else:
             self.btn_reset.configure(state="normal" if self.geo.mesh is not None else "disabled")
+
+        if selected_tab == "Evaluation":
+            self._show_evaluation_sidebars()
+        else:
+            self._show_normal_sidebars()
 
         if selected_tab == "Selection":
             self.fig.clf()
@@ -428,6 +489,8 @@ class UIManager:
             self.customization_tab.draw_cross_section()
         elif selected_tab == "Path Mapper":
             self.path_mapper_tab.draw_path_mapper()
+        elif selected_tab == "Evaluation":
+            self.evaluation_tab.draw_evaluation()
 
     def show(self):
         self.root.mainloop()
@@ -443,11 +506,20 @@ class UIManager:
             _mb.showerror("Unsupported File", str(e))
             return
 
+        # v12: track the loaded STEP file so the Evaluation left panel can
+        # display it — was previously discarded right after load_file().
+        self.loaded_step_filepath = filepath
+        self.loaded_step_filename = os.path.basename(filepath)
+
         self.screen_rotation   = 0
         self.holes_detected    = False
         self.current_holes     = []
         self.selected_hole_idx = None
         self.inspection_selected_holes = []
+        # v12: a fresh STEP load invalidates any previous evaluation run
+        # (expected points would no longer correspond to this model).
+        self.evaluation_result    = None
+        self.last_export_snapshot = None
         self._set_view_controls_locked(False)
         self.nav_selector.set("Selection")
         self.on_nav_change("Selection")
@@ -766,6 +838,12 @@ class UIManager:
                 self.customization_tab.highlight_hole(gi)
             elif self.current_tab == "Path Mapper":
                 self.path_mapper_tab.highlight_hole(gi)
+            elif self.current_tab == "Evaluation":
+                # v12: inert in practice — the normal right sidebar these
+                # cards live in is hidden while on the Evaluation tab (see
+                # _show_evaluation_sidebars()) — kept for consistency/
+                # future-proofing only.
+                self.evaluation_tab.highlight_hole(gi)
 
         def leave_selected(e):
             if self.current_tab == "Selection":
@@ -774,6 +852,8 @@ class UIManager:
                 self.customization_tab.clear_hole_highlight()
             elif self.current_tab == "Path Mapper":
                 self.path_mapper_tab.clear_hole_highlight()
+            elif self.current_tab == "Evaluation":
+                self.evaluation_tab.clear_hole_highlight()
 
         self._bind_hover_recursive(item_frame, enter_selected, leave_selected)
 
