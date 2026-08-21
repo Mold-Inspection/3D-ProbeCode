@@ -1,5 +1,34 @@
 # core/gcode_generator.py
-# VERSION: 04
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   FEATURE (PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §7-§9,
+#   step 1): extracted build_point_map(holes, view_name) as a public
+#   function — the single source of truth for "what points does this set
+#   of holes/segments/layers produce, in what order", reused by BOTH
+#   generate_gcode() (as its returned point_map, 3rd tuple element) and
+#   the new Evaluation tab (core/evaluation_left_panel.py calls it
+#   directly to compute EXPECTED probe points to compare against a
+#   parsed .log file — see core/evaluation_engine.py).
+#   NO CHANGE to the emitted .gcode TEXT: the G38.2/G0/G91 emission loop
+#   inside generate_gcode() is untouched byte-for-byte. Only the 3rd
+#   return value's construction changed — it used to be built inline
+#   inside that loop (schema: hole_id/layer_idx(1-based)/point_idx(1-
+#   based)/expected_x,y,z INCLUDING settings.overtravel, i.e. the
+#   *commanded* G38.2 target); it is now produced by build_point_map(),
+#   called once up front on the ORIGINAL (pre-transform) `holes` +
+#   `view_name` — same inputs Evaluation will use — with a slightly
+#   different schema (0-based layer_idx/point_idx, added seg_idx, and
+#   x/y/z are the pure wall-contact GEOMETRY point — center + radius,
+#   no overtravel/backoff, since those are G-code safety-margin concepts
+#   that don't belong in a comparison against where the workpiece
+#   surface actually is). Nothing previously consumed generate_gcode()'s
+#   point_map return value (core/gcode_export_panel.py discards it), so
+#   this schema change carries no behavior change for existing callers.
+#   Ordering is guaranteed identical between the two because both the
+#   G-code emission loop and build_point_map() independently derive the
+#   same deterministic order from the same inputs (transform_hole_
+#   feature_for_machining -> split_step_ready -> order_holes_nearest_
+#   neighbor -> per-hole _raw_layers_for_hole() -> per-layer angle scan).
 import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
 
@@ -142,6 +171,66 @@ def _raw_layers_for_hole(hole_feature):
     return layers
 
 # ---------------------------------------------------------------------
+def build_point_map(holes, view_name: str) -> list:
+    """คำนวณรายการจุดที่ "คาดหวังว่าจะถูกโพรบสัมผัส" (expected probe touch
+    points) แบบเรียงลำดับเดียวกับที่ generate_gcode() จะยิงคำสั่ง G38.2
+    ออกมาเป๊ะ ๆ (รู nearest-neighbor -> segment -> layer -> มุมจุดในชั้น)
+    — ไม่ต้องพึ่ง GCodeSettings (safe_z/overtravel/backoff/feedrate) เลย
+    เพราะค่าพวกนี้เป็นแค่ margin ด้านความปลอดภัยตอนเขียน G-code ไม่ใช่
+    ส่วนหนึ่งของตำแหน่งผิวชิ้นงานจริงตาม geometry — ให้ x/y/z ในผลลัพธ์เป็น
+    จุดสัมผัสผนังรูจริง (จุดศูนย์กลาง + รัศมี ณ ชั้นนั้น) ตรงกับตำแหน่งที่
+    ผิวชิ้นงานควรอยู่ตาม STEP
+
+    ใช้ร่วมกันโดย:
+      - generate_gcode() ด้านล่าง (เป็น point_map ที่ return กลับไป)
+      - ui/evaluation_left_panel.py (เป็นฝั่ง EXPECTED ของการเทียบกับไฟล์
+        .log จาก OpenBuilds Control — ดู core/evaluation_engine.py::
+        evaluate_points() และ PLAN_evaluation-tab-openbuilds-log-
+        comparison_v02.md §3)
+
+    Parameters
+    ----------
+    holes     : list ของ HoleFeature "ต้นฉบับ" (ยังไม่ผ่าน view transform) —
+                เดียวกับที่ส่งเข้า generate_gcode()
+    view_name : ชื่อมุมมองที่ใช้ตอน export/ประเมินผล (กำหนดทิศทางพลิก
+                ชิ้นงานผ่าน apply_view_transform() — ต้องตรงกับตอน export จริง)
+
+    Returns
+    -------
+    list ของ dict เรียงตามลำดับที่จะถูกโพรบจริง แต่ละอันมี:
+      hole_id   : hole.display_id ของรูนั้น (ตอนคำนวณ point map)
+      seg_idx   : ลำดับ segment ภายในรู (0 ถ้าเป็นรูปกติ segment เดียว)
+      layer_idx : ลำดับ layer ภายใน segment (0-based)
+      point_idx : ลำดับจุดภายใน layer (0-based)
+      x, y, z   : พิกัดจุดสัมผัสผนังรูที่คาดหวัง (mm)
+    """
+    transformed_holes = [transform_hole_feature_for_machining(h, view_name) for h in holes]
+    valid, _skipped = split_step_ready(transformed_holes)
+    ordered = order_holes_nearest_neighbor(valid)
+
+    point_map = []
+    for hole in ordered:
+        for lyr in _raw_layers_for_hole(hole):
+            c, r      = lyr['center'], lyr['radius']
+            u, v      = lyr['u'], lyr['v']
+            offset, n = lyr['angle_offset'], lyr['points_n']
+            seg_idx   = lyr.get('seg_idx', 0)
+
+            angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
+            for pt_i, a in enumerate(angles):
+                radial = np.cos(a) * u + np.sin(a) * v
+                pt     = c + r * radial   # จุดสัมผัสผนังจริง — ไม่รวม overtravel
+                point_map.append({
+                    'hole_id':   getattr(hole, 'display_id', '?'),
+                    'seg_idx':   int(seg_idx),
+                    'layer_idx': int(lyr['layer_idx']),
+                    'point_idx': int(pt_i),
+                    'x': float(pt[0]), 'y': float(pt[1]), 'z': float(pt[2]),
+                })
+    return point_map
+
+
+# ---------------------------------------------------------------------
 # เพิ่มอาร์กิวเมนต์ view_name เข้ามาในฟังก์ชันหลัก
 def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str = "Top"):
     """
@@ -153,8 +242,15 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     valid, skipped = split_step_ready(transformed_holes)
     ordered = order_holes_nearest_neighbor(valid)
 
+    # v05: point_map is now produced by build_point_map() — called on the
+    # same ORIGINAL (pre-transform) `holes` + `view_name` used above, so it
+    # is guaranteed to walk holes/segments/layers/points in the exact same
+    # order as the G-code emission loop below (see build_point_map()'s
+    # docstring for why that's safe). The .gcode TEXT emitted below is
+    # completely unchanged from v04.
+    point_map = build_point_map(holes, view_name)
+
     lines = []
-    point_map = [] 
 
     lines.append("; ============================================")
     lines.append(f"; 3D ProbeCode - GRBL Probe Program (View: {view_name})")
@@ -210,15 +306,6 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
                 lines.append(f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} "
                              f"Z{target[2]:.3f} F{settings.probe_feedrate:.0f} "
                              f"; point {pt_i + 1}/{n} — touch")
-                
-                point_map.append({
-                    "hole_id": getattr(hole, 'display_id', '?'),
-                    "layer_idx": lyr['layer_idx'] + 1,
-                    "point_idx": pt_i + 1,
-                    "expected_x": round(target[0], 3),
-                    "expected_y": round(target[1], 3),
-                    "expected_z": round(target[2], 3)
-                })
 
                 lines.append("G91")
                 lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f} ; pull-off from wall")

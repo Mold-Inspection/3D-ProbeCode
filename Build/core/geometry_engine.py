@@ -14,7 +14,7 @@ import numpy as np
 
 from core.cad_loader import CADLoader
 from core.projector import Projector
-from core.step_extractor import StepExtractor
+from core.step_extractor01 import StepExtractor
 from core.path_planner import PathPlanner
 
 
