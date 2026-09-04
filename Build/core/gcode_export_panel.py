@@ -1,51 +1,45 @@
-# ui/gcode_export_panel.py
-# VERSION: 03
-# CHANGE LOG (v02 -> v03):
-#   FEATURE (PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §6 —
-#   stale-settings guard): after a successful export, capture a snapshot
-#   of the hole/segment inspection settings that were actually used to
-#   produce this G-code — see new _capture_export_snapshot(). Stored
-#   in-memory as app.last_export_snapshot (compared later by the
-#   Evaluation tab against the CURRENT configuration, so the user is
-#   warned if they change layers/points/zigzag/segment-selection after
-#   exporting but before loading the matching .log file) and written
-#   best-effort to a sidecar "<gcode_name>.snapshot.json" next to the
-#   saved .gcode file, so the guard can optionally be restored across an
-#   app restart via the Evaluation left panel's "Load export snapshot"
-#   button. Uses core/evaluation_engine.py::build_settings_snapshot(),
-#   imported lazily and guarded — a missing/failing snapshot must never
-#   affect the export that already succeeded (see _capture_export_
-#   snapshot()'s docstring).
+# core/gcode_export_panel.py
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   FEATURE (PLAN_toolbar-and-settings-dialogs_v01.md): rebuilt as a
+#   floating VS Code-style dialog (ui/settings_dialog_base.py) instead of
+#   an inline collapsible panel in the left sidebar — opened from the new
+#   top toolbar's "G-code Export" icon (ui/tool_bar.py) via
+#   ui/main_window.py v14, rather than built directly into
+#   self._left_scroll. Single category ("Export Settings") since there's
+#   only one group of fields here — kept a category list anyway for
+#   visual consistency with the Hardware Setting dialog (PLAN §3, open
+#   question 3, resolved: dual category list).
+#   NO CHANGE to _read_settings()/_on_export()/_suggest_safe_z()/
+#   _capture_export_snapshot() logic — same validation, same
+#   generate_gcode()/suggest_safe_z() calls, same snapshot capture. Only
+#   the container changed: _build_fields(parent) now populates a
+#   SettingsDialogBase category frame instead of a self._body collapsible
+#   CTkFrame. _toggle_panel()/self._expanded/self._header_frame/the
+#   icon-swapped collapse header from v04 are removed (dialogs open/close
+#   instead of expand/collapse — no header icon needed here anymore).
 import os
 import json
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
 from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z
+from ui.settings_dialog_base import SettingsDialogBase
 
 
 class GCodeExportPanel:
     def __init__(self, app):
         self.app = app
-        self._expanded = False
+        self.dialog = SettingsDialogBase(app.root, title="G-code Export (GRBL)")
+        self.dialog.add_category("export", "Export Settings", self._build_fields)
+        self._entries = {}
 
     # ------------------------------------------------------------------
-    def build(self, parent):
-        header_frame = ctk.CTkFrame(parent, fg_color="#1a1a2e", corner_radius=6)
-        header_frame.pack(pady=(10, 0), padx=12, fill="x")
-        self._header_frame = header_frame   # v02: keep ref so dropdown can anchor after it
+    def show(self):
+        self.dialog.show()
 
-        self._toggle_btn = ctk.CTkButton(
-            header_frame, text="🖨 G-code Export (GRBL)  ▸",
-            fg_color="transparent", hover_color="#2a2a4e", anchor="w",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color="#90caf9", command=self._toggle_panel,
-        )
-        self._toggle_btn.pack(fill="x", padx=4, pady=6)
-
-        self._body = ctk.CTkFrame(parent, fg_color="#12122a", corner_radius=6)
-
-        self._entries = {}
+    # ------------------------------------------------------------------
+    def _build_fields(self, parent):
         fields = [
             ("safe_z",          "Safe Z (mm):",             ""),
             ("entry_clearance", "Entry Clearance (mm):",    "2.0"),
@@ -54,13 +48,13 @@ class GCodeExportPanel:
             ("backoff",         "Back-off (mm):",           "1.2"),
         ]
         for key, label, default in fields:
-            row = ctk.CTkFrame(self._body, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=(8, 0))
-            ctk.CTkLabel(row, text=label, font=ctk.CTkFont(size=12),
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(row, text=label, font=ctk.CTkFont(size=13),
                         text_color="#b0bec5").pack(anchor="w")
             entry_row = ctk.CTkFrame(row, fg_color="transparent")
             entry_row.pack(fill="x", pady=(4, 0))
-            entry = ctk.CTkEntry(entry_row, width=110, height=28,
+            entry = ctk.CTkEntry(entry_row, width=120, height=30,
                                  placeholder_text=default or "e.g. 50.0",
                                  font=ctk.CTkFont(size=13))
             if default:
@@ -69,27 +63,17 @@ class GCodeExportPanel:
             self._entries[key] = entry
 
             if key == "safe_z":
-                ctk.CTkButton(entry_row, text="↻ Suggest", width=80, height=28,
+                ctk.CTkButton(entry_row, text="↻ Suggest", width=90, height=30,
                              fg_color="#37474f", hover_color="#546e7a",
                              font=ctk.CTkFont(size=11),
                              command=self._suggest_safe_z).pack(side="left", padx=(8, 0))
 
-        ctk.CTkFrame(self._body, height=1, fg_color="#2a2a4e").pack(fill="x", padx=14, pady=(12, 6))
+        ctk.CTkFrame(parent, height=1, fg_color="#2a2a4e").pack(fill="x", pady=(6, 14))
 
-        self._btn_export = ctk.CTkButton(
-            self._body, text="🖨 Export G-code", fg_color="#1565c0", hover_color="#1976d2",
-            font=ctk.CTkFont(size=12, weight="bold"), height=32, command=self._on_export)
-        self._btn_export.pack(fill="x", padx=14, pady=(0, 12))
-
-    # ------------------------------------------------------------------
-    def _toggle_panel(self):
-        self._expanded = not self._expanded
-        if self._expanded:
-            self._body.pack(pady=(0, 10), padx=12, fill="x", after=self._header_frame)
-            self._toggle_btn.configure(text="🖨 G-code Export (GRBL)  ▾")
-        else:
-            self._body.pack_forget()
-            self._toggle_btn.configure(text="🖨 G-code Export (GRBL)  ▸")
+        ctk.CTkButton(
+            parent, text="🖨 Export G-code", fg_color="#1565c0", hover_color="#1976d2",
+            font=ctk.CTkFont(size=13, weight="bold"), height=34,
+            command=self._on_export).pack(fill="x")
 
     # ------------------------------------------------------------------
     def _suggest_safe_z(self):
@@ -97,15 +81,13 @@ class GCodeExportPanel:
         if app.geo.mesh is None:
             _mb.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
             return
-            
-        # ดึงมุมมองปัจจุบันเพื่อส่งไปคำนวณ Safe Z ให้ล้อตามความหนาในด้านนั้นๆ
+
         view_name = "Top"
         if hasattr(app, 'current_view'):
             view_name = app.current_view
-            
-        # เรียกคำนวณค่า Z ที่ปลอดภัย โดยอิงจากการหมุนแกน
+
         z = suggest_safe_z(app.geo.mesh, margin=10.0, view_name=view_name)
-        
+
         self._entries["safe_z"].delete(0, "end")
         self._entries["safe_z"].insert(0, f"{z:.2f}")
 
@@ -145,17 +127,15 @@ class GCodeExportPanel:
         if settings is None:
             return
 
-        # ดึงชื่อมุมมองปัจจุบันจาก UI เพื่อส่งไปจำลองการพลิกชิ้นงาน
         view_name = "Top"
         if hasattr(app, 'current_view'):
             view_name = app.current_view
         elif hasattr(app, 'view_name'):
             view_name = app.view_name
-        elif hasattr(app, 'view_combobox'): 
+        elif hasattr(app, 'view_combobox'):
             view_name = app.view_combobox.get()
 
         try:
-            # เพิ่มการส่ง view_name เข้าไปในฟังก์ชัน
             gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name)
         except Exception as e:
             _mb.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
@@ -180,26 +160,16 @@ class GCodeExportPanel:
             _mb.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
-        # v03: §6 stale-settings guard — remember what was actually exported
         self._capture_export_snapshot(selected, view_name, filepath)
 
         _mb.showinfo("Export Complete", f"บันทึก G-code แล้ว:\n{filepath}")
 
     # ------------------------------------------------------------------
     def _capture_export_snapshot(self, selected_holes, view_name, gcode_filepath):
-        """v03: หลัง export สำเร็จ — จับภาพค่าตั้งค่าการตรวจสอบ (layers/
-        points_per_layer/zigzag/segment-selection) ของรูที่เพิ่ง export ไป
-        ทั้งแบบเก็บใน memory (app.last_export_snapshot — ใช้เทียบได้ทันที
-        ถ้ายังอยู่ session เดิม) และเขียนเป็นไฟล์ sidecar
-        "<ชื่อ .gcode>.snapshot.json" ไว้ข้าง ๆ ไฟล์ .gcode (best-effort —
-        ใช้กู้คืนการ์ดเตือนนี้ได้แม้ปิดโปรแกรมไปแล้ว ผ่านปุ่ม "Load export
-        snapshot" ใน ui/evaluation_left_panel.py)
-
-        สำคัญ: ฟังก์ชันนี้ต้องไม่มีทางทำให้การ export ที่เพิ่งสำเร็จไปแล้ว
-        (ไฟล์ .gcode ถูกเขียนและบันทึกเรียบร้อยแล้วก่อนจะมาถึงจุดนี้) ล้มเหลว
-        หรือแสดง error กวนใจผู้ใช้ — ทุกความล้มเหลวที่นี่เงียบ (แค่ print
-        แจ้งใน console) เพราะ snapshot เป็นแค่ฟีเจอร์เสริม ไม่ใช่ส่วนหลักของ
-        การ export"""
+        """หลัง export สำเร็จ — จับภาพค่าตั้งค่าการตรวจสอบของรูที่เพิ่ง
+        export ไป ทั้งแบบเก็บใน memory (app.last_export_snapshot) และเขียน
+        เป็นไฟล์ sidecar "<ชื่อ .gcode>.snapshot.json" (best-effort) —
+        ความล้มเหลวที่นี่ต้องไม่กระทบการ export ที่สำเร็จไปแล้ว"""
         app = self.app
         try:
             from core.evaluation_engine import build_settings_snapshot
