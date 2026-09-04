@@ -1,11 +1,6 @@
 # ==============================================================================
 # ui/main_window.py — หน้าต่างหลักของโปรแกรม (UIManager)
 # ==============================================================================
-# หน้าที่หลัก: สร้างหน้าต่างโปรแกรม, Sidebar ซ้าย (ควบคุมมุมมอง/Probe Profile),
-# Sidebar ขวา (รายการรูที่ตรวจพบ), และแท็บกลาง (Selection / Customization /
-# Path Mapper — ไฟล์ใน ui/tabs/) รวมถึงจัดการ state ของรูทั้งหมด
-# (เลือกรู, ตั้งค่า layers/points/zigzag ต่อรู, สลับมุมมอง ฯลฯ)
-#
 # ตัวแปรสำคัญที่ปรับจูนได้:
 #   root.geometry(...)      = ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล)
 #   sidebar_left width       = ความกว้าง Sidebar ซ้าย (แถบควบคุม)
@@ -16,83 +11,57 @@
 #   Points/Layer options      = ตัวเลือกจำนวนจุดตรวจสอบต่อชั้นที่ผู้ใช้เลือกได้
 #   zigzag degree min/max      = ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า (ค่าเริ่มต้น 1–180°)
 #   self.probe_profile        = ค่าเริ่มต้นหัวโพรบ กำหนดจริงใน core/probe_profile.py
+#   self.machine_profile      = ค่าเริ่มต้นพื้นที่ทำงานเครื่อง กำหนดจริงใน core/machine_profile.py
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 12
-# CHANGE LOG (v11 -> v12):
-#   FEATURE: New "Evaluation" tab (PLAN_evaluation-tab-openbuilds-log-
-#   comparison_v02.md) — compares real probe touches from an OpenBuilds
-#   Control .log file against expected points computed from the current
-#   STEP hole/segment configuration. This change only wires the UI layer:
-#     - Added "Evaluation" entry to nav_selector, with the same kind of
-#       gating on_nav_change() already does for "Customization" (requires
-#       a STEP file with step_data AND holes_detected==True), reverting
-#       nav_selector back to the previous tab with a warning dialog if not.
-#     - Both sidebars can now be swapped out entirely while on the
-#       Evaluation tab: the normal left sidebar (self._left_scroll) and
-#       normal right sidebar (new wrapper self.normal_right_frame — see
-#       _setup_right_sidebar()) are pack_forget()'d and replaced by
-#       self.evaluation_left_frame / self.evaluation_right_frame, built by
-#       the new ui/evaluation_left_panel.py::EvaluationLeftPanel and
-#       ui/evaluation_sidebar_panel.py::EvaluationSidebarPanel. New helpers
-#       _show_normal_sidebars() / _show_evaluation_sidebars() do the swap;
-#       switching back to any other tab restores the normal sidebars
-#       exactly as before (no behavior change to Selection/Customization/
-#       Path Mapper).
-#     - New state on UIManager: self.loaded_step_filepath /
-#       self.loaded_step_filename (set in open_file_dialog(), needed by
-#       the Evaluation left panel's "STEP File" readout — previously
-#       discarded after use), self.evaluation_result (None until a .log
-#       is loaded — see ui/tabs/evaluation_tab.py's docstring for the
-#       expected contract), self.evaluation_tolerance_mm (default 0.5,
-#       shared between the left/right evaluation panels), and
-#       self.last_export_snapshot (None here — populated by
-#       core/gcode_export_panel.py in a later change per §6 of the plan;
-#       left panel handles the "no in-session snapshot" case gracefully
-#       via its optional "Load export snapshot (.json)" button).
-#     - Instantiated self.evaluation_tab / self.evaluation_left_panel /
-#       self.evaluation_sidebar_panel. All three new UI files
-#       (ui/tabs/evaluation_tab.py, ui/evaluation_left_panel.py,
-#       ui/evaluation_sidebar_panel.py) reference core/log_parser.py and
-#       core/evaluation_engine.py, which do not exist yet per the plan's
-#       implementation order — they import those modules lazily (only
-#       when the user actually presses "Load .log"/"Apply tolerance") and
-#       fail gracefully with an info dialog rather than crashing the app,
-#       so the UI is fully testable before the backend/core files land.
-#     - open_file_dialog() now also resets self.evaluation_result and
-#       self.last_export_snapshot to None on a new STEP load (a fresh
-#       model invalidates any previous evaluation).
-#     - _build_selected_item()'s hover binding gained an "Evaluation"
-#       branch (mirrors the existing Selection/Customization/Path Mapper
-#       branches) for consistency, though it's inert in practice since
-#       the normal right sidebar those cards live in is hidden while on
-#       the Evaluation tab.
+# VERSION: 14
+# CHANGE LOG (v12 -> v14):
+#   NOTE: the v13 that PLAN_toolbar-and-settings-dialogs_v01.md refers to
+#   (icon-swap of btn_rotate/btn_reset/Probe header per
+#   core/gcode_export_panel.py v04's own changelog) was not available as
+#   source when this version was written — this diff is taken directly
+#   against v12. That's not a problem in practice: btn_rotate, btn_reset,
+#   and the entire Probe Stylus collapsible panel are REMOVED from the
+#   sidebar in this version (moved to the toolbar / Hardware Setting
+#   dialog), so whatever icon-swap v13 did to them is superseded here.
 #
-# CHANGE LOG (v10 -> v11):
-#   FIX: Unchecking a hole's inspection checkbox used to repaint that
-#   card's resting color IMMEDIATELY on the next click of any other
-#   card — because the reset loop in on_hole_select() recomputed the
-#   resting color live from hole.selected_for_inspection /
-#   _hole_tab_default_color() every time. That meant a card visually
-#   flipped to black the instant you clicked elsewhere, BEFORE the user
-#   ever pressed "✅ Apply Selection" — not the intended behavior.
-#   Now every card's resting color is decided ONCE at build time
-#   (_build_selected_item / _build_unselected_item) and stored in
-#   widgets['resting_color']. on_hole_select()'s reset loop and its
-#   select/deselect branches now read that stored value instead of
-#   recomputing it live — so a card's color only actually changes when
-#   update_treeview() rebuilds the list, which only happens after
-#   "Apply Selection" is pressed (_refresh_after_inspection_toggle) or
-#   another state-changing rebuild (view change, hole regen, etc).
-#   FIX: An unselected (unchecked) hole's resting color is now always
-#   flat black (#1f1f1f), ignoring any size/probe warning it may carry
-#   — previously _build_unselected_item already used a fixed color for
-#   the button itself, but the reset loop in on_hole_select() special-
-#   cased "still selected_for_inspection" holes to recompute a warning
-#   color live, which is the exact bug being fixed here. Unselected
-#   cards now consistently show #1f1f1f until Apply is pressed and they
-#   either get rebuilt as selected (colored) or stay unselected (black).
+#   FEATURE (PLAN_toolbar-and-settings-dialogs_v01.md): new full-width
+#   top toolbar (ui/tool_bar.py, Thonny-style, icon-only) sits above the
+#   existing 3-pane row. Layout restructured: sidebar_left / center_frame
+#   / sidebar_right now pack into a new self.main_body frame instead of
+#   directly into self.root, with self.tool_bar packed above main_body.
+#   This is purely mechanical — no behavior change to anything already
+#   inside those three panes.
+#
+#   REMOVED from left sidebar: btn_rotate, btn_reset (now toolbar icon
+#   buttons calling the SAME self.rotate_screen / self.reset_position
+#   handlers — no behavior change), the entire collapsible "Probe Stylus
+#   Profile" panel (_setup_probe_profile_panel/_toggle_probe_panel/
+#   _probe_summary_text/_apply_probe_profile/_reset_probe_profile — moved
+#   verbatim into ui/hardware_setting_dialog.py's "Probe Stylus"
+#   category), and the collapsible "G-code Export" panel
+#   (_setup_gcode_export_panel — core/gcode_export_panel.py v05 now opens
+#   as a dialog instead of building inline into self._left_scroll).
+#   Upload, Generate Holes, Clear & Unlock, and the 6 view-direction
+#   buttons are untouched.
+#
+#   NEW: self.machine_profile = MachineProfile() — instantiated here for
+#   the first time; previously core/machine_profile.py existed but had no
+#   UI consumer anywhere in the app. Consumed by the new "Machine Working
+#   Area" category in ui/hardware_setting_dialog.py.
+#
+#   NEW: self.hardware_setting_dialog (ui/hardware_setting_dialog.py) and
+#   self.gcode_export_panel (core/gcode_export_panel.py v05) are now
+#   instantiated directly in __init__ instead of via
+#   _setup_gcode_export_panel()/inline sidebar build — both are opened by
+#   self.tool_bar's icon buttons via .show().
+#
+#   FIX: _set_view_controls_locked() and on_nav_change() now reference
+#   self.tool_bar.btn_rotate / self.tool_bar.btn_reset instead of
+#   self.btn_rotate / self.btn_reset (which no longer exist on UIManager
+#   — those buttons live on ToolBar now). Same enable/disable behavior,
+#   just re-pointed at the new button location.
 # ==============================================================================
 import os
 import customtkinter as ctk
@@ -104,6 +73,7 @@ from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 from core.models import HoleFeature, HoleSegmentSetting, validate_segment_reachability
 from core.probe_profile import ProbeProfile
+from core.machine_profile import MachineProfile
 from ui.tabs.selection_tab import SelectionTab
 from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
@@ -111,6 +81,8 @@ from ui.tabs.evaluation_tab import EvaluationTab
 from ui.evaluation_left_panel import EvaluationLeftPanel
 from ui.evaluation_sidebar_panel import EvaluationSidebarPanel
 from core.gcode_export_panel import GCodeExportPanel
+from ui.tool_bar import ToolBar
+from ui.hardware_setting_dialog import HardwareSettingDialog
 
 
 def _build_segment_settings(sh) -> list:
@@ -145,7 +117,8 @@ class UIManager:
         self.hole_widgets  = {}
         self._visible_hole_map  = {}
 
-        self.probe_profile = ProbeProfile()
+        self.probe_profile   = ProbeProfile()
+        self.machine_profile = MachineProfile()   # v14: previously unused — now consumed by hardware_setting_dialog.py
         self.inspection_selected_holes = []
 
         # v12: Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
@@ -153,7 +126,7 @@ class UIManager:
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel
         self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
         self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
-        self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด (§6 ของแผน) — ยังไม่ถูกเขียนโดยไฟล์นี้
+        self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด — เขียนโดย core/gcode_export_panel.py
 
         self.selection_tab     = SelectionTab(self)
         self.customization_tab = CustomizationTab(self)
@@ -164,14 +137,24 @@ class UIManager:
         self.root.title("3D ProbeCode")
         self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง พิกเซล) — ปรับได้
 
-        self.sidebar_left = ctk.CTkFrame(self.root, width=300, corner_radius=0)   # ความกว้าง sidebar ซ้าย — ปรับได้
+        # v14: full-width toolbar (Thonny-style) pinned above the 3-pane row
+        self.tool_bar = ToolBar(self)
+        self.tool_bar.pack(fill="x", side="top")
+
+        # v14: sidebar_left / center_frame / sidebar_right now live inside
+        # main_body instead of directly in root — mechanical re-parent only,
+        # no behavior change to what's inside each pane.
+        self.main_body = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
+        self.main_body.pack(fill="both", expand=True, side="top")
+
+        self.sidebar_left = ctk.CTkFrame(self.main_body, width=300, corner_radius=0)   # ความกว้าง sidebar ซ้าย — ปรับได้
         self.sidebar_left.pack(side="left", fill="y")
 
-        self.sidebar_right = ctk.CTkFrame(self.root, width=430, corner_radius=0, fg_color="#181818")   # ความกว้าง sidebar ขวา — ปรับได้
+        self.sidebar_right = ctk.CTkFrame(self.main_body, width=430, corner_radius=0, fg_color="#181818")   # ความกว้าง sidebar ขวา — ปรับได้
         self.sidebar_right.pack_propagate(False)
         self.sidebar_right.pack(side="right", fill="y")
 
-        self.center_frame = ctk.CTkFrame(self.root, corner_radius=0, fg_color="#242424")
+        self.center_frame = ctk.CTkFrame(self.main_body, corner_radius=0, fg_color="#242424")
         self.center_frame.pack(side="left", fill="both", expand=True)
 
         self.top_bar = ctk.CTkFrame(self.center_frame, fg_color="transparent", height=50)
@@ -211,6 +194,11 @@ class UIManager:
         self._setup_left_sidebar()
         self._setup_right_sidebar()
         self.selection_tab.setup_events()
+
+        # v14: floating dialogs opened from the toolbar (replaces the old
+        # inline sidebar panels for Probe Stylus / G-code Export).
+        self.hardware_setting_dialog = HardwareSettingDialog(self)
+        self.gcode_export_panel      = GCodeExportPanel(self)
 
         # v12: Evaluation tab's own sidebars — built as siblings of the
         # normal sidebar content (self._left_scroll / self.normal_right_frame)
@@ -264,15 +252,10 @@ class UIManager:
 
         ctk.CTkLabel(self._left_scroll, text="--- View Controls ---", text_color="gray").pack(pady=(20, 5))
 
-        self.btn_rotate = ctk.CTkButton(
-            self._left_scroll, text="⟳ Rotate 90°",
-            fg_color="#0277bd", hover_color="#039be5", command=self.rotate_screen)
-        self.btn_rotate.pack(pady=10, padx=20, fill="x")
-
-        self.btn_reset = ctk.CTkButton(
-            self._left_scroll, text="⌂ Reset Position",
-            fg_color="#d84315", hover_color="#bf360c", command=self.reset_position)
-        self.btn_reset.pack(pady=(0, 10), padx=20, fill="x")
+        # v14: Rotate 90° / Reset Position moved to the top toolbar
+        # (ui/tool_bar.py — self.tool_bar.btn_rotate / .btn_reset) —
+        # same self.rotate_screen / self.reset_position handlers, no
+        # behavior change, just a different button location.
 
         view_frame = ctk.CTkFrame(self._left_scroll, fg_color="transparent")
         view_frame.pack(pady=10, padx=20, fill="x")
@@ -288,107 +271,9 @@ class UIManager:
             btn.grid(row=row, column=col, padx=5, pady=5)
             self.view_buttons[name] = btn
 
-        self._setup_probe_profile_panel()
-        self._setup_gcode_export_panel()
-
-    def _setup_probe_profile_panel(self):
-        probe_header_frame = ctk.CTkFrame(self._left_scroll, fg_color="#1a1a2e", corner_radius=6)
-        probe_header_frame.pack(pady=(18, 0), padx=12, fill="x")
-        self._probe_header_frame = probe_header_frame   # v07: keep ref so dropdown can anchor after it
-
-        self._probe_panel_expanded = False
-
-        self._probe_toggle_btn = ctk.CTkButton(
-            probe_header_frame, text="🔩 Probe Stylus Profile  ▸",
-            fg_color="transparent", hover_color="#2a2a4e", anchor="w", font=ctk.CTkFont(size=13, weight="bold"),
-            text_color="#90caf9", command=self._toggle_probe_panel,
-        )
-        self._probe_toggle_btn.pack(fill="x", padx=4, pady=6)
-
-        self._probe_body = ctk.CTkFrame(self._left_scroll, fg_color="#12122a", corner_radius=6)
-
-        len_row = ctk.CTkFrame(self._probe_body, fg_color="transparent")
-        len_row.pack(fill="x", padx=14, pady=(12, 4))
-        ctk.CTkLabel(len_row, text="Stylus Length (mm):", font=ctk.CTkFont(size=12), text_color="#b0bec5").pack(anchor="w")
-        len_entry_row = ctk.CTkFrame(len_row, fg_color="transparent")
-        len_entry_row.pack(fill="x", pady=(4, 0))
-        self._probe_length_entry = ctk.CTkEntry(len_entry_row, width=90, height=28, placeholder_text="50.0", font=ctk.CTkFont(size=13))
-        self._probe_length_entry.insert(0, str(self.probe_profile.stylus_length))
-        self._probe_length_entry.pack(side="left")
-        ctk.CTkLabel(len_entry_row, text="mm", font=ctk.CTkFont(size=11), text_color="#78909c").pack(side="left", padx=(6, 0))
-
-        tip_row = ctk.CTkFrame(self._probe_body, fg_color="transparent")
-        tip_row.pack(fill="x", padx=14, pady=(6, 4))
-        ctk.CTkLabel(tip_row, text="Tip Diameter ⌀ (mm):", font=ctk.CTkFont(size=12), text_color="#b0bec5").pack(anchor="w")
-        tip_entry_row = ctk.CTkFrame(tip_row, fg_color="transparent")
-        tip_entry_row.pack(fill="x", pady=(4, 0))
-        self._probe_tip_entry = ctk.CTkEntry(tip_entry_row, width=90, height=28, placeholder_text="2.0", font=ctk.CTkFont(size=13))
-        self._probe_tip_entry.insert(0, str(self.probe_profile.tip_diameter))
-        self._probe_tip_entry.pack(side="left")
-        ctk.CTkLabel(tip_entry_row, text="mm", font=ctk.CTkFont(size=11), text_color="#78909c").pack(side="left", padx=(6, 0))
-
-        ctk.CTkFrame(self._probe_body, height=1, fg_color="#2a2a4e").pack(fill="x", padx=14, pady=(10, 6))
-
-        self._btn_apply_probe = ctk.CTkButton(
-            self._probe_body, text="✔ Apply Profile", fg_color="#1565c0", hover_color="#1976d2",
-            font=ctk.CTkFont(size=12, weight="bold"), height=30, command=self._apply_probe_profile)
-        self._btn_apply_probe.pack(fill="x", padx=14, pady=(0, 6))
-
-        self._btn_reset_probe = ctk.CTkButton(
-            self._probe_body, text="↺ Reset to Default", fg_color="#37474f", hover_color="#546e7a",
-            font=ctk.CTkFont(size=11), height=26, command=self._reset_probe_profile)
-        self._btn_reset_probe.pack(fill="x", padx=14, pady=(0, 10))
-
-        self._lbl_probe_summary = ctk.CTkLabel(
-            self._probe_body, text=self._probe_summary_text(), font=ctk.CTkFont(size=10), text_color="#546e7a", justify="left")
-        self._lbl_probe_summary.pack(anchor="w", padx=14, pady=(0, 10))
-
-    def _setup_gcode_export_panel(self):
-        self.gcode_export_panel = GCodeExportPanel(self)
-        self.gcode_export_panel.build(self._left_scroll)
-
-    def _toggle_probe_panel(self):
-        self._probe_panel_expanded = not self._probe_panel_expanded
-        if self._probe_panel_expanded:
-            # v07 FIX: anchor with after=self._probe_header_frame so this dropdown
-            # always appears directly under ITS OWN header, regardless of what
-            # else has been packed/toggled elsewhere in the sidebar since.
-            self._probe_body.pack(pady=(0, 10), padx=12, fill="x", after=self._probe_header_frame)
-            self._probe_toggle_btn.configure(text="🔩 Probe Stylus Profile  ▾")
-        else:
-            self._probe_body.pack_forget()
-            self._probe_toggle_btn.configure(text="🔩 Probe Stylus Profile  ▸")
-
-    def _probe_summary_text(self) -> str:
-        return (f"  Length : {self.probe_profile.stylus_length:.1f} mm\n"
-                f"  Tip ⌀  : {self.probe_profile.tip_diameter:.1f} mm  (r = {self.probe_profile.tip_radius:.2f} mm)")
-
-    def _apply_probe_profile(self):
-        try:
-            new_length = float(self._probe_length_entry.get().strip())
-            if new_length <= 0: raise ValueError("ความยาวต้องมากกว่า 0")
-            new_tip_d = float(self._probe_tip_entry.get().strip())
-            if new_tip_d <= 0: raise ValueError("เส้นผ่าศูนย์กลางต้องมากกว่า 0")
-        except ValueError as e:
-            _mb.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
-            return
-
-        self.probe_profile.stylus_length = new_length
-        self.probe_profile.tip_diameter  = new_tip_d
-        self._lbl_probe_summary.configure(text=self._probe_summary_text())
-        if self.holes_detected and self.current_holes:
-            self.update_treeview(self.current_holes)
-
-    def _reset_probe_profile(self):
-        self.probe_profile.stylus_length = self.probe_profile.DEFAULT_LENGTH
-        self.probe_profile.tip_diameter  = self.probe_profile.DEFAULT_TIP_D
-        self._probe_length_entry.delete(0, "end")
-        self._probe_length_entry.insert(0, str(self.probe_profile.stylus_length))
-        self._probe_tip_entry.delete(0, "end")
-        self._probe_tip_entry.insert(0, str(self.probe_profile.tip_diameter))
-        self._lbl_probe_summary.configure(text=self._probe_summary_text())
-        if self.holes_detected and self.current_holes:
-            self.update_treeview(self.current_holes)
+        # v14: Probe Stylus panel + G-code Export panel removed from here —
+        # moved to ui/hardware_setting_dialog.py and core/gcode_export_panel.py
+        # v05 respectively, both opened from self.tool_bar as floating dialogs.
 
     def _setup_right_sidebar(self):
         # v12: wrapped in normal_right_frame so the whole "Detected Holes"
@@ -415,9 +300,9 @@ class UIManager:
 
     def _set_view_controls_locked(self, is_locked):
         rotate_state = "disabled" if is_locked else "normal"
-        self.btn_rotate.configure(state=rotate_state)
+        self.tool_bar.btn_rotate.configure(state=rotate_state)   # v14: was self.btn_rotate
         for btn in self.view_buttons.values(): btn.configure(state=rotate_state)
-        self.btn_reset.configure(state="normal")
+        self.tool_bar.btn_reset.configure(state="normal")        # v14: was self.btn_reset
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
         self.btn_clear.configure(state="normal" if is_locked else "disabled")
 
@@ -425,8 +310,8 @@ class UIManager:
     # v12: sidebar swap for the Evaluation tab
     # ------------------------------------------------------------------
     def _show_normal_sidebars(self):
-        """คืน sidebar ซ้าย/ขวาปกติ (Upload/Dimensions/View/Probe/G-code panel
-        ซ้าย, Detected Holes ขวา) — เรียกทุกครั้งที่ออกจากแท็บ Evaluation"""
+        """คืน sidebar ซ้าย/ขวาปกติ (Upload/Dimensions/View ซ้าย, Detected
+        Holes ขวา) — เรียกทุกครั้งที่ออกจากแท็บ Evaluation"""
         if hasattr(self, 'evaluation_left_frame'):
             self.evaluation_left_frame.pack_forget()
         if hasattr(self, 'evaluation_right_frame'):
@@ -452,9 +337,6 @@ class UIManager:
                 return
 
         if selected_tab == "Evaluation":
-            # v12: same style of gating as Customization above — STEP + holes
-            # required, since Evaluation compares real probes against expected
-            # points computed from the current STEP hole/segment configuration.
             if self.geo.mesh is None or self.geo.step_data is None:
                 _mb.showwarning("ไม่มีไฟล์ STEP", "กรุณาโหลดไฟล์ STEP ก่อนใช้งานแท็บ Evaluation")
                 self.nav_selector.set(self.current_tab)
@@ -469,9 +351,9 @@ class UIManager:
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
 
         if selected_tab in ("Customization", "Evaluation"):
-            self.btn_reset.configure(state="disabled")
+            self.tool_bar.btn_reset.configure(state="disabled")   # v14: was self.btn_reset
         else:
-            self.btn_reset.configure(state="normal" if self.geo.mesh is not None else "disabled")
+            self.tool_bar.btn_reset.configure(state="normal" if self.geo.mesh is not None else "disabled")
 
         if selected_tab == "Evaluation":
             self._show_evaluation_sidebars()
@@ -506,8 +388,6 @@ class UIManager:
             _mb.showerror("Unsupported File", str(e))
             return
 
-        # v12: track the loaded STEP file so the Evaluation left panel can
-        # display it — was previously discarded right after load_file().
         self.loaded_step_filepath = filepath
         self.loaded_step_filename = os.path.basename(filepath)
 
@@ -516,8 +396,6 @@ class UIManager:
         self.current_holes     = []
         self.selected_hole_idx = None
         self.inspection_selected_holes = []
-        # v12: a fresh STEP load invalidates any previous evaluation run
-        # (expected points would no longer correspond to this model).
         self.evaluation_result    = None
         self.last_export_snapshot = None
         self._set_view_controls_locked(False)
@@ -527,37 +405,34 @@ class UIManager:
         if self.geo.mesh is not None:
             extents = self.geo.get_physical_dimensions()
             self.max_physical_dim = max(extents)
-            # เอาการอัปเดต Label เดิมออก เพราะเราจะไปทำใน _update_dimensions_for_view ตอนเรียก show_view แทน
-            
+
         self.show_view('Top')
 
     def _update_dimensions_for_view(self, view_name):
         """อัปเดต Label ข้อมูลขนาดชิ้นงาน (Width, Length, Thickness) ให้สอดคล้องกับแกนในมุมมองปัจจุบัน"""
         if self.geo.mesh is None:
             return
-            
+
         extents = self.geo.get_physical_dimensions()
         dx, dy, dz = extents[0], extents[1], extents[2]
 
-        # สลับการแสดงผลแกนตามมุมมอง (View)
         if view_name in ['Top', 'Bottom']:
             w_lbl, w_val = "X", dx
             l_lbl, l_val = "Y", dy
             t_lbl, t_val = "Z", dz
         elif view_name in ['Front', 'Back']:
             w_lbl, w_val = "X", dx
-            l_lbl, l_val = "Z", dz  # มองจากด้านหน้า ความสูงบนจอคือแกน Z
-            t_lbl, t_val = "Y", dy  # ความลึก (หนา) เข้าไปในจอคือแกน Y
-        elif view_name in ['Left', 'Right']:
-            w_lbl, w_val = "Y", dy  # มองจากด้านข้าง ความกว้างบนจอคือแกน Y
             l_lbl, l_val = "Z", dz
-            t_lbl, t_val = "X", dx  # ความลึก (หนา) เข้าไปในจอคือแกน X
+            t_lbl, t_val = "Y", dy
+        elif view_name in ['Left', 'Right']:
+            w_lbl, w_val = "Y", dy
+            l_lbl, l_val = "Z", dz
+            t_lbl, t_val = "X", dx
         else:
             w_lbl, w_val = "X", dx
             l_lbl, l_val = "Y", dy
             t_lbl, t_val = "Z", dz
 
-        # อัปเดตข้อความบน UI Sidebar ด้านซ้าย
         self.lbl_width.configure(text=f"Width ({w_lbl}): {w_val:.2f} mm", text_color="white")
         self.lbl_length.configure(text=f"Length ({l_lbl}): {l_val:.2f} mm", text_color="white")
         self.lbl_thick.configure(text=f"Thickness ({t_lbl}): {t_val:.2f} mm", text_color="white")
@@ -566,10 +441,9 @@ class UIManager:
         if self.geo.mesh is None: return
         if view_name != self.current_view: self.selection_tab.clear_pins()
         self.current_view = view_name
-        self.selected_segment_idx = None   # เปลี่ยนมุมมอง = ตำแหน่งรูอาจขยับ ต้องเคลียร์ segment ที่ isolate ไว้
+        self.selected_segment_idx = None
         rot = self.screen_rotation
 
-        # อัปเดต Sidebar Info (Width, Length, Thickness) ตามมุมมองใหม่
         self._update_dimensions_for_view(view_name)
 
         if   view_name == 'Top':    x, y, z_v, z_f, tri = self.geo.get_top_view(rot)
@@ -650,7 +524,7 @@ class UIManager:
         title = f"{view_name} View"
         self.selection_tab.update_plot(x, y, z_v, z_f, tri, title, holes=visible_holes)
         self.update_treeview(self.current_holes)
-        
+
     def on_generate_holes(self):
         if self.geo.mesh is None: return
         rot = self.screen_rotation
@@ -711,37 +585,22 @@ class UIManager:
     def _hole_tab_default_color(self, hole) -> str:
         """สีพื้นหลัง (resting state, ตอนไม่ได้เลือกอยู่) ของการ์ดรู
         เปลี่ยนไปตามระดับ warning ของรูนั้น เรียงลำดับความสำคัญ:
-          1) แดง  — มี segment ที่ขนาดขวางกัน (probe เข้าไปไม่ถึง เพราะรู
-             ด้านบนแคบกว่ารูด้านล่าง) — ดู core/models.py
-             validate_segment_reachability()
-          2) เหลือง — ไม่มีปัญหาเรื่องขนาด segment แต่ probe_profile
-             ตรวจแล้วเข้าไม่ถึง (Probe too short) หรือหัวโพรบใหญ่เกินไป
-             (Tip too large)
+          1) แดง  — มี segment ที่ขนาดขวางกัน
+          2) เหลือง — probe_profile ตรวจแล้วเข้าไม่ถึง
           3) ฟ้า (ค่าเดิม) — ไม่มี warning ใดๆ
-
-        v11 NOTE: this function computes the color a SELECTED hole
-        SHOULD have based on its current warning state. It is only
-        called at card-build time (inside update_treeview()'s rebuild)
-        and its result is frozen into widgets['resting_color'] — it is
-        deliberately NOT called again inside on_hole_select()'s reset
-        loop, so toggling the inspection checkbox can never repaint a
-        card's color before "Apply Selection" triggers a real rebuild.
         แก้ไข hex สี 3 ค่านี้ได้โดยตรงที่นี่"""
         segs = getattr(hole, 'segments', None) or []
         if any(getattr(seg, 'size_warning', '') for seg in segs):
-            return "#b71c1c"   # แดง — ปัญหาเรื่องขนาดรู (bottleneck)
+            return "#b71c1c"
 
         if hasattr(self, 'probe_profile'):
             chk = self.probe_profile.check_hole(hole.depth, hole.radius)
             if not chk['ok']:
-                return "#8a6d00"   # เหลือง (เข้ม เพื่อให้ตัวหนังสือขาวยังอ่านออก) — probe too short / tip too large
+                return "#8a6d00"
 
-        return "#1a3a5c"   # ฟ้า (ค่าเดิม) — ไม่มี warning
+        return "#1a3a5c"
 
     def _lighten_hex(self, hex_color: str, factor: float = 0.38) -> str:
-        """เพิ่มความสว่างของสี hex โดยผสมกับสีขาวตามสัดส่วน factor (0.0–1.0)
-        ใช้ทำสีการ์ดตอน "กำลังเลือกอยู่" จากสี warning เดิม ให้สว่างขึ้นแทนที่
-        จะเปลี่ยนเป็นสีฟ้าที่ไม่เกี่ยวกับ warning เลย — ปรับสัดส่วนความสว่างได้ที่นี่"""
         h = hex_color.lstrip('#')
         r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
         r = int(r + (255 - r) * factor)
@@ -750,10 +609,6 @@ class UIManager:
         return f"#{r:02x}{g:02x}{b:02x}"
 
     def _hole_tab_selected_color(self, hole) -> str:
-        """สีการ์ดรูตอน "กำลังเลือกอยู่" (expanded) — ใช้สี warning เดิมของรู
-        นั้น (แดง/เหลือง/ฟ้า จาก _hole_tab_default_color) แล้วเพิ่มความสว่าง
-        เข้าไป เพื่อให้ยังบ่งบอกระดับ warning ได้ พร้อมกับดูรู้ว่าการ์ดนี้ถูก
-        เลือกอยู่ (ต่างจากการ์ดอื่นที่ยังเป็นสีเข้มปกติ)"""
         return self._lighten_hex(self._hole_tab_default_color(hole))
 
     def update_treeview(self, holes):
@@ -803,10 +658,6 @@ class UIManager:
         header_row = ctk.CTkFrame(item_frame, fg_color="transparent")
         header_row.pack(fill="x")
 
-        # v08: resting-state tab color now reflects this hole's current warning level
-        # v11: computed ONCE here and frozen into widgets['resting_color'] — this
-        # is the single source of truth on_hole_select() reads from later, so a
-        # checkbox toggle alone (before "Apply Selection") can never repaint it.
         default_color = self._hole_tab_default_color(hole)
         widgets['resting_color'] = default_color
         current_color = self._hole_tab_selected_color(hole) if self.selected_hole_idx == idx else default_color
@@ -816,7 +667,7 @@ class UIManager:
         btn_text = f"🎯 Hole {hole.display_id}{folder_tag} [X: {hole.x:.2f}, Y: {hole.y:.2f}] D: {hole.depth:.2f}"
         header_btn = ctk.CTkButton(
             header_row, text=btn_text, anchor="w", fg_color=current_color,
-            hover_color=current_color,   # BUGFIX v09: กัน CTk fallback เป็นสีฟ้า default ตอน hover ค้าง (ดู CHANGE LOG v08->v09)
+            hover_color=current_color,
             command=lambda: self.on_hole_select(idx)
         )
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
@@ -829,8 +680,6 @@ class UIManager:
         )
         chk.pack(side="right")
 
-        # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D), Customization (3D)
-        # และ Path Mapper (overview) — ทุกแท็บแค่ไฮไลต์ ไม่สลับหน้า
         def enter_selected(e, gi=idx):
             if self.current_tab == "Selection":
                 self.selection_tab.highlight_hole(gi)
@@ -839,10 +688,6 @@ class UIManager:
             elif self.current_tab == "Path Mapper":
                 self.path_mapper_tab.highlight_hole(gi)
             elif self.current_tab == "Evaluation":
-                # v12: inert in practice — the normal right sidebar these
-                # cards live in is hidden while on the Evaluation tab (see
-                # _show_evaluation_sidebars()) — kept for consistency/
-                # future-proofing only.
                 self.evaluation_tab.highlight_hole(gi)
 
         def leave_selected(e):
@@ -860,9 +705,6 @@ class UIManager:
         setting_frame = ctk.CTkFrame(item_frame, fg_color="#1c212c", corner_radius=6)
         widgets['settings_frame'] = setting_frame
 
-        # v08: SIZE warning (segment bottleneck — upper hole narrower than
-        # lower one) shown ABOVE the probe-profile warning, always in red,
-        # regardless of the probe check result below it.
         segs_for_warn = getattr(hole, 'segments', None) or []
         size_warnings = [seg.size_warning for seg in segs_for_warn if getattr(seg, 'size_warning', '')]
         if size_warnings:
@@ -876,7 +718,6 @@ class UIManager:
             chk_res = self.probe_profile.check_hole(hole.depth, hole.radius)
             if not chk_res['ok']:
                 warn_text = chk_res['depth_warning'] or chk_res['fit_warning']
-                # สีข้อความแจ้งเตือน probe too short / tip too large — ปรับได้ที่นี่
                 lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color="#eed202", font=("", 11, "bold"))
                 lbl_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
@@ -888,8 +729,7 @@ class UIManager:
             row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row1.pack(fill="x", padx=10, pady=(5,0))
             ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
-            # ตัวเลือกจำนวนชั้นตรวจสอบ (Z-Layers) ใน dropdown — เพิ่ม/ลดตัวเลือกได้
-            opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60, 
+            opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_layers.set(str(hole.layers))
             opt_layers.pack(side="right")
@@ -898,7 +738,6 @@ class UIManager:
             row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row2.pack(fill="x", padx=10, pady=(5,0))
             ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5").pack(side="left")
-            # ตัวเลือกจำนวนจุดตรวจสอบต่อชั้น ใน dropdown — เพิ่ม/ลดตัวเลือกได้
             opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_points.set(str(hole.points_per_layer))
@@ -940,9 +779,6 @@ class UIManager:
                       f"D={cfg.depth:.1f} mm{warn_tag}")
         header_fg = "#22283a" if cfg.selected_for_inspection else "#3a1f1f"
 
-        # pack checkbox FIRST so it always claims its space before the
-        # button's fill="x"+expand="True" eats the row (v07 fix) —
-        # this is the ONLY checkbox widget created in this method
         sel_var = ctk.BooleanVar(value=cfg.selected_for_inspection)
         sel_chk = ctk.CTkCheckBox(
             seg_header, text="", width=22, variable=sel_var,
@@ -1045,7 +881,6 @@ class UIManager:
             self.customization_tab.draw_cross_section()
 
     def _on_segment_inspection_toggle(self, hole_idx, seg_idx, var):
-        """v06: toggle segment เข้า/ออกจาก probe path (Customization/Path Mapper) และ G-code"""
         if hole_idx >= len(self.current_holes): return
         cfg = self.current_holes[hole_idx].segments[seg_idx]
         cfg.selected_for_inspection = var.get()
@@ -1077,7 +912,6 @@ class UIManager:
         widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
         entry   = widgets['degree_entry']
         try:
-            # ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า Zigzag ได้ (ต่ำสุด–สูงสุด) — ปรับได้
             val = max(1.0, min(180.0, float(entry.get().strip())))
         except ValueError:
             val = cfg.zigzag_degree
@@ -1091,7 +925,7 @@ class UIManager:
         if idx not in self.hole_widgets:
             self.hole_widgets[idx] = {'is_expanded': False}
         widgets = self.hole_widgets[idx]
-        
+
         item_frame = ctk.CTkFrame(parent, fg_color="transparent")
         item_frame.pack(fill="x", padx=10, pady=4)
 
@@ -1099,10 +933,6 @@ class UIManager:
         header_row.pack(fill="x")
 
         btn_text = f"Hole {hole.display_id} [X: {hole.x:.2f}, Y: {hole.y:.2f}]"
-        # v11: unselected cards always default to flat black (#1f1f1f),
-        # ignoring any size/probe warning it may carry — was already the
-        # visual here, now also frozen into widgets['resting_color'] so
-        # on_hole_select()'s reset loop can't repaint it to something else.
         header_btn = ctk.CTkButton(
             header_row, text=btn_text, anchor="w",
             fg_color="#1f1f1f", hover_color="#1f1f1f", text_color="#9aa4b2",
@@ -1112,7 +942,6 @@ class UIManager:
         widgets['btn'] = header_btn
         widgets['resting_color'] = "#1f1f1f"
 
-        # v07: pack checkbox FIRST (same fix as _build_selected_item)
         chk_var = ctk.BooleanVar(value=hole.selected_for_inspection)
         chk = ctk.CTkCheckBox(
             header_row, text="", width=24, variable=chk_var,
@@ -1123,7 +952,6 @@ class UIManager:
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
         widgets['btn'] = header_btn
 
-        # เชื่อม hover effect เข้ากับทั้งฝั่ง Selection (2D) และ Customization (3D)
         def enter_unselected(e, gi=idx, h_obj=hole):
             if self.current_tab == "Selection":
                 self.selection_tab.show_unselected_marker(h_obj)
@@ -1158,14 +986,6 @@ class UIManager:
                 h.display_id = f"U{unsel_count}"
 
     def _refresh_after_inspection_toggle(self):
-        """หลังกดยืนยันเลือกรู: จัดเรียงหมายเลขรูใหม่ตามหมวดหมู่ แล้วรีเฟรชกราฟที่กำลังแสดงอยู่
-
-        v11: this is the ONLY place a hole card's resting color is
-        allowed to actually change after a checkbox toggle — it flows
-        into update_treeview() (Customization/Path Mapper tabs) or
-        show_view() (Selection tab), both of which fully rebuild the
-        hole cards via _build_selected_item()/_build_unselected_item(),
-        which freeze a fresh widgets['resting_color'] at build time."""
         self._renumber_holes_by_category()
 
         visible_holes = []
@@ -1208,7 +1028,6 @@ class UIManager:
         hole  = self.current_holes[idx]
         entry = self.hole_widgets[idx]['degree_entry']
         try:
-            # ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า Zigzag ได้ (ต่ำสุด–สูงสุด) — ปรับได้
             val = max(1.0, min(180.0, float(entry.get().strip())))
         except ValueError:
             val = hole.zigzag_degree
@@ -1220,25 +1039,11 @@ class UIManager:
             self.customization_tab.draw_cross_section()
 
     def on_hole_select(self, idx):
-        self.selected_segment_idx = None   # เลือก/ยกเลิกเลือกรูใหม่ ต้องเคลียร์ segment ที่ isolate ไว้เสมอ
+        self.selected_segment_idx = None
         is_deselecting = (self.selected_hole_idx == idx)
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
-            # v11 FIX: read the color FROZEN at card-build time instead of
-            # recomputing it live from hole.selected_for_inspection /
-            # _hole_tab_default_color(). Previously this branch repainted
-            # a hole's card the instant ANY other card was clicked, even
-            # though the user had only toggled the checkbox and not yet
-            # pressed "Apply Selection" — the color would flip to black
-            # early. Now it just restores whatever color the card was
-            # built with, which only changes on a real rebuild
-            # (update_treeview()/show_view(), triggered by Apply).
             default_color = widgets.get('resting_color', "#1f1f1f")
-            # BUGFIX v09: hover_color ต้องตามสี fg_color เสมอ — ไม่งั้น CTk จะ
-            # fallback ไปใช้สีฟ้า default ตอนปุ่มค้าง hover (เกิดตอนกด
-            # dropdown Z-Layers/Points ของการ์ดที่ขยายอยู่ แล้ว popup ของ
-            # CTkOptionMenu ไปแย่ง mouse-release/leave event จากปุ่มการ์ดอื่น
-            # ทำให้ค้างสถานะ hover-blue จนกว่าจะไปกด dropdown อื่นมา resync)
             widgets['btn'].configure(fg_color=default_color, hover_color=default_color)
             if widgets.get('is_expanded') and i != idx:
                 if 'settings_frame' in widgets:
@@ -1249,8 +1054,6 @@ class UIManager:
 
         sel = self.hole_widgets[idx]
         if is_deselecting:
-            # v11: same frozen-color read as the reset loop above — no live
-            # recompute from hole state, just restore the card's own resting color.
             resting_color = sel.get('resting_color', "#1f1f1f")
             sel['btn'].configure(fg_color=resting_color, hover_color=resting_color)
             if sel.get('is_expanded'):
@@ -1259,12 +1062,6 @@ class UIManager:
                 sel['is_expanded'] = False
             self.selected_hole_idx = None
         else:
-            # การ์ดที่กำลังเลือกอยู่: ใช้สี warning เดิม (แดง/เหลือง/ฟ้า) แต่เพิ่ม
-            # ความสว่างเข้าไป — ยังบอกระดับ warning ได้ พร้อมดูออกว่าถูกเลือกอยู่
-            # v11: brighten from the FROZEN resting_color instead of calling
-            # _hole_tab_selected_color(hole) (which internally recomputes
-            # _hole_tab_default_color(hole) live) — keeps this consistent
-            # with the "no repaint until Apply" rule above.
             resting_color  = sel.get('resting_color', "#1f1f1f")
             selected_color = self._lighten_hex(resting_color)
             sel['btn'].configure(fg_color=selected_color, hover_color=selected_color)
@@ -1286,8 +1083,6 @@ class UIManager:
         elif self.current_tab == "Customization":
             self.customization_tab.draw_cross_section()
         elif self.current_tab == "Path Mapper":
-            # v05: click ไม่สลับหน้าใน Path Mapper อีกต่อไป — คง overview เดิม
-            # แค่ไฮไลต์ marker ของรูที่กด (หรือเคลียร์ไฮไลต์ถ้ายกเลิกเลือก)
             if self.selected_hole_idx is not None:
                 self.path_mapper_tab.highlight_hole(self.selected_hole_idx)
             else:
