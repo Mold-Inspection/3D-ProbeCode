@@ -333,10 +333,10 @@ class EvaluationSidebarPanel:
         try:
             from core.evaluation_engine import evaluate_points
         except ImportError as e:
-            _mb.showinfo(
-                "Coming Soon",
+            self.app.notify.show(
                 f"core/evaluation_engine.py ยังไม่พร้อมใช้งาน — ค่า tolerance ถูก"
-                f"บันทึกไว้แล้ว จะถูกใช้ตอนโหลด .log ครั้งถัดไป\n\n({e})")
+                f"บันทึกไว้แล้ว จะถูกใช้ตอนโหลด .log ครั้งถัดไป ({e})",
+                severity="info", duration_ms=6000)
             return
 
         expected_points = result.get('_expected_points')

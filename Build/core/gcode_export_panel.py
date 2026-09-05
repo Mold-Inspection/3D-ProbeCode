@@ -143,9 +143,8 @@ class GCodeExportPanel:
 
         if skipped:
             names = ", ".join(str(getattr(h, 'display_id', '?')) for h in skipped)
-            _mb.showwarning(
-                "Some Holes Skipped",
-                f"ข้ามรู {len(skipped)} รูที่ไม่มีข้อมูล STEP (mesh-only): {names}")
+            app.notify.show(f"ข้ามรู {len(skipped)} รูที่ไม่มีข้อมูล STEP (mesh-only): {names}",
+                    severity="warn")
 
         filepath = ctk.filedialog.asksaveasfilename(
             title="Save G-code", defaultextension=".gcode",
@@ -162,7 +161,7 @@ class GCodeExportPanel:
 
         self._capture_export_snapshot(selected, view_name, filepath)
 
-        _mb.showinfo("Export Complete", f"บันทึก G-code แล้ว:\n{filepath}")
+        app.notify.show(f"บันทึก G-code แล้ว: {filepath}", severity="success")
 
     # ------------------------------------------------------------------
     def _capture_export_snapshot(self, selected_holes, view_name, gcode_filepath):

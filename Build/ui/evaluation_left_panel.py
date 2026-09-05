@@ -235,12 +235,11 @@ class EvaluationLeftPanel:
                 evaluate_points, build_settings_snapshot, diff_snapshots)
             from core.gcode_generator import build_point_map
         except ImportError as e:
-            _mb.showinfo(
-                "Coming Soon",
+            self.app.notify.show(
                 "ยังไม่มีไฟล์คำนวณผล Evaluation ครบ (ต้องมี core/log_parser.py, "
                 "core/evaluation_engine.py, และ core/gcode_generator.py::"
-                "build_point_map() ตาม PLAN §7-§9 ก่อน)\n\n"
-                f"รายละเอียด: {e}")
+                f"build_point_map() ตาม PLAN §7-§9 ก่อน)\n\nรายละเอียด: {e}",
+                severity="info", duration_ms=6000)
             return
 
         try:
@@ -331,4 +330,4 @@ class EvaluationLeftPanel:
             except ImportError:
                 pass   # evaluation_engine not built yet — snapshot still stored for later
 
-        _mb.showinfo("Snapshot Loaded", f"โหลด snapshot แล้ว:\n{os.path.basename(filepath)}")
+        self.app.notify.show(f"โหลด snapshot แล้ว: {os.path.basename(filepath)}", severity="success")
