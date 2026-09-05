@@ -113,9 +113,8 @@ class ToolBar:
         self.frame = ctk.CTkFrame(app.root, fg_color=_COLOR_BG, corner_radius=0,
                                   height=_TOOLBAR_HEIGHT)
         self.frame.pack_propagate(False)
-
-        self.btn_rotate   = self._add_icon_button("rotate", "Rotate 90°",       app.rotate_screen)
         self.btn_reset    = self._add_icon_button("home",   "Reset Position",   app.reset_position)
+        self.btn_rotate   = self._add_icon_button("rotate", "Rotate 90°",       app.rotate_screen)
         self._add_divider()
         self.btn_hardware = self._add_icon_button("gear",   "Hardware Setting", self._open_hardware_setting)
         self.btn_export   = self._add_icon_button("export", "G-code Export",    self._open_gcode_export)

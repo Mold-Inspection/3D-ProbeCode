@@ -83,6 +83,7 @@ from ui.evaluation_sidebar_panel import EvaluationSidebarPanel
 from core.gcode_export_panel import GCodeExportPanel
 from ui.tool_bar import ToolBar
 from ui.hardware_setting_dialog import HardwareSettingDialog
+from core.ui_notify import UINotify
 
 
 def _build_segment_settings(sh) -> list:
@@ -199,7 +200,7 @@ class UIManager:
         # inline sidebar panels for Probe Stylus / G-code Export).
         self.hardware_setting_dialog = HardwareSettingDialog(self)
         self.gcode_export_panel      = GCodeExportPanel(self)
-
+        self.notify = UINotify(self)   # v15: non-blocking toast — see core/ui_notify.py
         # v12: Evaluation tab's own sidebars — built as siblings of the
         # normal sidebar content (self._left_scroll / self.normal_right_frame)
         # so on_nav_change() can pack_forget() one pair and pack() the other.
@@ -488,7 +489,7 @@ class UIManager:
                     x[visible_vert_idx], y[visible_vert_idx], z_v[visible_vert_idx], view_name)
 
             if len(self.current_holes) == 0:
-                _mb.showinfo("No Holes", f"ไม่พบรูในมุมมอง {view_name}")
+                self.notify.show(f"ไม่พบรูในมุมมอง {view_name}", severity="info")
 
             for h in self.current_holes:
                 state = prev_states.get(h.id)
@@ -545,7 +546,7 @@ class UIManager:
                 x[visible_vert_idx], y[visible_vert_idx], z_v[visible_vert_idx], view_name)
 
         if len(candidate_holes) == 0:
-            _mb.showinfo("No Holes Found", f"ไม่พบรูในมุมมอง {view_name}\nลองเปลี่ยน View หรือหมุนโมเดลแล้วลองใหม่อีกครั้ง")
+            self.notify.show(f"ไม่พบรูในมุมมอง {view_name}\nลองเปลี่ยน View หรือหมุนโมเดลแล้วลองใหม่อีกครั้ง", severity="info")
             return
 
         self.holes_detected = True
