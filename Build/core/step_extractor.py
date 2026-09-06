@@ -1,7 +1,37 @@
 # ==============================================================================
 # core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# VERSION: 01
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FIX (PLAN_segment-diameter-direction-fix.md): new helper
+#   _orient_each_segment_to_hole_mouth(h) — forces EVERY individual
+#   segment's own open_3d/radius_open to always be the end that is
+#   closer to the whole hole's true mouth (h.open_3d), and
+#   deep_3d/radius_deep to always be the farther/deeper end — decided
+#   purely by axial projection distance from h.open_3d along h.axis,
+#   independent of whether that segment happens to be the deepest or
+#   shallowest segment of the hole.
+#   Previously only two corrections existed: _orient_segments_by_mesh()
+#   (fixes which end is the mouth for the WHOLE hole, via mesh surface
+#   distance) and _order_segments_deepest_first() (fixes the LIST INDEX
+#   order so segments[0] = deepest) — neither of these guaranteed that
+#   a given segment's OWN open_3d/deep_3d labels pointed mouth-ward vs
+#   deep-ward consistently with its neighbors. That gap is why the
+#   Customization tab's per-segment diameter label
+#   (⌀radius_open*2 → ⌀radius_deep*2) could show two adjacent segments
+#   both displaying the SAME value as their "open" (mouth-side) figure,
+#   even though physically that shared value is one segment's mouth-side
+#   boundary and the other segment's deep-side boundary at the same
+#   junction point — i.e. the diameters looked discontinuous / hard to
+#   read. Called right after _order_segments_deepest_first(h) for every
+#   hole in extract(). Downstream consumers (path_planner.py,
+#   gcode_generator.py) already re-sort/re-derive layer order and
+#   min/max bounds independently of per-segment open/deep labeling, so
+#   this fix does not change probe path point sets or G-code travel —
+#   only makes the displayed/underlying open->deep radius direction of
+#   each segment consistent and physically continuous across the hole.
+# ==============================================================================
+# VERSION: 01 (superseded by v02 above — kept for history)
 # CHANGE LOG (no marker -> v01):
 #   FEATURE (Fix 1 of PLAN_segment-order-and-rotation-fixes.md): new helper
 #   _order_segments_deepest_first(h) — always re-sorts h.segments so index 0
@@ -249,7 +279,11 @@ def _order_segments_deepest_first(h):
     h.open_3d ที่สุดตามแกน h.axis) และ index สุดท้าย = segment ที่ตื้นที่สุด
     (ปากรู) โดยไม่พึ่งพา mesh — ใช้ระยะ projection ตามแกนรู เทียบกับ h.open_3d
     ที่ถูกกำหนดไว้แล้วในระดับรูทั้งก้อน (มาจาก _merge_counterbores /
-    _orient_segments_by_mesh) ทำงานเสมอไม่ว่าจะมี mesh หรือไม่"""
+    _orient_segments_by_mesh) ทำงานเสมอไม่ว่าจะมี mesh หรือไม่
+
+    หมายเหตุ: ฟังก์ชันนี้จัดแค่ "ลำดับ index ใน list" เท่านั้น ไม่ได้แก้ทิศ
+    open/deep ภายในแต่ละ segment เอง — ดู _orient_each_segment_to_hole_mouth()
+    (v02) สำหรับส่วนนั้น"""
     if not h.segments or len(h.segments) < 2:
         return
     axis = np.array(h.axis, dtype=float)
@@ -262,6 +296,40 @@ def _order_segments_deepest_first(h):
     h.segments.sort(key=_proj_depth, reverse=True)   # largest projected distance = deepest -> index 0
     _dbg(f"  SEGMENT ORDER: sorted {len(h.segments)} segment(s) deepest-first "
          f"(index 0 = deepest, index {len(h.segments)-1} = mouth)")
+
+def _orient_each_segment_to_hole_mouth(h):
+    """v02 (PLAN_segment-diameter-direction-fix.md): บังคับให้ seg.open_3d /
+    seg.radius_open ของ "ทุก" segment อยู่ฝั่งที่ใกล้ปากรูจริงของทั้งรู
+    (h.open_3d) เสมอ และ seg.deep_3d / seg.radius_deep คือฝั่งตรงข้าม (ลึกเข้า
+    ไปในรูมากกว่า) — ตัดสินด้วยระยะ projection ตามแกน h.axis เทียบกับ
+    h.open_3d ทำงานเป็นรายตัว ไม่ขึ้นกับว่า segment นั้นเป็น segment ที่ลึกสุด
+    หรือตื้นสุดของทั้งรู (ต่างจาก _order_segments_deepest_first ที่จัดแค่
+    "ลำดับ index ใน list" เท่านั้น)
+
+    เหตุผลที่ต้องมีฟังก์ชันนี้: ก่อนหน้านี้แต่ละ segment สืบทอดทิศ open/deep
+    ของตัวเองมาจากตอน extract แบบดิบ (อิงทิศทางที่เจอ circle ก่อน-หลัง ไม่ผูก
+    กับปากรูจริง) ทำให้ segment ที่ติดกัน 2 อัน อาจแสดงไดอามิเตอร์ฝั่ง "open"
+    เป็นค่าเดียวกัน ทั้งที่ควรเป็นคนละฝั่งของรอยต่อ (ฝั่ง deep ของ segment ที่
+    ตื้นกว่า ต้อง = ฝั่ง open ของ segment ที่ลึกกว่าที่ติดกัน) — แก้ที่นี่ทำให้
+    ไดอามิเตอร์ที่แสดงต่อเนื่องกันจริงตลอดความลึกของรู"""
+    if not h.segments:
+        return
+    axis = np.array(h.axis, dtype=float)
+    ref  = np.array(h.open_3d, dtype=float)
+
+    flipped = 0
+    for seg in h.segments:
+        d_open = float(np.dot(np.array(seg.open_3d) - ref, axis))
+        d_deep = float(np.dot(np.array(seg.deep_3d) - ref, axis))
+        if d_open > d_deep:
+            # open_3d ปัจจุบันอยู่ "ลึกกว่า" deep_3d เมื่อเทียบกับปากรูจริง -> ผิดทิศ ต้องสลับ
+            seg.open_3d, seg.deep_3d         = seg.deep_3d, seg.open_3d
+            seg.radius_open, seg.radius_deep = seg.radius_deep, seg.radius_open
+            flipped += 1
+
+    if flipped:
+        _dbg(f"  SEGMENT MOUTH-ORIENT: flipped open/deep on {flipped}/{len(h.segments)} "
+             f"segment(s) so radius_open always faces the hole's true mouth")
 
 class StepExtractor:
     def __init__(self):
@@ -582,7 +650,8 @@ class StepExtractor:
         holes = _merge_counterbores(holes)
         for h in holes:
             _orient_segments_by_mesh(h, mesh)
-            _order_segments_deepest_first(h)   # v01: always run — mesh-independent, keeps segments[0] = deepest
+            _order_segments_deepest_first(h)          # v01: always run — mesh-independent, keeps segments[0] = deepest
+            _orient_each_segment_to_hole_mouth(h)      # v02: always run — keeps radius_open facing the hole's true mouth per segment
 
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)}")

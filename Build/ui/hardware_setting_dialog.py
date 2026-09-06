@@ -2,7 +2,32 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 01
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 3):
+#   two new fields added, one per category, both wired into their
+#   existing all-or-nothing Apply/Reset validation pattern — no new
+#   pattern introduced:
+#     - Probe Stylus: "Stylus Holder Height (mm)" — new row bound to
+#       core/probe_profile.py v02's `stylus_holder_height` field, placed
+#       ABOVE the existing "Stylus Length" row (physically the holder
+#       sits above the rod, closer to the Z-axis). Wired into
+#       _apply_probe_profile() / _reset_probe_profile() /
+#       _probe_summary_text().
+#     - Machine Working Area: "Machine Z Height (mm)" — new 4th row,
+#       placed AFTER the existing X/Y/Z Travel rows, bound to
+#       core/machine_profile.py v02's `z_height` field. Wired into
+#       _apply_machine_profile() / _reset_machine_profile() /
+#       _machine_summary_text().
+#   Both new fields use the exact same validation rule as their siblings
+#   (must be > 0, all-or-nothing — if any field in the category is
+#   invalid, NONE of that category's fields are applied).
+#   Reworded the "Reference only for now..." helper label under Machine
+#   Working Area: it is no longer fully accurate now that z_height feeds
+#   a real calculation (core/gcode_generator.py v06's
+#   suggest_padding_height(), wired up in Step 4/5 of the same plan) —
+#   now explicitly says only X/Y/Z Travel remain reference-only.
+# ==============================================================================
 # หน้าที่: ย้าย Probe Stylus Profile panel (เดิมอยู่ใน sidebar ซ้าย ผ่าน
 # ui/main_window.py::_setup_probe_profile_panel()) มาไว้เป็นหมวดหนึ่งใน
 # dialog นี้ พร้อมเพิ่มหมวดใหม่ "Machine Working Area" ที่ผูกกับ
@@ -18,7 +43,7 @@
 # ตรรกะ Apply/Reset ของทั้งสองหมวด — Probe Stylus เหมือนของเดิมทุกประการ
 # (all-or-nothing validation, ถ้าฟิลด์ใดพังทั้งคู่จะไม่ถูก apply) แค่ย้าย
 # container; Machine Working Area เป็นของใหม่ทั้งหมด (มี validation แบบ
-# เดียวกัน: X/Y/Z travel ต้อง > 0 ทุกค่าถึงจะ apply)
+# เดียวกัน: X/Y/Z travel + Z Height ต้อง > 0 ทุกค่าถึงจะ apply — v02)
 # ==============================================================================
 import customtkinter as ctk
 import tkinter.messagebox as _mb
@@ -34,6 +59,7 @@ class HardwareSettingDialog:
         self.dialog.add_category("probe",   "Probe Stylus",         self._build_probe_fields)
         self.dialog.add_category("machine", "Machine Working Area", self._build_machine_fields)
 
+        self._probe_holder_entry = None   # v02 — Stylus Holder Height
         self._probe_length_entry = None
         self._probe_tip_entry    = None
         self._lbl_probe_summary  = None
@@ -41,6 +67,7 @@ class HardwareSettingDialog:
         self._machine_x_entry     = None
         self._machine_y_entry     = None
         self._machine_z_entry     = None
+        self._machine_zh_entry    = None   # v02 — Machine Z Height
         self._lbl_machine_summary = None
 
     # ------------------------------------------------------------------
@@ -53,6 +80,21 @@ class HardwareSettingDialog:
     # ==================================================================
     def _build_probe_fields(self, parent):
         app = self.app
+
+        # v02: Stylus Holder Height — placed above Stylus Length since the
+        # holder physically sits between the Z-axis carriage and the rod.
+        holder_row = ctk.CTkFrame(parent, fg_color="transparent")
+        holder_row.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(holder_row, text="Stylus Holder Height (mm):", font=ctk.CTkFont(size=13),
+                    text_color="#b0bec5").pack(anchor="w")
+        holder_entry_row = ctk.CTkFrame(holder_row, fg_color="transparent")
+        holder_entry_row.pack(fill="x", pady=(4, 0))
+        self._probe_holder_entry = ctk.CTkEntry(holder_entry_row, width=110, height=30,
+                                                 placeholder_text="20.0", font=ctk.CTkFont(size=13))
+        self._probe_holder_entry.insert(0, str(app.probe_profile.stylus_holder_height))
+        self._probe_holder_entry.pack(side="left")
+        ctk.CTkLabel(holder_entry_row, text="mm", font=ctk.CTkFont(size=11),
+                    text_color="#78909c").pack(side="left", padx=(6, 0))
 
         len_row = ctk.CTkFrame(parent, fg_color="transparent")
         len_row.pack(fill="x", pady=(0, 10))
@@ -98,12 +140,15 @@ class HardwareSettingDialog:
 
     def _probe_summary_text(self) -> str:
         p = self.app.probe_profile
-        return (f"Length : {p.stylus_length:.1f} mm\n"
+        return (f"Holder : {p.stylus_holder_height:.1f} mm\n"   # v02
+                f"Length : {p.stylus_length:.1f} mm\n"
                 f"Tip ⌀  : {p.tip_diameter:.1f} mm  (r = {p.tip_radius:.2f} mm)")
 
     def _apply_probe_profile(self):
         app = self.app
         try:
+            new_holder = float(self._probe_holder_entry.get().strip())   # v02
+            if new_holder <= 0: raise ValueError("ความสูงตัวจับต้องมากกว่า 0")
             new_length = float(self._probe_length_entry.get().strip())
             if new_length <= 0: raise ValueError("ความยาวต้องมากกว่า 0")
             new_tip_d = float(self._probe_tip_entry.get().strip())
@@ -112,6 +157,7 @@ class HardwareSettingDialog:
             _mb.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
             return
 
+        app.probe_profile.stylus_holder_height = new_holder   # v02
         app.probe_profile.stylus_length = new_length
         app.probe_profile.tip_diameter  = new_tip_d
         if self._lbl_probe_summary is not None:
@@ -121,8 +167,12 @@ class HardwareSettingDialog:
 
     def _reset_probe_profile(self):
         app = self.app
+        app.probe_profile.stylus_holder_height = app.probe_profile.DEFAULT_HOLDER_HEIGHT   # v02
         app.probe_profile.stylus_length = app.probe_profile.DEFAULT_LENGTH
         app.probe_profile.tip_diameter  = app.probe_profile.DEFAULT_TIP_D
+        if self._probe_holder_entry is not None:   # v02
+            self._probe_holder_entry.delete(0, "end")
+            self._probe_holder_entry.insert(0, str(app.probe_profile.stylus_holder_height))
         if self._probe_length_entry is not None:
             self._probe_length_entry.delete(0, "end")
             self._probe_length_entry.insert(0, str(app.probe_profile.stylus_length))
@@ -135,8 +185,7 @@ class HardwareSettingDialog:
             app.update_treeview(app.current_holes)
 
     # ==================================================================
-    # Machine Working Area category (NEW — wires up core/machine_profile.py,
-    # which existed but had no UI consumer before this dialog)
+    # Machine Working Area category (wires up core/machine_profile.py)
     # ==================================================================
     def _build_machine_fields(self, parent):
         app = self.app
@@ -159,6 +208,19 @@ class HardwareSettingDialog:
                         text_color="#78909c").pack(side="left", padx=(6, 0))
             setattr(self, entry_attr, entry)
 
+        # v02: Machine Z Height — 4th row, after X/Y/Z Travel.
+        zh_row = ctk.CTkFrame(parent, fg_color="transparent")
+        zh_row.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(zh_row, text="Machine Z Height (mm):", font=ctk.CTkFont(size=13),
+                    text_color="#b0bec5").pack(anchor="w")
+        zh_entry_row = ctk.CTkFrame(zh_row, fg_color="transparent")
+        zh_entry_row.pack(fill="x", pady=(4, 0))
+        self._machine_zh_entry = ctk.CTkEntry(zh_entry_row, width=110, height=30, font=ctk.CTkFont(size=13))
+        self._machine_zh_entry.insert(0, str(app.machine_profile.z_height))
+        self._machine_zh_entry.pack(side="left")
+        ctk.CTkLabel(zh_entry_row, text="mm", font=ctk.CTkFont(size=11),
+                    text_color="#78909c").pack(side="left", padx=(6, 0))
+
         ctk.CTkFrame(parent, height=1, fg_color="#2a2a4e").pack(fill="x", pady=(6, 14))
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -175,15 +237,21 @@ class HardwareSettingDialog:
             text_color="#546e7a", justify="left")
         self._lbl_machine_summary.pack(anchor="w", pady=(14, 0))
 
+        # v02: reworded — Machine Z Height now feeds
+        # core/gcode_generator.py::suggest_padding_height(), so it is no
+        # longer accurate to call the whole category "reference only".
         ctk.CTkLabel(
-            parent, text="Reference only for now — not yet used to block or\n"
-                         "warn about out-of-range probe moves.",
+            parent, text="X/Y/Z Travel are reference only for now — not yet\n"
+                         "used to block or warn about out-of-range probe moves.\n"
+                         "Machine Z Height IS used — see G-code Export's\n"
+                         "Padding Height suggestion.",
             font=ctk.CTkFont(size=10), text_color="#5a6570", justify="left"
         ).pack(anchor="w", pady=(10, 0))
 
     def _machine_summary_text(self) -> str:
         m = self.app.machine_profile
-        return f"X : {m.x_travel:.1f} mm   Y : {m.y_travel:.1f} mm   Z : {m.z_travel:.1f} mm"
+        return (f"X : {m.x_travel:.1f} mm   Y : {m.y_travel:.1f} mm   Z : {m.z_travel:.1f} mm\n"
+                f"Z Height : {m.z_height:.1f} mm")   # v02
 
     def _apply_machine_profile(self):
         app = self.app
@@ -194,6 +262,8 @@ class HardwareSettingDialog:
             if new_y <= 0: raise ValueError("Y travel ต้องมากกว่า 0")
             new_z = float(self._machine_z_entry.get().strip())
             if new_z <= 0: raise ValueError("Z travel ต้องมากกว่า 0")
+            new_zh = float(self._machine_zh_entry.get().strip())   # v02
+            if new_zh <= 0: raise ValueError("Machine Z Height ต้องมากกว่า 0")
         except ValueError as e:
             _mb.showerror("Invalid Input", f"Machine profile ไม่ถูกต้อง:\n{e}")
             return
@@ -201,6 +271,7 @@ class HardwareSettingDialog:
         app.machine_profile.x_travel = new_x
         app.machine_profile.y_travel = new_y
         app.machine_profile.z_travel = new_z
+        app.machine_profile.z_height = new_zh   # v02
         if self._lbl_machine_summary is not None:
             self._lbl_machine_summary.configure(text=self._machine_summary_text())
 
@@ -209,11 +280,14 @@ class HardwareSettingDialog:
         app.machine_profile.x_travel = app.machine_profile.DEFAULT_X
         app.machine_profile.y_travel = app.machine_profile.DEFAULT_Y
         app.machine_profile.z_travel = app.machine_profile.DEFAULT_Z
+        app.machine_profile.z_height = app.machine_profile.DEFAULT_Z_HEIGHT   # v02
         if self._machine_x_entry is not None:
             self._machine_x_entry.delete(0, "end"); self._machine_x_entry.insert(0, str(app.machine_profile.x_travel))
         if self._machine_y_entry is not None:
             self._machine_y_entry.delete(0, "end"); self._machine_y_entry.insert(0, str(app.machine_profile.y_travel))
         if self._machine_z_entry is not None:
             self._machine_z_entry.delete(0, "end"); self._machine_z_entry.insert(0, str(app.machine_profile.z_travel))
+        if self._machine_zh_entry is not None:   # v02
+            self._machine_zh_entry.delete(0, "end"); self._machine_zh_entry.insert(0, str(app.machine_profile.z_height))
         if self._lbl_machine_summary is not None:
             self._lbl_machine_summary.configure(text=self._machine_summary_text())

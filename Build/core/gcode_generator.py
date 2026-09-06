@@ -1,34 +1,33 @@
 # core/gcode_generator.py
-# VERSION: 05
-# CHANGE LOG (v04 -> v05):
-#   FEATURE (PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §7-§9,
-#   step 1): extracted build_point_map(holes, view_name) as a public
-#   function — the single source of truth for "what points does this set
-#   of holes/segments/layers produce, in what order", reused by BOTH
-#   generate_gcode() (as its returned point_map, 3rd tuple element) and
-#   the new Evaluation tab (core/evaluation_left_panel.py calls it
-#   directly to compute EXPECTED probe points to compare against a
-#   parsed .log file — see core/evaluation_engine.py).
-#   NO CHANGE to the emitted .gcode TEXT: the G38.2/G0/G91 emission loop
-#   inside generate_gcode() is untouched byte-for-byte. Only the 3rd
-#   return value's construction changed — it used to be built inline
-#   inside that loop (schema: hole_id/layer_idx(1-based)/point_idx(1-
-#   based)/expected_x,y,z INCLUDING settings.overtravel, i.e. the
-#   *commanded* G38.2 target); it is now produced by build_point_map(),
-#   called once up front on the ORIGINAL (pre-transform) `holes` +
-#   `view_name` — same inputs Evaluation will use — with a slightly
-#   different schema (0-based layer_idx/point_idx, added seg_idx, and
-#   x/y/z are the pure wall-contact GEOMETRY point — center + radius,
-#   no overtravel/backoff, since those are G-code safety-margin concepts
-#   that don't belong in a comparison against where the workpiece
-#   surface actually is). Nothing previously consumed generate_gcode()'s
-#   point_map return value (core/gcode_export_panel.py discards it), so
-#   this schema change carries no behavior change for existing callers.
-#   Ordering is guaranteed identical between the two because both the
-#   G-code emission loop and build_point_map() independently derive the
-#   same deterministic order from the same inputs (transform_hole_
-#   feature_for_machining -> split_step_ready -> order_holes_nearest_
-#   neighbor -> per-hole _raw_layers_for_hole() -> per-layer angle scan).
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 4):
+#   new function suggest_padding_height(machine_profile, probe_profile) —
+#   computes a suggested riser/padding height (mm) to place under the
+#   workpiece so the probe tip can physically reach it within the
+#   machine's downward Z travel range. Formula (see PLAN doc for full
+#   derivation from the machine's physical layout):
+#     tip_clearance_at_top   = z_height - stylus_holder_height - stylus_length
+#     tip_position_at_bottom = tip_clearance_at_top - z_travel
+#     suggested_padding      = max(0.0, tip_position_at_bottom)
+#   Reads core/machine_profile.py v02's new `z_height` field together with
+#   core/probe_profile.py v02's new `stylus_holder_height` field (both
+#   added earlier in the same plan) and the existing `stylus_length` /
+#   `z_travel`. Pure function, no side effects — mirrors suggest_safe_z()
+#   in shape/spirit (a "propose a good default from known geometry"
+#   helper), but reads machine/probe PROFILES instead of mesh geometry.
+#   No fail-safe / bounds validation here by explicit instruction (e.g.
+#   no warning if the result would exceed z_height) — deferred to a
+#   future phase.
+#
+#   FEATURE: GCodeSettings gained a new `padding_height: float = 0.0`
+#   field (optional — defaults to "no padding assumed" so existing
+#   callers/tests that don't pass it are unaffected). generate_gcode()'s
+#   header comment block now always reports the padding value assumed
+#   for that export, e.g.:
+#     "; NOTE: assumes workpiece is raised by 12.50 mm padding (riser plate)"
+#   This is comment-only — no change to any coordinate math, G38.2
+#   targets, or point_map output. build_point_map() is untouched.
 import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
 
@@ -38,12 +37,13 @@ class GCodeSettings:
     """Plain settings container consumed by generate_gcode()."""
     def __init__(self, safe_z: float, entry_clearance: float = 2.0,
                  probe_feedrate: float = 100.0, overtravel: float = 0.8,
-                 backoff: float = 1.2):
+                 backoff: float = 1.2, padding_height: float = 0.0):
         self.safe_z          = float(safe_z)
         self.entry_clearance = float(entry_clearance)
         self.probe_feedrate  = float(probe_feedrate)
         self.overtravel      = float(overtravel)
         self.backoff         = float(backoff)
+        self.padding_height  = float(padding_height)   # v06 — riser height assumed under the workpiece (mm), informational only
 
 def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top") -> float:
     """
@@ -67,6 +67,37 @@ def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top") -> float:
     max_z = max(c[2] for c in transformed_corners)
     
     return float(max_z) + margin
+
+# ---------------------------------------------------------------------
+# v06: เสนอค่า Padding Height ใต้ชิ้นงาน จากข้อมูล machine/probe profile
+# ---------------------------------------------------------------------
+def suggest_padding_height(machine_profile, probe_profile) -> float:
+    """คำนวณความสูง padding (แผ่นรอง) พื้นฐานที่ควรใช้ใต้ชิ้นงาน โดยเทียบ
+    ระยะที่ปลายโพรบจะไปถึง ณ จุดต่ำสุดของการเดินแกน Z กับพื้น — ถ้าปลายโพรบ
+    ยังลอยอยู่เหนือพื้นแม้ Z จะเดินลงมาสุดระยะ (z_travel) แล้ว ระยะที่เหลือ
+    นั้นคือความสูง padding ที่ต้องรองใต้ชิ้นงานเพื่อให้ปลายโพรบไปถึงผิวงานได้
+    ไม่มีการตรวจสอบ fail-safe ใด ๆ ในฟังก์ชันนี้ (เช่น ไม่เตือนถ้า padding
+    ที่แนะนำมากเกินกว่า z_height จะรองรับได้จริง) — ตามคำสั่งชัดเจนว่ายังไม่
+    ต้องใส่ระบบกันพลาดในเฟสนี้ (ดู PLAN_machine-z-height-and-padding-
+    calculation.md)
+
+    Parameters
+    ----------
+    machine_profile : core.machine_profile.MachineProfile — ต้องมี
+                       .z_height (พื้นถึงใต้ก้นแกน Z ตอน home) และ .z_travel
+                       (ระยะเดินสูงสุดแกน Z)
+    probe_profile   : core.probe_profile.ProbeProfile — ต้องมี
+                       .stylus_holder_height และ .stylus_length
+
+    Returns
+    -------
+    float : ความสูง padding ที่แนะนำ (mm) — ไม่ติดลบ (clamp ที่ 0.0)
+    """
+    tip_clearance_at_top = (float(machine_profile.z_height)
+                             - float(probe_profile.stylus_holder_height)
+                             - float(probe_profile.stylus_length))
+    tip_position_at_bottom = tip_clearance_at_top - float(machine_profile.z_travel)
+    return max(0.0, tip_position_at_bottom)
 
 # ---------------------------------------------------------------------
 # ระบบแปลงพิกัด 3D เพื่อจำลองการ "พลิกชิ้นงาน" ตามมุมมอง
@@ -175,11 +206,11 @@ def build_point_map(holes, view_name: str) -> list:
     """คำนวณรายการจุดที่ "คาดหวังว่าจะถูกโพรบสัมผัส" (expected probe touch
     points) แบบเรียงลำดับเดียวกับที่ generate_gcode() จะยิงคำสั่ง G38.2
     ออกมาเป๊ะ ๆ (รู nearest-neighbor -> segment -> layer -> มุมจุดในชั้น)
-    — ไม่ต้องพึ่ง GCodeSettings (safe_z/overtravel/backoff/feedrate) เลย
-    เพราะค่าพวกนี้เป็นแค่ margin ด้านความปลอดภัยตอนเขียน G-code ไม่ใช่
-    ส่วนหนึ่งของตำแหน่งผิวชิ้นงานจริงตาม geometry — ให้ x/y/z ในผลลัพธ์เป็น
-    จุดสัมผัสผนังรูจริง (จุดศูนย์กลาง + รัศมี ณ ชั้นนั้น) ตรงกับตำแหน่งที่
-    ผิวชิ้นงานควรอยู่ตาม STEP
+    — ไม่ต้องพึ่ง GCodeSettings (safe_z/overtravel/backoff/feedrate/
+    padding_height) เลย เพราะค่าพวกนี้เป็นแค่ margin ด้านความปลอดภัยหรือ
+    การตั้งค่าทางกายภาพตอนเขียน G-code ไม่ใช่ส่วนหนึ่งของตำแหน่งผิวชิ้นงาน
+    จริงตาม geometry — ให้ x/y/z ในผลลัพธ์เป็นจุดสัมผัสผนังรูจริง (จุด
+    ศูนย์กลาง + รัศมี ณ ชั้นนั้น) ตรงกับตำแหน่งที่ผิวชิ้นงานควรอยู่ตาม STEP
 
     ใช้ร่วมกันโดย:
       - generate_gcode() ด้านล่าง (เป็น point_map ที่ return กลับไป)
@@ -257,6 +288,9 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     lines.append(f"; Holes: {len(ordered)}  Safe Z: {settings.safe_z:.2f} mm  "
                  f"Probe Feed: {settings.probe_feedrate:.0f} mm/min")
     lines.append("; NOTE: work zero = mesh centroid (no G54 offset applied)")
+    # v06: report the padding height assumed under the workpiece for this
+    # export — comment-only, does not affect any coordinate below.
+    lines.append(f"; NOTE: assumes workpiece is raised by {settings.padding_height:.2f} mm padding (riser plate)")
     if str(view_name).lower() != "top":
         lines.append(f"; NOTE: Coordinate system transformed for {view_name} view machining")
     if skipped:
