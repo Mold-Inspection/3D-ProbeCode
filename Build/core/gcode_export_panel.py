@@ -1,29 +1,33 @@
 # core/gcode_export_panel.py
-# VERSION: 05
-# CHANGE LOG (v04 -> v05):
-#   FEATURE (PLAN_toolbar-and-settings-dialogs_v01.md): rebuilt as a
-#   floating VS Code-style dialog (ui/settings_dialog_base.py) instead of
-#   an inline collapsible panel in the left sidebar — opened from the new
-#   top toolbar's "G-code Export" icon (ui/tool_bar.py) via
-#   ui/main_window.py v14, rather than built directly into
-#   self._left_scroll. Single category ("Export Settings") since there's
-#   only one group of fields here — kept a category list anyway for
-#   visual consistency with the Hardware Setting dialog (PLAN §3, open
-#   question 3, resolved: dual category list).
-#   NO CHANGE to _read_settings()/_on_export()/_suggest_safe_z()/
-#   _capture_export_snapshot() logic — same validation, same
-#   generate_gcode()/suggest_safe_z() calls, same snapshot capture. Only
-#   the container changed: _build_fields(parent) now populates a
-#   SettingsDialogBase category frame instead of a self._body collapsible
-#   CTkFrame. _toggle_panel()/self._expanded/self._header_frame/the
-#   icon-swapped collapse header from v04 are removed (dialogs open/close
-#   instead of expand/collapse — no header icon needed here anymore).
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 5 —
+#   final step of the plan): new "Padding Height (mm)" field added to the
+#   Export Settings category, placed right after Safe Z (both are
+#   Z-setup-related). Comes with a "↻ Suggest" button — same UX pattern
+#   as the existing Safe Z suggest button — that calls
+#   core.gcode_generator.suggest_padding_height(app.machine_profile,
+#   app.probe_profile) (v06) and fills the field with the computed
+#   riser-height suggestion. Unlike Safe Z's suggest button (which needs
+#   a loaded mesh), this one only needs the machine/probe profiles, which
+#   always exist, so it has no "no model" guard.
+#   Field defaults to "0.0" (padding is optional — a workpiece may not
+#   need any) and is read into GCodeSettings.padding_height in
+#   _read_settings(). Validation relaxed to "must be a valid number >= 0"
+#   for this one field only (unlike the other fields here, which must be
+#   strictly > 0) — 0 padding is a legitimate, common case. No upper-bound
+#   / fail-safe check against machine_profile.z_height is added, per
+#   explicit instruction (deferred to a future phase).
+#   NO CHANGE to _on_export()'s flow, snapshot capture, or any other
+#   field's validation — generate_gcode() already accepts
+#   settings.padding_height via GCodeSettings (core/gcode_generator.py v06)
+#   with no call-site change needed here beyond reading the new field.
 import os
 import json
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
-from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z
+from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height
 from ui.settings_dialog_base import SettingsDialogBase
 
 
@@ -42,6 +46,7 @@ class GCodeExportPanel:
     def _build_fields(self, parent):
         fields = [
             ("safe_z",          "Safe Z (mm):",             ""),
+            ("padding_height",  "Padding Height (mm):",     "0.0"),   # v06
             ("entry_clearance", "Entry Clearance (mm):",    "2.0"),
             ("probe_feedrate",  "Probe Feedrate (mm/min):", "100.0"),
             ("overtravel",      "Overtravel (mm):",         "0.8"),
@@ -67,6 +72,11 @@ class GCodeExportPanel:
                              fg_color="#37474f", hover_color="#546e7a",
                              font=ctk.CTkFont(size=11),
                              command=self._suggest_safe_z).pack(side="left", padx=(8, 0))
+            elif key == "padding_height":   # v06
+                ctk.CTkButton(entry_row, text="↻ Suggest", width=90, height=30,
+                             fg_color="#37474f", hover_color="#546e7a",
+                             font=ctk.CTkFont(size=11),
+                             command=self._suggest_padding_height).pack(side="left", padx=(8, 0))
 
         ctk.CTkFrame(parent, height=1, fg_color="#2a2a4e").pack(fill="x", pady=(6, 14))
 
@@ -92,6 +102,19 @@ class GCodeExportPanel:
         self._entries["safe_z"].insert(0, f"{z:.2f}")
 
     # ------------------------------------------------------------------
+    def _suggest_padding_height(self):
+        """v06: fill Padding Height from machine_profile.z_height +
+        probe_profile.stylus_holder_height/stylus_length + machine_profile
+        .z_travel — see core/gcode_generator.py::suggest_padding_height().
+        Only needs the machine/probe profiles (always present), unlike
+        Safe Z's suggest which needs a loaded mesh."""
+        app = self.app
+        padding = suggest_padding_height(app.machine_profile, app.probe_profile)
+
+        self._entries["padding_height"].delete(0, "end")
+        self._entries["padding_height"].insert(0, f"{padding:.2f}")
+
+    # ------------------------------------------------------------------
     def _read_settings(self):
         try:
             safe_z          = float(self._entries["safe_z"].get().strip())
@@ -99,6 +122,8 @@ class GCodeExportPanel:
             probe_feedrate  = float(self._entries["probe_feedrate"].get().strip())
             overtravel      = float(self._entries["overtravel"].get().strip())
             backoff         = float(self._entries["backoff"].get().strip())
+            padding_str     = self._entries["padding_height"].get().strip()   # v06
+            padding_height  = float(padding_str) if padding_str else 0.0      # v06 — optional, defaults to 0
         except ValueError:
             _mb.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
             return None
@@ -107,9 +132,14 @@ class GCodeExportPanel:
             _mb.showerror("Invalid Input", "ค่าต้องมากกว่า 0 (Overtravel อนุญาต 0 ได้)")
             return None
 
+        if padding_height < 0:   # v06 — padding may legitimately be 0, just not negative
+            _mb.showerror("Invalid Input", "Padding Height ต้องไม่ติดลบ")
+            return None
+
         return GCodeSettings(
             safe_z=safe_z, entry_clearance=entry_clearance,
-            probe_feedrate=probe_feedrate, overtravel=overtravel, backoff=backoff)
+            probe_feedrate=probe_feedrate, overtravel=overtravel, backoff=backoff,
+            padding_height=padding_height)   # v06
 
     # ------------------------------------------------------------------
     def _on_export(self):

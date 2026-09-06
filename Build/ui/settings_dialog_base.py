@@ -1,56 +1,32 @@
-# ==============================================================================
 # ui/settings_dialog_base.py — Shared VS Code-style dialog chrome for
 # floating settings dialogs (Hardware Setting / G-code Export)
 # ==============================================================================
-# VERSION: 04
-# CHANGE LOG (v01 -> v02):
-#   FIX: _on_close() previously only nulled out self.toplevel — every
-#   category's cached 'frame' (and the category buttons / _active_key)
-#   kept pointing at widgets that were children of the just-destroyed
-#   Toplevel. Reopening the dialog created a NEW Toplevel, but
-#   show_category() saw cat['frame'] was still non-None and skipped
-#   rebuilding it, then tried to .pack() a frame whose underlying Tcl
-#   widget no longer existed -> 'bad window path name' TclError on the
-#   SECOND open of any dialog built on this base class (Hardware
-#   Setting / G-code Export). Fix: drop all per-category widget caches
-#   and the category-button dict in _on_close() too, so the next show()
-#   rebuilds every category frame from scratch inside the new Toplevel,
-#   exactly like the very first open.
-#
-# CHANGE LOG (v02 -> v03):
-#   FEATURE (per user request — overrides the original "Non-modal ตามที่
-#   ตกลงกัน" decision documented below): dialog is now MODAL, matching
-#   ctk.filedialog.askopenfilename's behavior — self.root (canvas,
-#   sidebars, toolbar, nav) is frozen/unclickable while this dialog is
-#   open. User must either use a category's "Apply" button (which does
-#   NOT auto-close — see hardware_setting_dialog.py / gcode_export_panel.py,
-#   unchanged) or click ✕ to close before the main window responds again.
-#   Implemented via self.toplevel.transient(self.master) +
-#   self.toplevel.grab_set() in show(), released in _on_close() before
-#   destroy() (grab_release() must run on a window that still exists,
-#   so it's called first, then destroy()).
-#
-# CHANGE LOG (v03 -> v04):
-#   FIX: modal grab (v03) could leave the ENTIRE app unresponsive after
-#   alt-tab / window-switch on Windows, requiring a force-quit — a known
-#   Tk+grab_set() failure mode, not specific to this app. Root causes
-#   addressed:
-#     1) focus_force() right after grab_set() aggressively fights the OS
-#        focus manager; switched to focus_set() instead.
-#     2) grab_set() was called before the window was guaranteed viewable;
-#        now preceded by wait_visibility() (wrapped in try/except —
-#        TclError here just means the window closed before it finished
-#        opening, which is harmless).
-#     3) No handling for minimize/restore — grab could persist on a
-#        window that's no longer visible. Now released on <Unmap>,
-#        re-acquired on <Map>.
-#     4) No recovery path if the user alt-tabbed back onto the main
-#        window while the dialog was open — now self.master's <FocusIn>
-#        lifts + refocuses the dialog instead of leaving both windows
-#        stuck fighting over input.
-#     5) Added <Escape> on the dialog as a manual close/escape hatch.
-#   _on_close() now also releases the grab and unbinds the master
-#   <FocusIn> hook it registered in show().
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   FIX: dialog window used to always open at a fixed
+#   _DIALOG_MIN_WIDTH x _DIALOG_MIN_HEIGHT (640x530) regardless of what
+#   the active category actually contained — "Probe Stylus" (few fields)
+#   left a lot of dead empty space, while "Machine Working Area" (3 axis
+#   rows + a note label) was comparatively cramped in the same box, and
+#   switching categories never re-measured anything since geometry() was
+#   only ever called once in show(). New _fit_to_content() measures the
+#   REAL required size of the toplevel (via winfo_reqwidth()/reqheight()
+#   after update_idletasks(), which reflects whatever category frame is
+#   currently packed into self._content_frame) and resizes the window to
+#   that, using _DIALOG_MIN_WIDTH/_DIALOG_MIN_HEIGHT only as a floor (also
+#   still enforced via toplevel.minsize()) rather than the fixed size.
+#   Called once in show() (after the first category is displayed) and
+#   again every time show_category() switches categories, so each
+#   category's window snugly fits its own fields instead of reusing
+#   whatever size a previous category happened to need. _center_on_master()
+#   is now called from inside show_category() (right after each resize)
+#   instead of only once in show(), so re-centering also happens on every
+#   category switch, not just on initial open.
+# ------------------------------------------------------------------------------
+# (v01 -> v04 changelog unchanged — see prior version for full history:
+#  v02 fixed a 'bad window path name' TclError on reopen by clearing
+#  per-category frame caches on close; v03 made the dialog modal; v04
+#  hardened the modal grab against an alt-tab freeze on Windows.)
 #
 # หน้าที่: กรอบ dialog กลางที่ใช้ร่วมกันระหว่าง Hardware Setting และ G-code
 # Export — เลียนแบบหน้า Settings ของ VS Code: header bar (title + close),
@@ -67,21 +43,28 @@
 # (สลับหมวดคือแค่ pack/pack_forget ไม่ rebuild ทุกครั้ง — cache ถูกล้างทิ้ง
 # ทุกครั้งที่ dialog ปิด ดู v02 changelog ด้านบน)
 #
-# MODALITY (v03 — เปลี่ยนจากของเดิม): dialog นี้ MODAL เหมือน
-# ctk.filedialog.askopenfilename — ผู้ใช้ต้องกด Apply (ค่าถูกยืนยันแต่
-# dialog ยังไม่ปิด) หรือกด ✕ / Escape ปิด dialog ก่อน ถึงจะกลับไปใช้
-# หน้าต่างหลักได้ ดู v04 changelog สำหรับการแก้ปัญหาค้างทั้งโปรแกรมตอน
-# alt-tab ที่มากับ grab_set() แบบเดิม
+# MODALITY (v03): dialog นี้ MODAL เหมือน ctk.filedialog.askopenfilename —
+# ผู้ใช้ต้องกด Apply (ค่าถูกยืนยันแต่ dialog ยังไม่ปิด) หรือกด ✕ / Escape
+# ปิด dialog ก่อน ถึงจะกลับไปใช้หน้าต่างหลักได้ ดู v04 changelog สำหรับการ
+# แก้ปัญหาค้างทั้งโปรแกรมตอน alt-tab ที่มากับ grab_set() แบบเดิม
+#
+# SIZING (v05): dialog จะปรับขนาดหน้าต่างให้ "พอดี" กับ field ของหมวดที่
+# กำลังแสดงอยู่จริง ๆ (ดู _fit_to_content()) แทนที่จะตายตัวที่
+# _DIALOG_MIN_WIDTH x _DIALOG_MIN_HEIGHT เสมอ — ค่าทั้งสองนี้ยังใช้เป็น
+# "ขนาดขั้นต่ำ" (floor) อยู่ ผ่านทั้ง minsize() และการเทียบค่า max() ใน
+# _fit_to_content()
 #
 # ตัวแปรสำคัญที่ปรับจูนได้:
-#   _DIALOG_MIN_WIDTH / _DIALOG_MIN_HEIGHT = ขนาดขั้นต่ำของ dialog
+#   _DIALOG_MIN_WIDTH / _DIALOG_MIN_HEIGHT = ขนาดขั้นต่ำของ dialog (floor
+#                                              เท่านั้น ตั้งแต่ v05 — ไม่ใช่
+#                                              ขนาดตายตัวอีกต่อไป)
 #   _CATEGORY_LIST_WIDTH                    = ความกว้างแถบซ้าย (category list)
 #   สี _COLOR_* ต่าง ๆ = โทนสี header/body/category ของ dialog
 # ==============================================================================
 import customtkinter as ctk
 
 _DIALOG_MIN_WIDTH    = 640
-_DIALOG_MIN_HEIGHT   = 530
+_DIALOG_MIN_HEIGHT   = 460
 _CATEGORY_LIST_WIDTH = 190
 
 _COLOR_HEADER    = "#1e1e1e"
@@ -94,8 +77,9 @@ _COLOR_FIELD_BG  = "#1c1c1c"
 
 class SettingsDialogBase:
     """กรอบ dialog กลาง (VS Code Settings-style) — ใช้ร่วมกันระหว่าง
-    Hardware Setting และ G-code Export dialogs. MODAL (v03/v04) —
-    ดู CHANGE LOG ด้านบนไฟล์"""
+    Hardware Setting และ G-code Export dialogs. MODAL (v03/v04), ปรับขนาด
+    หน้าต่างให้พอดีกับเนื้อหาของหมวดที่แสดงอยู่ (v05) — ดู CHANGE LOG
+    ด้านบนไฟล์"""
 
     def __init__(self, master, title: str):
         self.master      = master
@@ -122,7 +106,10 @@ class SettingsDialogBase:
     def show(self):
         """เปิด dialog (สร้างใหม่ถ้ายังไม่มี หรือดึงขึ้นหน้าถ้าเปิดอยู่แล้ว)
         v04: MODAL แบบทนต่อการสลับหน้าต่าง (alt-tab) — ดู v03->v04 changelog
-        ด้านบนคลาสสำหรับสาเหตุที่ v03 เดิมค้างทั้งโปรแกรมได้"""
+        ด้านบนคลาสสำหรับสาเหตุที่ v03 เดิมค้างทั้งโปรแกรมได้
+        v05: ไม่ตั้ง geometry ตายตัวอีกต่อไป — ขนาดจริงถูกคำนวณโดย
+        _fit_to_content() ซึ่งถูกเรียกจาก show_category() (สำหรับกรณีปกติ
+        ที่มีอย่างน้อย 1 หมวด) หรือเรียกตรงนี้เป็น fallback ถ้าไม่มีหมวดเลย"""
         if self.toplevel is not None and self.toplevel.winfo_exists():
             self.toplevel.lift()
             self.toplevel.focus_set()
@@ -130,8 +117,7 @@ class SettingsDialogBase:
 
         self.toplevel = ctk.CTkToplevel(self.master)
         self.toplevel.title(self.title_text)
-        self.toplevel.geometry(f"{_DIALOG_MIN_WIDTH}x{_DIALOG_MIN_HEIGHT}")
-        self.toplevel.minsize(_DIALOG_MIN_WIDTH, _DIALOG_MIN_HEIGHT)
+        self.toplevel.minsize(_DIALOG_MIN_WIDTH, _DIALOG_MIN_HEIGHT)   # v05: floor only, not fixed size
         self.toplevel.configure(fg_color=_COLOR_BODY)
         self.toplevel.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -140,9 +126,14 @@ class SettingsDialogBase:
         self._build_body()
 
         if self._category_order:
-            self.show_category(self._category_order[0])
-
-        self._center_on_master()
+            self.show_category(self._category_order[0])   # v05: this already fits+centers
+        else:
+            # fallback — no category registered at all (shouldn't normally
+            # happen for either dialog built on this base, but keep the
+            # dialog usable rather than leaving it at whatever default
+            # Tk gives a freshly-created Toplevel)
+            self._fit_to_content()
+            self._center_on_master()
 
         # v04: modal grab, hardened against the alt-tab freeze —
         # wait until the window is actually viewable before grabbing
@@ -173,6 +164,30 @@ class SettingsDialogBase:
         # to front/focus instead of leaving both windows unresponsive.
         self._master_focus_bind_id = self.master.bind(
             "<FocusIn>", self._on_master_focus_in, add="+")
+
+    # ------------------------------------------------------------------
+    def _fit_to_content(self):
+        """v05: resize self.toplevel to hug whatever the currently-packed
+        category frame actually needs, instead of always sitting at the
+        fixed _DIALOG_MIN_WIDTH x _DIALOG_MIN_HEIGHT — that fixed size
+        previously left visible empty space for a small category (Probe
+        Stylus) and wasn't guaranteed to be enough for a bigger one
+        (Machine Working Area's 3 rows + note label, or Export Settings'
+        5 rows + button). _DIALOG_MIN_WIDTH/_DIALOG_MIN_HEIGHT remain a
+        FLOOR only (max() below, plus toplevel.minsize() in show()) —
+        never the fixed size anymore. Safe to call before any category is
+        packed too (falls back to the floor via max())."""
+        if self.toplevel is None:
+            return
+        try:
+            self.toplevel.update_idletasks()
+            req_w = self.toplevel.winfo_reqwidth()
+            req_h = self.toplevel.winfo_reqheight()
+            width  = max(_DIALOG_MIN_WIDTH, req_w)
+            height = max(_DIALOG_MIN_HEIGHT, req_h)
+            self.toplevel.geometry(f"{width}x{height}")
+        except Exception:
+            pass   # best-effort only — never block the dialog from opening/switching
 
     # ------------------------------------------------------------------
     def _on_dialog_unmap(self, _event=None):
@@ -264,6 +279,12 @@ class SettingsDialogBase:
 
     # ------------------------------------------------------------------
     def show_category(self, key: str):
+        """v05: after swapping in the requested category's frame, resize
+        the toplevel to fit THAT category's actual content
+        (_fit_to_content()) and re-center it — previously the window size
+        was set once in show() and never touched again, so a category
+        with fewer/more fields than whichever category opened first
+        either floated in empty space or didn't get the room it needed."""
         if key not in self._categories:
             return
         self._active_key = key
@@ -280,6 +301,9 @@ class SettingsDialogBase:
             cat['frame'] = ctk.CTkFrame(self._content_frame, fg_color="transparent")
             cat['build_fn'](cat['frame'])
         cat['frame'].pack(fill="both", expand=True)
+
+        self._fit_to_content()
+        self._center_on_master()
 
     # ------------------------------------------------------------------
     def _on_close(self):
