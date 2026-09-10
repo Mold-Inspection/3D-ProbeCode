@@ -3,18 +3,31 @@
 # ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
 # comparison_v02.md)
 # ==============================================================================
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   FIX: _on_apply_tolerance() re-runs core.evaluation_engine.evaluate_
-#   points() with the new tolerance, whose returned 'holes' dict is keyed
-#   by hole_id (display_id string) — same remap needed as ui/evaluation_
-#   left_panel.py's v01->v02 fix (see that file's changelog for the full
-#   explanation). Reuses the shared _remap_holes_by_gi() helper from
-#   there rather than duplicating the logic.
-# 
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
+#   Requirement 5 — "แสดงผลลัพธ์...ให้อะไรที่ผ่าน threshold เป็นสีเขียว
+#   ไม่ผ่านเป็นสีแดง โดยให้บอกค่าที่วัดได้ และค่าในอุดมคติ และบอกความต่าง"):
+#     - Point table columns renamed: "Expected"->"Ideal", "Actual"->
+#       "Measured", "Δ(mm)"->"Offset(mm)" (wording only — same underlying
+#       fields, core/evaluation_engine.py's 'expected'/'actual'/
+#       'distance_mm' are unchanged).
+#     - Each point row now gets an explicit GREEN/RED background
+#       (fg_color on the row frame), not just text color on the offset
+#       column, so pass/fail reads at a glance per Requirement 5.
+#     - "Max deviation" label renamed "Max Offset" for wording
+#       consistency with the rest of the plan (same value/field).
+#   NOTE (Requirement 6 — single failing point fails the whole hole):
+#   already correct upstream in core/evaluation_engine.py (hole_entry
+#   ['passed'] requires ALL points to pass) — this file only renders
+#   what evaluate_points() already computed; see the comment on
+#   _build_hole_card() below. No logic change needed here.
+#   No other functional change — hole card badges, layer rows, and the
+#   tolerance apply flow are unchanged from v02.
+#
 # หน้าที่: แสดงผลตรวจ (app.evaluation_result) แบบ read-only — การ์ดต่อรู
 # (เฉพาะรูที่ selected_for_inspection) → ขยายดู segment → ขยายดู layer →
-# ขยายดูตารางจุดวัดรายจุด (expected / actual / Δ / pass-fail) พร้อม
+# ขยายดูตารางจุดวัดรายจุด (ideal / measured / offset / pass-fail) พร้อม
 # ตัวเลือก "show failed only" (ค่าเริ่มต้น) / "show all points"
 #
 # ต่างจากการ์ดรูปกติใน ui/main_window.py ตรงที่:
@@ -22,12 +35,9 @@
 #   - แสดงเฉพาะรูที่ถูกเลือกไว้สำหรับ inspection (รูอื่นไม่เคยถูกโพรบจริง)
 #   - ด้านบนสุดมีช่อง Tolerance (mm) + ปุ่ม Apply แยกต่างหาก
 #
-# NOTE: เช่นเดียวกับ ui/evaluation_left_panel.py — core/evaluation_engine.py
-# ยังไม่ถูกสร้าง ปุ่ม "Apply" tolerance จึง import แบบ lazy และแจ้งเตือน
-# อย่างสุภาพถ้ายังไม่มีไฟล์นั้น แทนที่จะทำให้แอปพัง
-#
 # ตัวแปรสำคัญที่ปรับจูนได้:
 #   _BADGE_PASS/_BADGE_FAIL/_BADGE_NODATA colors ของการ์ดหัวรู
+#   _ROW_PASS/_ROW_FAIL colors ของพื้นหลังแถวจุดวัดรายจุด (v03)
 # ==============================================================================
 import customtkinter as ctk
 import tkinter.messagebox as _mb
@@ -37,6 +47,10 @@ from ui.evaluation_left_panel import _remap_holes_by_gi
 _COLOR_PASS   = "#1b3a1f"
 _COLOR_FAIL   = "#3a1f1f"
 _COLOR_NODATA = "#2a2a2a"
+
+# v03 — per-point row background (Requirement 5: green pass / red fail)
+_ROW_PASS = "#173a1a"
+_ROW_FAIL = "#3a1717"
 
 
 class EvaluationSidebarPanel:
@@ -117,6 +131,12 @@ class EvaluationSidebarPanel:
             ).pack(pady=20, padx=10)
 
     def _build_warning_banner(self, result: dict):
+        # v03: the §6 stale-settings guard has nothing to warn about when
+        # expected points came from a loaded JSON (it IS the frozen
+        # source of truth) — ui/evaluation_left_panel.py already forces
+        # settings_mismatch = [] in that case, so this banner naturally
+        # stays silent for JSON-sourced results without any extra check
+        # needed here.
         mismatch = result.get('settings_mismatch') or []
         if mismatch:
             names = ", ".join(str(m) for m in mismatch)
@@ -128,7 +148,7 @@ class EvaluationSidebarPanel:
                 wraplength=380, justify="left",
                 fg_color="#1a1400", corner_radius=6
             ).pack(fill="x", pady=(0, 10), ipady=6)
-        elif getattr(self.app, 'last_export_snapshot', None) is None:
+        elif result.get('expected_source') != 'json' and getattr(self.app, 'last_export_snapshot', None) is None:
             ctk.CTkLabel(
                 self.warning_frame,
                 text="ℹ Settings could not be verified against the actual export — "
@@ -145,6 +165,11 @@ class EvaluationSidebarPanel:
             self._bind_hover_recursive(child, on_enter, on_leave)
 
     def _build_hole_card(self, parent, gi, hole, info):
+        """v03 note (Requirement 6): 'info.get(\"passed\")' below comes
+        straight from core/evaluation_engine.py's hole_entry['passed'],
+        which is True only if EVERY point of this hole passed — a single
+        failing point already flips this to False (and the badge to ❌)
+        upstream. Nothing in this file needs to re-check that rule."""
         widgets = {'is_expanded': False, 'layer_state': {}}
         self._hole_widgets[gi] = widgets
 
@@ -187,7 +212,7 @@ class EvaluationSidebarPanel:
             ).pack(padx=10, pady=8, anchor="w")
         else:
             ctk.CTkLabel(
-                body, text=f"Max deviation: {info.get('max_deviation', 0):.3f} mm",
+                body, text=f"Max Offset: {info.get('max_deviation', 0):.3f} mm",   # v03: was "Max deviation"
                 text_color="#b0bec5", font=ctk.CTkFont(size=11)
             ).pack(anchor="w", padx=10, pady=(8, 2))
             for seg in info.get('segments', []):
@@ -226,7 +251,7 @@ class EvaluationSidebarPanel:
         row.pack(fill="x", padx=4, pady=2)
 
         badge = "✅" if layer.get('passed') else "❌"
-        text = f"{badge} Layer {layer_idx + 1}   max Δ={layer.get('max_deviation', 0):.3f} mm"
+        text = f"{badge} Layer {layer_idx + 1}   max offset={layer.get('max_deviation', 0):.3f} mm"
         ctk.CTkButton(
             row, text=text, anchor="w",
             fg_color="transparent", hover_color="#2c3348",
@@ -277,30 +302,36 @@ class EvaluationSidebarPanel:
             command=lambda: self._toggle_show_all(gi, seg_idx, layer_idx)
         ).pack(anchor="w", pady=(2, 4))
 
+        # v03: "Expected"/"Actual"/"Δ(mm)" -> "Ideal"/"Measured"/"Offset(mm)"
+        # (Requirement 5 wording — same underlying fields, display only)
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x")
-        for text, w in (("#", 22), ("Expected", 130), ("Actual", 130), ("Δ(mm)", 55), ("", 24)):
+        for text, w in (("#", 22), ("Ideal", 130), ("Measured", 130), ("Offset(mm)", 68), ("", 24)):
             ctk.CTkLabel(header, text=text, text_color="#78909c",
                         font=ctk.CTkFont(size=9, weight="bold"), width=w).pack(side="left")
 
         for p in shown:
-            r = ctk.CTkFrame(parent, fg_color="transparent")
-            r.pack(fill="x")
             exp  = p.get('expected', (0.0, 0.0, 0.0))
             act  = p.get('actual', (0.0, 0.0, 0.0))
             dist = p.get('distance_mm', 0.0)
             ok   = p.get('passed', False)
 
+            # v03: explicit green/red ROW background (Requirement 5),
+            # not just text color on the offset column.
+            row_color = _ROW_PASS if ok else _ROW_FAIL
+            r = ctk.CTkFrame(parent, fg_color=row_color, corner_radius=3)
+            r.pack(fill="x", pady=1)
+
             ctk.CTkLabel(r, text=str(p.get('point_idx', '?')), width=22,
-                        font=ctk.CTkFont(size=9)).pack(side="left")
+                        font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
             ctk.CTkLabel(r, text=f"{exp[0]:.2f},{exp[1]:.2f},{exp[2]:.2f}", width=130,
-                        font=ctk.CTkFont(size=9)).pack(side="left")
+                        font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
             ctk.CTkLabel(r, text=f"{act[0]:.2f},{act[1]:.2f},{act[2]:.2f}", width=130,
-                        font=ctk.CTkFont(size=9)).pack(side="left")
-            ctk.CTkLabel(r, text=f"{dist:.3f}", width=55, font=ctk.CTkFont(size=9),
-                        text_color=("#66bb6a" if ok else "#e53935")).pack(side="left")
+                        font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
+            ctk.CTkLabel(r, text=f"{dist:.3f}", width=68, font=ctk.CTkFont(size=9, weight="bold"),
+                        text_color=("#a5d6a7" if ok else "#ef9a9a")).pack(side="left", pady=2)
             ctk.CTkLabel(r, text=("✅" if ok else "❌"), width=24,
-                        font=ctk.CTkFont(size=9)).pack(side="left")
+                        font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
 
         if not points:
             ctk.CTkLabel(parent, text="No points recorded for this layer.",
@@ -353,14 +384,15 @@ class EvaluationSidebarPanel:
             _mb.showerror("Evaluation Failed", f"ประเมินผลใหม่ไม่สำเร็จ:\n{e!r}")
             return
 
-        new_result['log_filename']       = result.get('log_filename')
-        new_result['tolerance_mm']       = tol
-        new_result['settings_mismatch']  = result.get('settings_mismatch', [])
-        new_result['_expected_points']   = expected_points
-        new_result['_actual_points']     = actual_points
+        new_result['log_filename']           = result.get('log_filename')
+        new_result['tolerance_mm']           = tol
+        new_result['settings_mismatch']      = result.get('settings_mismatch', [])
+        new_result['expected_source']        = result.get('expected_source')        # v03
+        new_result['expected_source_name']   = result.get('expected_source_name')   # v03
+        new_result['_expected_points']       = expected_points
+        new_result['_actual_points']         = actual_points
 
-        # v02 FIX: same hole_id -> gi remap as evaluation_left_panel.py's
-        # initial load — see that file's v02 changelog.
+        # same hole_id -> gi remap as evaluation_left_panel.py's initial load
         _remap_holes_by_gi(new_result, app.current_holes)
 
         app.evaluation_result = new_result

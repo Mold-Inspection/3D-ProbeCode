@@ -2,53 +2,45 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   FIX: core/evaluation_engine.py::evaluate_points() (now built) keys its
-#   returned 'holes' dict by hole_id (str of hole.display_id) — that's a
-#   core/*.py-level concept, deliberately decoupled from the UI's "global
-#   index into app.current_holes" (gi) that ui/tabs/evaluation_tab.py's
-#   contract actually expects 'holes' to be keyed by. _on_load_log() now
-#   remaps display_id -> gi right after evaluate_points() returns (see
-#   new _remap_holes_by_gi() below) before storing app.evaluation_result,
-#   otherwise evaluation_tab.py's gidx_of lookups would silently find
-#   nothing and every hole would render as "no data" (gray).
-#   Also now actually imports core.log_parser / core.evaluation_engine /
-#   core.gcode_generator.build_point_map for real (all three exist now)
-#   — the lazy-import/graceful-fallback pattern from v01 is kept as-is
-#   since it costs nothing and protects against a future partial
-#   checkout / missing file.
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
+#   §4.2): new button "📂 Load Expected Points (.json)" +
+#   _on_load_expected_points_json(). When loaded, points are stored on
+#   app.loaded_expected_points (list) / app.loaded_expected_points_source
+#   (filename) / app.loaded_expected_points_view (view_name from the
+#   file's metadata, informational). _on_load_log() now PREFERS
+#   app.loaded_expected_points over calling build_point_map() from the
+#   live app.current_holes — fully backward compatible: if nothing has
+#   been loaded, behavior is identical to v02 (live recompute).
+#   The §6 stale-settings guard is skipped entirely when using a loaded
+#   JSON (it IS the frozen source of truth already — see plan §4.2).
+#   FEATURE (Requirement 4 — remove Accuracy, show Offset/Failed instead):
+#   "Overall Accuracy" section replaced with "Results" section showing
+#   "<failed> / <total> points failed" (green if 0 failed, red
+#   otherwise) — no percentage anywhere. Reads the new
+#   result['failed_points'] field from core/evaluation_engine.py v02.
+#   No change to _remap_holes_by_gi() or _on_load_snapshot() (still only
+#   relevant to the live-recompute / stale-settings-guard path).
 # หน้าที่: แสดงข้อมูลไฟล์ STEP ที่โหลดอยู่ตอนนี้ + ขนาดจริง (X/Y/Z, mm แบบดิบ
-# ไม่สลับตามมุมมองเหมือนแท็บ Selection) + ปุ่ม "📥 Load OpenBuilds .log" +
-# สรุปความถูกต้องโดยรวม (overall accuracy) เมื่อมีผลตรวจแล้ว
+# ไม่สลับตามมุมมองเหมือนแท็บ Selection) + ปุ่มโหลด Expected Points (.json,
+# ใหม่ v03) + ปุ่ม "📥 Load OpenBuilds .log" + สรุปจำนวนจุดที่ไม่ผ่าน
+# threshold (v03 — เดิมเป็น % accuracy)
 #
 # ui/main_window.py::UIManager สร้าง instance นี้ตัวเดียวตอน __init__ แล้ว
 # เรียก .build(self.evaluation_left_frame) ครั้งเดียว จากนั้นแค่เรียก
-# .refresh() ทุกครั้งที่สลับเข้าแท็บ Evaluation หรือมีผลตรวจใหม่ — ไม่ได้
-# สร้าง widget ใหม่ทุกครั้งเหมือน update_treeview() ของแท็บอื่น เพราะเนื้อหา
-# ส่วนใหญ่เป็น label ไม่กี่บรรทัด ไม่จำเป็นต้อง rebuild ทั้งชุด
-#
-# NOTE (สำคัญ): ไฟล์นี้ยังไม่มี core/log_parser.py และ core/evaluation_engine.py
-# ให้ import จริง (ตามลำดับการสร้างไฟล์ใน PLAN §9 — ไฟล์ UI ถูกสร้างก่อน)
-# จึง import โมดูลทั้งสองแบบ "lazy" (เฉพาะตอนกดปุ่มโหลด .log จริง ๆ) และ
-# ดักด้วย try/except ImportError เพื่อแจ้งผู้ใช้อย่างสุภาพแทนที่จะทำให้
-# ทั้งแอปพัง — รูปแบบเดียวกับที่ ui/tabs/evaluation_tab.py ใช้กับ
-# core.hole_ordering (import ภายในฟังก์ชัน ไม่ import ที่หัวไฟล์)
+# .refresh() ทุกครั้งที่สลับเข้าแท็บ Evaluation หรือมีผลตรวจใหม่
 #
 # ตัวแปรสำคัญที่ปรับจูนได้:
-#   _ACCURACY_GOOD_THRESHOLD / _ACCURACY_WARN_THRESHOLD (% ) และสีที่ใช้แสดง
-#     ระดับความถูกต้องโดยรวม (เขียว/เหลือง/แดง)
+#   _COLOR_GOOD / _COLOR_BAD = สีของตัวเลข "Failed Points" (เขียว = 0 failed,
+#                                แดง = มีจุดไม่ผ่าน)
 # ==============================================================================
 import os
 import json
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
-_ACCURACY_GOOD_THRESHOLD = 95.0   # % ขึ้นไป = สีเขียว — ปรับได้
-_ACCURACY_WARN_THRESHOLD = 80.0   # % ขึ้นไป (แต่ต่ำกว่า GOOD) = สีเหลือง, ต่ำกว่านี้ = แดง — ปรับได้
-
 _COLOR_GOOD = "#66bb6a"
-_COLOR_WARN = "#ffca28"
 _COLOR_BAD  = "#e53935"
 
 
@@ -111,6 +103,28 @@ class EvaluationLeftPanel:
 
         ctk.CTkFrame(parent, height=1, fg_color="#333333").pack(fill="x", padx=20, pady=(5, 15))
 
+        # --- Expected Points (.json) — v03 -----------------------------
+        self.btn_load_points = ctk.CTkButton(
+            parent, text="📂 Load Expected Points (.json)",
+            fg_color="#37474f", hover_color="#546e7a",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._on_load_expected_points_json)
+        self.btn_load_points.pack(pady=(0, 5), padx=20, fill="x")
+
+        self.lbl_points_info = ctk.CTkLabel(
+            parent, text="Using live hole config (no JSON loaded)", text_color="gray",
+            font=ctk.CTkFont(size=11), wraplength=220, justify="left")
+        self.lbl_points_info.pack(pady=(0, 3), padx=20, anchor="w")
+
+        self.btn_clear_points = ctk.CTkButton(
+            parent, text="↺ Use live hole config instead",
+            fg_color="transparent", hover_color="#2a2a4e",
+            text_color="#90caf9", font=ctk.CTkFont(size=11),
+            command=self._on_clear_expected_points_json)
+        self.btn_clear_points.pack(pady=(0, 15), padx=20, fill="x")
+
+        ctk.CTkFrame(parent, height=1, fg_color="#333333").pack(fill="x", padx=20, pady=(0, 15))
+
         # --- Load .log ---------------------------------------------------
         self.btn_load_log = ctk.CTkButton(
             parent, text="📥 Load OpenBuilds .log",
@@ -126,15 +140,15 @@ class EvaluationLeftPanel:
 
         ctk.CTkFrame(parent, height=1, fg_color="#333333").pack(fill="x", padx=20, pady=(0, 15))
 
-        # --- Overall accuracy ----------------------------------------------
-        self.accuracy_frame = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=5)
-        self.accuracy_frame.pack(pady=(0, 15), padx=20, fill="x")
-        ctk.CTkLabel(self.accuracy_frame, text="Overall Accuracy", text_color="gray",
+        # --- Results (v03: was "Overall Accuracy" — % removed entirely) ----
+        self.results_frame = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=5)
+        self.results_frame.pack(pady=(0, 15), padx=20, fill="x")
+        ctk.CTkLabel(self.results_frame, text="Results", text_color="gray",
                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=10, pady=(8, 0))
-        self.lbl_accuracy = ctk.CTkLabel(self.accuracy_frame, text="—",
-                                         font=ctk.CTkFont(size=18, weight="bold"))
-        self.lbl_accuracy.pack(anchor="w", padx=10, pady=(0, 2))
-        self.lbl_hole_rate = ctk.CTkLabel(self.accuracy_frame, text="",
+        self.lbl_failed = ctk.CTkLabel(self.results_frame, text="—",
+                                       font=ctk.CTkFont(size=18, weight="bold"))
+        self.lbl_failed.pack(anchor="w", padx=10, pady=(0, 2))
+        self.lbl_hole_rate = ctk.CTkLabel(self.results_frame, text="",
                                           text_color="#9aa4b2", font=ctk.CTkFont(size=11))
         self.lbl_hole_rate.pack(anchor="w", padx=10, pady=(0, 8))
 
@@ -171,6 +185,19 @@ class EvaluationLeftPanel:
             self.lbl_dim_y.configure(text="Y: -- mm", text_color="gray")
             self.lbl_dim_z.configure(text="Z: -- mm", text_color="gray")
 
+        # --- v03: Expected Points source readout ---------------------------
+        loaded_points = getattr(app, 'loaded_expected_points', None)
+        if loaded_points:
+            source   = getattr(app, 'loaded_expected_points_source', None) or "?"
+            view_tag = getattr(app, 'loaded_expected_points_view', None)
+            view_tag = f" (view: {view_tag})" if view_tag else ""
+            self.lbl_points_info.configure(
+                text=f"Loaded: {source}\n{len(loaded_points)} points{view_tag}",
+                text_color="#b0bec5")
+        else:
+            self.lbl_points_info.configure(
+                text="Using live hole config (no JSON loaded)", text_color="gray")
+
         ready = (app.geo.mesh is not None and app.geo.step_data is not None
                 and getattr(app, 'holes_detected', False) and app.current_holes)
         self.btn_load_log.configure(state="normal" if ready else "disabled")
@@ -183,14 +210,14 @@ class EvaluationLeftPanel:
                 text=f"Loaded: {log_name}\n{total_pts} points parsed",
                 text_color="#b0bec5")
 
-            acc     = result.get('overall_accuracy')
-            passed  = result.get('passed_points', 0)
-            if acc is not None:
-                self.lbl_accuracy.configure(
-                    text=f"{acc:.1f}%  ({passed} / {total_pts} pts)",
-                    text_color=self._accuracy_color(acc))
+            failed = result.get('failed_points', 0)
+            if total_pts:
+                color = _COLOR_GOOD if failed == 0 else _COLOR_BAD
+                self.lbl_failed.configure(
+                    text=f"{failed} / {total_pts} points failed",
+                    text_color=color)
             else:
-                self.lbl_accuracy.configure(text="—", text_color="white")
+                self.lbl_failed.configure(text="—", text_color="white")
 
             holes_r = result.get('holes', {}) or {}
             n_holes = len(holes_r)
@@ -199,15 +226,53 @@ class EvaluationLeftPanel:
                 text=f"{n_pass} / {n_holes} holes fully passed" if n_holes else "")
         else:
             self.lbl_log_info.configure(text="No .log file loaded", text_color="gray")
-            self.lbl_accuracy.configure(text="—", text_color="white")
+            self.lbl_failed.configure(text="—", text_color="white")
             self.lbl_hole_rate.configure(text="")
 
-    def _accuracy_color(self, acc: float) -> str:
-        if acc >= _ACCURACY_GOOD_THRESHOLD:
-            return _COLOR_GOOD
-        if acc >= _ACCURACY_WARN_THRESHOLD:
-            return _COLOR_WARN
-        return _COLOR_BAD
+    # ------------------------------------------------------------------
+    # v03: Expected Points (.json) load / clear
+    # ------------------------------------------------------------------
+    def _on_load_expected_points_json(self):
+        app = self.app
+        filepath = ctk.filedialog.askopenfilename(
+            title="Select Expected Points (.json)",
+            filetypes=[("Expected Points JSON", "*.json"), ("All Files", "*.*")])
+        if not filepath:
+            return
+
+        try:
+            from core.expected_points_io import load_expected_points_json_full
+        except ImportError as e:
+            self.app.notify.show(
+                f"ยังไม่มี core/expected_points_io.py ({e})",
+                severity="info", duration_ms=6000)
+            return
+
+        try:
+            data = load_expected_points_json_full(filepath)
+        except Exception as e:
+            _mb.showerror("Load Failed", f"โหลดไฟล์ Expected Points ไม่สำเร็จ:\n{e!r}")
+            return
+
+        points = data.get('points') or []
+        if not points:
+            _mb.showwarning("Empty File", "ไฟล์นี้ไม่มี points อยู่เลย")
+            return
+
+        app.loaded_expected_points        = points
+        app.loaded_expected_points_source = os.path.basename(filepath)
+        app.loaded_expected_points_view   = data.get('view_name')
+
+        self.refresh()
+        self.app.notify.show(
+            f"โหลด Expected Points แล้ว: {len(points)} points", severity="success")
+
+    def _on_clear_expected_points_json(self):
+        app = self.app
+        app.loaded_expected_points        = None
+        app.loaded_expected_points_source = None
+        app.loaded_expected_points_view   = None
+        self.refresh()
 
     # ------------------------------------------------------------------
     def _on_load_log(self):
@@ -226,9 +291,6 @@ class EvaluationLeftPanel:
         if not filepath:
             return
 
-        # --- lazy import: core/log_parser.py + core/evaluation_engine.py +
-        # core/gcode_generator.py::build_point_map() are not created yet
-        # (see PLAN §9, steps 1-3) — fail gracefully instead of crashing.
         try:
             from core.log_parser import parse_openbuilds_log
             from core.evaluation_engine import (
@@ -238,7 +300,7 @@ class EvaluationLeftPanel:
             self.app.notify.show(
                 "ยังไม่มีไฟล์คำนวณผล Evaluation ครบ (ต้องมี core/log_parser.py, "
                 "core/evaluation_engine.py, และ core/gcode_generator.py::"
-                f"build_point_map() ตาม PLAN §7-§9 ก่อน)\n\nรายละเอียด: {e}",
+                f"build_point_map() ก่อน)\n\nรายละเอียด: {e}",
                 severity="info", duration_ms=6000)
             return
 
@@ -251,11 +313,18 @@ class EvaluationLeftPanel:
         selected  = [h for h in app.current_holes if getattr(h, 'selected_for_inspection', False)]
         view_name = getattr(app, 'current_view', 'Top')
 
-        try:
-            expected_points = build_point_map(selected, view_name)
-        except Exception as e:
-            _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
-            return
+        # v03: prefer a loaded Expected Points JSON over live-recomputing
+        # from app.current_holes — see plan §4.2. Fully backward
+        # compatible: if nothing was loaded, this is identical to v02.
+        using_json = bool(getattr(app, 'loaded_expected_points', None))
+        if using_json:
+            expected_points = app.loaded_expected_points
+        else:
+            try:
+                expected_points = build_point_map(selected, view_name)
+            except Exception as e:
+                _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
+                return
 
         tolerance = getattr(app, 'evaluation_tolerance_mm', 0.5)
 
@@ -265,28 +334,36 @@ class EvaluationLeftPanel:
             _mb.showerror("Evaluation Failed", f"ประเมินผลไม่สำเร็จ:\n{e!r}")
             return
 
-        result['log_filename'] = os.path.basename(filepath)
-        result['tolerance_mm'] = tolerance
+        result['log_filename']     = os.path.basename(filepath)
+        result['tolerance_mm']     = tolerance
+        result['expected_source']  = 'json' if using_json else 'live'   # v03
+        result['expected_source_name'] = getattr(app, 'loaded_expected_points_source', None) if using_json else None
         # keep the raw point lists so the right-sidebar "Apply" tolerance
         # button can re-run evaluate_points() without reloading the file
         result['_expected_points'] = expected_points
         result['_actual_points']   = actual_points
 
-        # v02 FIX: evaluate_points() keys 'holes' by hole_id (display_id
-        # string) — remap to global index into app.current_holes, which is
-        # what ui/tabs/evaluation_tab.py's contract actually expects.
+        # evaluate_points() keys 'holes' by hole_id (display_id string) —
+        # remap to global index into app.current_holes, which is what
+        # ui/tabs/evaluation_tab.py's contract actually expects.
         _remap_holes_by_gi(result, app.current_holes)
 
         # --- §6 stale-settings guard ------------------------------------
-        try:
-            current_snapshot = build_settings_snapshot(selected, view_name)
-            last_snapshot = getattr(app, 'last_export_snapshot', None)
-            if last_snapshot is not None:
-                result['settings_mismatch'] = diff_snapshots(last_snapshot, current_snapshot)
-            else:
-                result.setdefault('settings_mismatch', [])
-        except Exception:
+        # v03: only meaningful for the LIVE-recompute path — a loaded
+        # Expected Points JSON is already the frozen source of truth, so
+        # the "did settings drift since export" question doesn't apply.
+        if using_json:
             result.setdefault('settings_mismatch', [])
+        else:
+            try:
+                current_snapshot = build_settings_snapshot(selected, view_name)
+                last_snapshot = getattr(app, 'last_export_snapshot', None)
+                if last_snapshot is not None:
+                    result['settings_mismatch'] = diff_snapshots(last_snapshot, current_snapshot)
+                else:
+                    result.setdefault('settings_mismatch', [])
+            except Exception:
+                result.setdefault('settings_mismatch', [])
 
         app.evaluation_result = result
         self.refresh()
@@ -298,9 +375,11 @@ class EvaluationLeftPanel:
     # ------------------------------------------------------------------
     def _on_load_snapshot(self):
         """§6 optional secondary path: user points at the sidecar
-        <name>.snapshot.json (written by core/gcode_export_panel.py in a
-        future change) to restore the stale-settings guard across an app
-        restart, when no in-session app.last_export_snapshot exists."""
+        <name>.snapshot.json (written by core/gcode_export_panel.py) to
+        restore the stale-settings guard across an app restart, when no
+        in-session app.last_export_snapshot exists. Only relevant to the
+        live-recompute path — has no effect when using a loaded Expected
+        Points JSON (see _on_load_log()'s using_json branch)."""
         app = self.app
         filepath = ctk.filedialog.askopenfilename(
             title="Select export snapshot (.snapshot.json)",
@@ -316,7 +395,7 @@ class EvaluationLeftPanel:
             return
 
         result = getattr(app, 'evaluation_result', None)
-        if result is not None:
+        if result is not None and result.get('expected_source') != 'json':
             try:
                 from core.evaluation_engine import build_settings_snapshot, diff_snapshots
                 selected = [h for h in app.current_holes if getattr(h, 'selected_for_inspection', False)]

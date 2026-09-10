@@ -1,33 +1,30 @@
 # core/gcode_export_panel.py
-# VERSION: 06
-# CHANGE LOG (v05 -> v06):
-#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 5 —
-#   final step of the plan): new "Padding Height (mm)" field added to the
-#   Export Settings category, placed right after Safe Z (both are
-#   Z-setup-related). Comes with a "↻ Suggest" button — same UX pattern
-#   as the existing Safe Z suggest button — that calls
-#   core.gcode_generator.suggest_padding_height(app.machine_profile,
-#   app.probe_profile) (v06) and fills the field with the computed
-#   riser-height suggestion. Unlike Safe Z's suggest button (which needs
-#   a loaded mesh), this one only needs the machine/probe profiles, which
-#   always exist, so it has no "no model" guard.
-#   Field defaults to "0.0" (padding is optional — a workpiece may not
-#   need any) and is read into GCodeSettings.padding_height in
-#   _read_settings(). Validation relaxed to "must be a valid number >= 0"
-#   for this one field only (unlike the other fields here, which must be
-#   strictly > 0) — 0 padding is a legitimate, common case. No upper-bound
-#   / fail-safe check against machine_profile.z_height is added, per
-#   explicit instruction (deferred to a future phase).
-#   NO CHANGE to _on_export()'s flow, snapshot capture, or any other
-#   field's validation — generate_gcode() already accepts
-#   settings.padding_height via GCodeSettings (core/gcode_generator.py v06)
-#   with no call-site change needed here beyond reading the new field.
+# VERSION: 07
+# CHANGE LOG (v06 -> v07):
+#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
+#   §4.1/§6): two additions, both using the new core/expected_points_io.py:
+#     1) After every successful full G-code export, _capture_expected_
+#        points_sidecar() now also writes "<name>.points.json" next to
+#        the existing "<name>.snapshot.json" — best-effort, non-blocking,
+#        same pattern as _capture_export_snapshot().
+#     2) New standalone button "📄 Export Expected Points Only (.json)"
+#        in the Export Settings category — calls
+#        core.expected_points_io.export_expected_points_json() directly.
+#        Deliberately does NOT go through _read_settings() / GCodeSettings
+#        validation (Safe Z, feedrate, etc.) at all, since none of that
+#        affects expected point coordinates — satisfies Requirement 3
+#        ("...โดยที่ไม่ต้องสร้าง G-code ใหม่") literally: a user can get
+#        this file without ever touching the G-code Export fields.
+#   No change to _read_settings(), the G-code text emission in
+#   _on_export(), or _capture_export_snapshot() — both keep working
+#   exactly as before, just with one extra sidecar write appended.
 import os
 import json
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
 from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height
+from core.expected_points_io import export_expected_points_json
 from ui.settings_dialog_base import SettingsDialogBase
 
 
@@ -46,7 +43,7 @@ class GCodeExportPanel:
     def _build_fields(self, parent):
         fields = [
             ("safe_z",          "Safe Z (mm):",             ""),
-            ("padding_height",  "Padding Height (mm):",     "0.0"),   # v06
+            ("padding_height",  "Padding Height (mm):",     "0.0"),
             ("entry_clearance", "Entry Clearance (mm):",    "2.0"),
             ("probe_feedrate",  "Probe Feedrate (mm/min):", "100.0"),
             ("overtravel",      "Overtravel (mm):",         "0.8"),
@@ -72,7 +69,7 @@ class GCodeExportPanel:
                              fg_color="#37474f", hover_color="#546e7a",
                              font=ctk.CTkFont(size=11),
                              command=self._suggest_safe_z).pack(side="left", padx=(8, 0))
-            elif key == "padding_height":   # v06
+            elif key == "padding_height":
                 ctk.CTkButton(entry_row, text="↻ Suggest", width=90, height=30,
                              fg_color="#37474f", hover_color="#546e7a",
                              font=ctk.CTkFont(size=11),
@@ -84,6 +81,23 @@ class GCodeExportPanel:
             parent, text="🖨 Export G-code", fg_color="#1565c0", hover_color="#1976d2",
             font=ctk.CTkFont(size=13, weight="bold"), height=34,
             command=self._on_export).pack(fill="x")
+
+        # v07: standalone action — no GCodeSettings needed at all (only
+        # needs a loaded model + selected holes + current view), so it's
+        # deliberately placed outside the field-validation flow above.
+        ctk.CTkButton(
+            parent, text="📄 Export Expected Points Only (.json)",
+            fg_color="#37474f", hover_color="#546e7a",
+            font=ctk.CTkFont(size=12), height=30,
+            command=self._on_export_points_only).pack(fill="x", pady=(8, 0))
+
+        ctk.CTkLabel(
+            parent, text="Expected Points (.json) is also written automatically\n"
+                         "as a sidecar next to every G-code export — use the\n"
+                         "button above only if you want the points WITHOUT\n"
+                         "exporting a G-code file.",
+            font=ctk.CTkFont(size=10), text_color="#5a6570", justify="left"
+        ).pack(anchor="w", pady=(8, 0))
 
     # ------------------------------------------------------------------
     def _suggest_safe_z(self):
@@ -103,7 +117,7 @@ class GCodeExportPanel:
 
     # ------------------------------------------------------------------
     def _suggest_padding_height(self):
-        """v06: fill Padding Height from machine_profile.z_height +
+        """fill Padding Height from machine_profile.z_height +
         probe_profile.stylus_holder_height/stylus_length + machine_profile
         .z_travel — see core/gcode_generator.py::suggest_padding_height().
         Only needs the machine/probe profiles (always present), unlike
@@ -122,8 +136,8 @@ class GCodeExportPanel:
             probe_feedrate  = float(self._entries["probe_feedrate"].get().strip())
             overtravel      = float(self._entries["overtravel"].get().strip())
             backoff         = float(self._entries["backoff"].get().strip())
-            padding_str     = self._entries["padding_height"].get().strip()   # v06
-            padding_height  = float(padding_str) if padding_str else 0.0      # v06 — optional, defaults to 0
+            padding_str     = self._entries["padding_height"].get().strip()
+            padding_height  = float(padding_str) if padding_str else 0.0
         except ValueError:
             _mb.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
             return None
@@ -132,38 +146,49 @@ class GCodeExportPanel:
             _mb.showerror("Invalid Input", "ค่าต้องมากกว่า 0 (Overtravel อนุญาต 0 ได้)")
             return None
 
-        if padding_height < 0:   # v06 — padding may legitimately be 0, just not negative
+        if padding_height < 0:
             _mb.showerror("Invalid Input", "Padding Height ต้องไม่ติดลบ")
             return None
 
         return GCodeSettings(
             safe_z=safe_z, entry_clearance=entry_clearance,
             probe_feedrate=probe_feedrate, overtravel=overtravel, backoff=backoff,
-            padding_height=padding_height)   # v06
+            padding_height=padding_height)
+
+    # ------------------------------------------------------------------
+    def _get_selected_holes_or_warn(self):
+        app = self.app
+        if app.geo.mesh is None:
+            _mb.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
+            return None
+        selected = [h for h in app.current_holes if getattr(h, 'selected_for_inspection', False)]
+        if not selected:
+            _mb.showwarning("No Holes Selected", "ไม่มีรูที่เลือกไว้สำหรับ inspection")
+            return None
+        return selected
+
+    def _resolve_view_name(self):
+        app = self.app
+        if hasattr(app, 'current_view'):
+            return app.current_view
+        if hasattr(app, 'view_name'):
+            return app.view_name
+        if hasattr(app, 'view_combobox'):
+            return app.view_combobox.get()
+        return "Top"
 
     # ------------------------------------------------------------------
     def _on_export(self):
         app = self.app
-        if app.geo.mesh is None:
-            _mb.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
-            return
-
-        selected = [h for h in app.current_holes if getattr(h, 'selected_for_inspection', False)]
-        if not selected:
-            _mb.showwarning("No Holes Selected", "ไม่มีรูที่เลือกไว้สำหรับ inspection")
+        selected = self._get_selected_holes_or_warn()
+        if selected is None:
             return
 
         settings = self._read_settings()
         if settings is None:
             return
 
-        view_name = "Top"
-        if hasattr(app, 'current_view'):
-            view_name = app.current_view
-        elif hasattr(app, 'view_name'):
-            view_name = app.view_name
-        elif hasattr(app, 'view_combobox'):
-            view_name = app.view_combobox.get()
+        view_name = self._resolve_view_name()
 
         try:
             gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name)
@@ -190,8 +215,39 @@ class GCodeExportPanel:
             return
 
         self._capture_export_snapshot(selected, view_name, filepath)
+        self._capture_expected_points_sidecar(selected, view_name, filepath)   # v07
 
         app.notify.show(f"บันทึก G-code แล้ว: {filepath}", severity="success")
+
+    # ------------------------------------------------------------------
+    def _on_export_points_only(self):
+        """v07: standalone action — write ONLY the Expected Points (.json)
+        artifact, without validating/requiring any G-code Export Settings
+        field and without writing a .gcode file at all (Requirement §3).
+        Needs just a loaded model + selected holes + the active view."""
+        app = self.app
+        selected = self._get_selected_holes_or_warn()
+        if selected is None:
+            return
+
+        view_name = self._resolve_view_name()
+
+        filepath = ctk.filedialog.asksaveasfilename(
+            title="Save Expected Points", defaultextension=".json",
+            filetypes=[("Expected Points JSON", "*.json")])
+        if not filepath:
+            return
+
+        try:
+            export_expected_points_json(
+                selected, view_name, filepath,
+                source_step_filename=getattr(app, 'loaded_step_filename', None),
+                tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
+        except Exception as e:
+            _mb.showerror("Export Failed", f"เขียนไฟล์ Expected Points ไม่สำเร็จ:\n{e!r}")
+            return
+
+        app.notify.show(f"บันทึก Expected Points แล้ว: {filepath}", severity="success")
 
     # ------------------------------------------------------------------
     def _capture_export_snapshot(self, selected_holes, view_name, gcode_filepath):
@@ -222,3 +278,21 @@ class GCodeExportPanel:
             print(f"[gcode_export_panel] export snapshot written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] sidecar snapshot write failed (non-blocking): {e!r}")
+
+    # ------------------------------------------------------------------
+    def _capture_expected_points_sidecar(self, selected_holes, view_name, gcode_filepath):
+        """v07: after a successful full G-code export, also write the
+        Expected Points (.json) sidecar "<name>.points.json" next to the
+        .snapshot.json sidecar — satisfies "users who DO export G-code
+        get it for free" (plan §4.1). Best-effort only, never blocks a
+        successful export that already wrote the .gcode file."""
+        app = self.app
+        try:
+            sidecar_path = os.path.splitext(gcode_filepath)[0] + ".points.json"
+            export_expected_points_json(
+                selected_holes, view_name, sidecar_path,
+                source_step_filename=getattr(app, 'loaded_step_filename', None),
+                tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
+            print(f"[gcode_export_panel] expected points sidecar written to {sidecar_path}")
+        except Exception as e:
+            print(f"[gcode_export_panel] expected points sidecar write failed (non-blocking): {e!r}")
