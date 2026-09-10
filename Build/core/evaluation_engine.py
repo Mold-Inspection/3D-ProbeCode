@@ -1,19 +1,33 @@
 # ==============================================================================
-# core/evaluation_engine.py — เปรียบเทียบจุดที่คาดหวัง (จาก STEP) กับจุดที่
-# ถูกโพรบจริง (จาก .log ของ OpenBuilds Control) + ตรวจจับ setting ที่เปลี่ยน
-# ไปตั้งแต่ export
+# core/evaluation_engine.py — เปรียบเทียบจุดที่คาดหวัง (จาก STEP หรือจากไฟล์
+# Expected Points .json ที่โหลดไว้) กับจุดที่ถูกโพรบจริง (จาก .log ของ
+# OpenBuilds Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: ตรรกะล้วน (pure logic, ไม่แตะ UI) 3 กลุ่ม:
-#   1) evaluate_points()         — จับคู่ EXPECTED[i] กับ ACTUAL[i] ด้วย
-#      sequence index (ไม่ใช่ spatial nearest-neighbor — ดูเหตุผลใน
-#      PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §3), คำนวณ
-#      ระยะเบี่ยงเบน 3D แบบ Euclidean ต่อจุด แล้วรวมผลขึ้นเป็น
-#      layer -> segment -> hole -> overall accuracy
-#   2) build_settings_snapshot() / diff_snapshots() — ระบบ "stale-settings
-#      guard" (§6): จับภาพค่าตั้งค่าการตรวจสอบ (layers/points/zigzag/
-#      segment-selection) ของแต่ละรู ณ เวลาหนึ่ง เพื่อเทียบว่ามีอะไรเปลี่ยน
-#      ไปหรือไม่ระหว่างตอน export G-code กับตอนโหลดผลตรวจ .log
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md,
+#   Requirement 4 — "ลบ Accuracy ออกและบอกแค่ Offset และค่าที่ไม่ผ่าน
+#   Threshold"): evaluate_points() no longer computes or returns
+#   'overall_accuracy' (%) at all — fully removed, not just hidden from
+#   UI, per the requirement's literal wording. Replaced with:
+#     - 'failed_points' (int)      — total_points - passed_points,
+#       exposed explicitly so callers don't need to subtract themselves.
+#     - 'failed_point_refs' (list) — flat list of every failing point
+#       across all holes/segments/layers, each a dict of
+#       {hole_id, seg_idx, layer_idx, point_idx, offset_mm} — lets UI
+#       show/scan failures without walking the nested holes structure.
+#   Per-point 'distance_mm' (already existed) is the "Offset (mm)" value
+#   referred to throughout the plan — no field rename needed, only the
+#   UI-facing label changes (see ui/evaluation_sidebar_panel.py v03).
+#   NOTE on Requirement 6 ("หากมีค่าที่ไม่ผ่าน Threshold เพียงจุดเดียว ให้
+#   ขึ้นว่าไม่ผ่าน"): hole_entry['passed'] was ALREADY computed as
+#   (total_points > 0 and passed_points == total_points) — i.e. any
+#   single failing point already fails the whole hole. This version adds
+#   no new leniency (e.g. no "95% of points must pass" shortcut) — the
+#   rule is unchanged, just called out here explicitly per the plan.
+#   No change to build_settings_snapshot()/diff_snapshots() (§6 guard) —
+#   still used by the LIVE-recompute path (ui/evaluation_left_panel.py
+#   skips it when expected points come from a loaded JSON instead).
 #
 # NOTE เรื่อง key ของรูใน holes dict ที่ evaluate_points() คืนกลับมา:
 # ฟังก์ชันนี้ (core/*) ไม่รู้จัก "global index เข้า app.current_holes" เพราะ
@@ -34,12 +48,15 @@ import math
 def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: float) -> dict:
     """จับคู่ EXPECTED[i] กับ ACTUAL[i] ด้วย sequence index แล้วประเมินผลผ่าน/
     ไม่ผ่านของแต่ละจุดเทียบกับ tolerance (mm, ระยะ 3D Euclidean) จากนั้น
-    รวมผลขึ้นเป็นโครงสร้าง layer -> segment -> hole -> ภาพรวม
+    รวมผลขึ้นเป็นโครงสร้าง layer -> segment -> hole -> รายการจุดที่ไม่ผ่านแบบ
+    flat (ไม่มีตัวเลข accuracy % ใด ๆ ในผลลัพธ์นี้อีกต่อไป — ดู v02 changelog)
 
     Parameters
     ----------
     expected_points : list ที่ได้จาก core/gcode_generator.py::build_point_map()
-                       — แต่ละอันมี hole_id, seg_idx, layer_idx, point_idx, x, y, z
+                       หรือจาก core/expected_points_io.py::
+                       load_expected_points_json() — รูปแบบเดียวกัน
+                       แต่ละอันมี hole_id, seg_idx, layer_idx, point_idx, x, y, z
     actual_points   : list ที่ได้จาก core/log_parser.py::parse_openbuilds_log()
                        — แต่ละอันมี x, y, z (เรียงตามลำดับที่เครื่องทำงานจริง)
     tolerance_mm    : ระยะเบี่ยงเบนสูงสุดที่ยังถือว่า "ผ่าน" (mm)
@@ -48,11 +65,11 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
     -------
     dict ตาม contract ที่ ui/tabs/evaluation_tab.py คาดหวัง ยกเว้น 'holes'
     ที่ key ด้วย hole_id (str) แทน global index — ผู้เรียกฝั่ง UI ต้อง remap
-    เอง (ดู NOTE ด้านบนของไฟล์) นอกจากนี้ยังมี key เสริมที่ไม่ได้อยู่ใน
-    contract เดิมแต่มีประโยชน์:
-      expected_count, actual_count : จำนวนจุดดิบของแต่ละฝั่งก่อนตัดตาม min()
-      sequence_mismatch            : True ถ้าจำนวนจุดสองฝั่งไม่เท่ากัน
-                                      (เช่น probe run ถูกขัดจังหวะกลางทาง)
+    เอง (ดู NOTE ด้านบนของไฟล์) key ระดับบนสุดที่มี:
+      tolerance_mm, total_points, passed_points, failed_points (v02),
+      failed_point_refs (v02), expected_count, actual_count,
+      sequence_mismatch, settings_mismatch, holes
+    ไม่มี 'overall_accuracy' อีกต่อไป (v02 — removed per Requirement 4)
     """
     total_points = min(len(expected_points), len(actual_points))
     passed_points = 0
@@ -102,13 +119,15 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             'expected':    (ex, ey, ez),
             'actual':      (ax_, ay_, az_),
             'delta':       (dx, dy, dz),
-            'distance_mm': distance,
+            'distance_mm': distance,   # "Offset (mm)" in the UI (v02 — see plan §4.3)
             'passed':      passed,
         })
 
     # --- แปลงโครงสร้างชั่วคราว (_segments/_layers เป็น dict) ให้เป็น list
     # ที่เรียงลำดับแล้ว ตรงกับ contract ของ ui/tabs/evaluation_tab.py ---
     holes_out = {}
+    failed_point_refs = []   # v02 — flat list, filled while flattening below
+
     for hole_id, hole_entry in holes.items():
         segments_out = []
         for seg_idx in sorted(hole_entry['_segments'].keys()):
@@ -118,9 +137,21 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                 layer_entry = seg_entry['_layers'][lyr_idx]
                 layer_entry['points'].sort(key=lambda p: p['point_idx'])
                 layer_entry['passed'] = all(p['passed'] for p in layer_entry['points'])
+                for p in layer_entry['points']:
+                    if not p['passed']:
+                        failed_point_refs.append({
+                            'hole_id':   hole_id,
+                            'seg_idx':   seg_idx,
+                            'layer_idx': lyr_idx,
+                            'point_idx': p['point_idx'],
+                            'offset_mm': p['distance_mm'],
+                        })
                 layers_out.append(layer_entry)
             segments_out.append({'seg_idx': seg_idx, 'layers': layers_out})
 
+        # v02 note (Requirement 6): a hole 'passed' IFF every one of its
+        # points passed — a single failing point already fails the whole
+        # hole here, unchanged from v01. No percentage-based leniency.
         holes_out[hole_id] = {
             'display_id':    hole_entry['display_id'],
             'passed':        (hole_entry['total_points'] > 0 and
@@ -131,13 +162,14 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             'segments':      segments_out,
         }
 
-    overall_accuracy = (passed_points / total_points * 100.0) if total_points else 0.0
+    failed_points = total_points - passed_points
 
     return {
         'tolerance_mm':       tolerance_mm,
-        'overall_accuracy':   overall_accuracy,
         'total_points':       total_points,
         'passed_points':      passed_points,
+        'failed_points':      failed_points,        # v02
+        'failed_point_refs':  failed_point_refs,     # v02
         'expected_count':     len(expected_points),
         'actual_count':       len(actual_points),
         'sequence_mismatch':  len(expected_points) != len(actual_points),
@@ -147,7 +179,10 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
 
 
 # ==============================================================================
-# 2) Stale-settings guard (§6)
+# 2) Stale-settings guard (§6) — unchanged in v02, still used by the LIVE
+# recompute path only (ui/evaluation_left_panel.py v03 skips this entirely
+# when expected points come from a loaded Expected Points JSON, since the
+# JSON already IS the frozen source of truth)
 # ==============================================================================
 def _hole_fingerprint(hole) -> str:
     """คีย์ที่เสถียรสำหรับระบุ "รูเดียวกัน" ข้ามเวลา — ใช้พิกัด/ขนาดของรู
@@ -169,8 +204,8 @@ def build_settings_snapshot(holes: list, view_name: str) -> dict:
     """จับภาพค่าตั้งค่าการตรวจสอบของทุกรูที่ส่งเข้ามา (ปกติคือรูที่
     selected_for_inspection == True ณ เวลานั้น) — เรียกทั้งตอน export
     G-code จริง (core/gcode_export_panel.py) และตอนโหลดผลตรวจ .log
-    (ui/evaluation_left_panel.py) เพื่อนำสองภาพมาเทียบกันผ่าน
-    diff_snapshots()
+    (ui/evaluation_left_panel.py, เฉพาะ live-recompute path) เพื่อนำสอง
+    ภาพมาเทียบกันผ่าน diff_snapshots()
 
     Returns
     -------

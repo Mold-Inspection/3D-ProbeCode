@@ -1,32 +1,40 @@
 # ==============================================================================
 # ui/tabs/evaluation_tab.py — แท็บ "Evaluation" (เทียบผลตรวจจริงจาก .log กับรูที่คาดหวัง)
 # ==============================================================================
-# VERSION: 01
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
+#   Requirement 4 — remove Accuracy, report Offset/Failed instead):
+#   plot title no longer shows "Overall Accuracy: X%" (that field was
+#   removed entirely from core/evaluation_engine.py v02's return dict —
+#   see that file's changelog). Replaced with a plain
+#   "<failed> / <total> points failed" count sourced from the new
+#   'failed_points' / 'total_points' fields. Marker colors (green/red/
+#   gray per hole) are unchanged — they were never accuracy-based.
+#   No other change — overview drawing, highlight_hole()/
+#   clear_hole_highlight(), and all placeholder states are identical
+#   to v01.
+#
 # หน้าที่: วาด overview 2D (mesh background + hole markers) ของแท็บ Evaluation
-# — ตรวจว่าแต่ละรูที่ถูกโพรบจริง (จากไฟล์ .log ของ OpenBuilds Control) ตรงกับ
-# ตำแหน่งที่คำนวณไว้จาก STEP (ผ่าน core/gcode_generator.py::build_point_map())
-# ภายใน tolerance ที่ผู้ใช้กำหนดหรือไม่ — สีของแต่ละรูบอกผลรวมของรูนั้น
+# — ตรวจว่าแต่ละรูที่ถูกโพรบจริง (จากไฟล์ .log ของ OpenBuilds Control หรือ
+# จากไฟล์ Expected Points .json ที่โหลดไว้ล่วงหน้า — ดู
+# ui/evaluation_left_panel.py v03) ตรงกับตำแหน่งที่คำนวณไว้จาก STEP ภายใน
+# tolerance ที่ผู้ใช้กำหนดหรือไม่ — สีของแต่ละรูบอกผลรวมของรูนั้น
 # (เขียว = ผ่านทุกจุด, แดง = มีจุดไม่ผ่าน, เทา = ยังไม่มีผลตรวจ/รูถูกข้าม)
 #
-# NOTE (สำคัญ — ไฟล์นี้ถูกสร้างก่อนไฟล์อื่นตามคำขอ):
-# ไฟล์นี้ยังไม่ทำงานได้ครบวงจรจนกว่าจะมีไฟล์ต่อไปนี้ตามแผน
-# (PLAN_evaluation-tab-openbuilds-log-comparison_v02.md):
-#   - core/log_parser.py            (parse .log -> actual points)
-#   - core/evaluation_engine.py     (evaluate_points, สร้าง app.evaluation_result)
-#   - core/gcode_generator.py v05   (build_point_map() แยกออกมาให้ใช้ร่วมกัน)
-#   - ui/evaluation_left_panel.py   (ปุ่มโหลด .log, เปอร์เซ็นต์ความถูกต้องรวม)
-#   - ui/evaluation_sidebar_panel.py (tolerance input + รายละเอียดราย layer/point)
-#   - ui/main_window.py v12         (เพิ่มแท็บ "Evaluation" ใน nav + สลับ sidebar)
-# ไฟล์นี้จึง "gate" ทุก state ไว้กันพัง แม้ app.evaluation_result จะยังไม่มีอยู่จริง
-#
-# EXPECTED CONTRACT — app.evaluation_result (สร้างโดย evaluation_engine ในอนาคต)
-# เป็น dict ว่าง None ถ้ายังไม่ได้โหลด .log, หรือมีรูปแบบดังนี้เมื่อโหลดแล้ว:
+# EXPECTED CONTRACT — app.evaluation_result (สร้างโดย
+# core/evaluation_engine.py::evaluate_points(), remapped by
+# ui/evaluation_left_panel.py::_remap_holes_by_gi()) เป็น dict ว่าง None
+# ถ้ายังไม่ได้โหลด .log, หรือมีรูปแบบดังนี้เมื่อโหลดแล้ว:
 #   {
 #     'tolerance_mm':      float,   # ค่า tolerance ที่ใช้ประเมินผลรอบล่าสุด
 #     'log_filename':      str,     # ชื่อไฟล์ .log ที่โหลด
-#     'overall_accuracy':  float,   # % จุดที่ผ่าน (0-100) รวมทุกรูที่ประเมินได้
 #     'total_points':      int,
 #     'passed_points':     int,
+#     'failed_points':     int,     # v02 — total_points - passed_points
+#     'failed_point_refs': [ {hole_id, seg_idx, layer_idx, point_idx,
+#                              offset_mm}, ... ],   # v02, flat list
+#     'expected_source':   'live' | 'json',   # v02 (from left panel v03)
 #     'settings_mismatch': [hole_display_id, ...],  # รูที่ค่า setting ไม่ตรงกับตอน export
 #     'holes': {
 #         <global_idx into app.current_holes>: {
@@ -34,7 +42,7 @@
 #             'passed':        bool,   # True เฉพาะเมื่อทุกจุดของรูนี้ผ่าน
 #             'total_points':  int,
 #             'passed_points': int,
-#             'max_deviation': float,  # mm, ระยะเบี่ยงเบนสูงสุดของรูนี้
+#             'max_deviation': float,  # mm, ระยะเบี่ยงเบน/offset สูงสุดของรูนี้
 #             'segments': [            # 1 รายการถ้าเป็นรูปกติ (segment เดียว)
 #                 {
 #                     'seg_idx': int,
@@ -49,7 +57,7 @@
 #                                     'expected':   (x, y, z),
 #                                     'actual':     (x, y, z),
 #                                     'delta':      (dx, dy, dz),
-#                                     'distance_mm': float,
+#                                     'distance_mm': float,   # "Offset (mm)"
 #                                     'passed':      bool,
 #                                 }, ...
 #                             ],
@@ -60,6 +68,9 @@
 #         }, ...
 #     },
 #   }
+#   NOTE (v02): 'overall_accuracy' no longer exists anywhere in this
+#   contract — removed per Requirement 4. Do not reintroduce a percentage
+#   anywhere in this file.
 #
 # ตัวแปรสำคัญที่ปรับจูนได้:
 #   _PASS_FACE / _PASS_EDGE   = สี marker ของรูที่ "ผ่าน" ทั้งหมด
@@ -90,7 +101,7 @@ class EvaluationTab:
     # ------------------------------------------------------------------
     def draw_evaluation(self):
         """Entry point เรียกจาก ui/main_window.py::on_nav_change() เมื่อสลับมาแท็บ
-        Evaluation (ยังไม่ได้ต่อสายในไฟล์นี้ — ดู VERSION note ด้านบน)"""
+        Evaluation"""
         app = self.app
         app.fig.clf()
         app.ax = app.fig.add_subplot(111, facecolor='#1e1e1e')
@@ -241,11 +252,15 @@ class EvaluationTab:
         self._overview_base_edge = list(edge_colors)
         self._overview_index_map = {gidx_of[id(h)]: i for i, h in enumerate(selected_holes)}
 
-        accuracy = evaluation_result.get('overall_accuracy')
-        acc_tag  = f"  |  Overall Accuracy: {accuracy:.1f}%" if accuracy is not None else ""
+        # v02: no more "Overall Accuracy: X%" — replaced with a plain
+        # failed/total points count sourced from evaluation_engine v02's
+        # 'failed_points' field (Requirement 4).
+        failed_pts = evaluation_result.get('failed_points')
+        total_pts  = evaluation_result.get('total_points')
+        pts_tag    = f"  |  {failed_pts} / {total_pts} points failed" if total_pts else ""
         ax.set_title(
             f"Evaluation — {pass_count} passed, {fail_count} failed, "
-            f"{nodata_count} no data{acc_tag}",
+            f"{nodata_count} no data{pts_tag}",
             fontsize=13, color="white")
         ax.grid(True, linestyle='--', alpha=0.3, color='#444444')
         ax.set_xlabel("X-Axis (mm)", fontsize=11, color="white")

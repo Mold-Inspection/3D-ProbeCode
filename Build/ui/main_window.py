@@ -15,53 +15,24 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 14
-# CHANGE LOG (v12 -> v14):
-#   NOTE: the v13 that PLAN_toolbar-and-settings-dialogs_v01.md refers to
-#   (icon-swap of btn_rotate/btn_reset/Probe header per
-#   core/gcode_export_panel.py v04's own changelog) was not available as
-#   source when this version was written — this diff is taken directly
-#   against v12. That's not a problem in practice: btn_rotate, btn_reset,
-#   and the entire Probe Stylus collapsible panel are REMOVED from the
-#   sidebar in this version (moved to the toolbar / Hardware Setting
-#   dialog), so whatever icon-swap v13 did to them is superseded here.
-#
-#   FEATURE (PLAN_toolbar-and-settings-dialogs_v01.md): new full-width
-#   top toolbar (ui/tool_bar.py, Thonny-style, icon-only) sits above the
-#   existing 3-pane row. Layout restructured: sidebar_left / center_frame
-#   / sidebar_right now pack into a new self.main_body frame instead of
-#   directly into self.root, with self.tool_bar packed above main_body.
-#   This is purely mechanical — no behavior change to anything already
-#   inside those three panes.
-#
-#   REMOVED from left sidebar: btn_rotate, btn_reset (now toolbar icon
-#   buttons calling the SAME self.rotate_screen / self.reset_position
-#   handlers — no behavior change), the entire collapsible "Probe Stylus
-#   Profile" panel (_setup_probe_profile_panel/_toggle_probe_panel/
-#   _probe_summary_text/_apply_probe_profile/_reset_probe_profile — moved
-#   verbatim into ui/hardware_setting_dialog.py's "Probe Stylus"
-#   category), and the collapsible "G-code Export" panel
-#   (_setup_gcode_export_panel — core/gcode_export_panel.py v05 now opens
-#   as a dialog instead of building inline into self._left_scroll).
-#   Upload, Generate Holes, Clear & Unlock, and the 6 view-direction
-#   buttons are untouched.
-#
-#   NEW: self.machine_profile = MachineProfile() — instantiated here for
-#   the first time; previously core/machine_profile.py existed but had no
-#   UI consumer anywhere in the app. Consumed by the new "Machine Working
-#   Area" category in ui/hardware_setting_dialog.py.
-#
-#   NEW: self.hardware_setting_dialog (ui/hardware_setting_dialog.py) and
-#   self.gcode_export_panel (core/gcode_export_panel.py v05) are now
-#   instantiated directly in __init__ instead of via
-#   _setup_gcode_export_panel()/inline sidebar build — both are opened by
-#   self.tool_bar's icon buttons via .show().
-#
-#   FIX: _set_view_controls_locked() and on_nav_change() now reference
-#   self.tool_bar.btn_rotate / self.tool_bar.btn_reset instead of
-#   self.btn_rotate / self.btn_reset (which no longer exist on UIManager
-#   — those buttons live on ToolBar now). Same enable/disable behavior,
-#   just re-pointed at the new button location.
+# VERSION: 15
+# CHANGE LOG (v14 -> v15):
+#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md):
+#   new additive state fields for the "Load Expected Points (.json)" flow
+#   used by ui/evaluation_left_panel.py v03 — initialized here so they
+#   always exist (avoids getattr-default sprinkling elsewhere):
+#     self.loaded_expected_points        = None
+#     self.loaded_expected_points_source = None
+#     self.loaded_expected_points_view   = None
+#   No other behavior change — everything else in this file is identical
+#   to v14 (see that version's own changelog for the toolbar/dialog
+#   restructuring history).
+# ------------------------------------------------------------------------------
+# (v12 -> v14 changelog unchanged — see prior version for full history:
+#  v14 moved btn_rotate/btn_reset to the new top toolbar, removed the
+#  inline Probe Stylus / G-code Export sidebar panels in favor of
+#  floating dialogs, and instantiated self.machine_profile for the
+#  first time.)
 # ==============================================================================
 import os
 import customtkinter as ctk
@@ -128,6 +99,12 @@ class UIManager:
         self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
         self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
         self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด — เขียนโดย core/gcode_export_panel.py
+
+        # v15: Expected Points (.json) import state
+        # (PLAN_evaluation-expected-points-json-and-offset-only_v01.md §4.2)
+        self.loaded_expected_points        = None   # list ของ point dicts ที่โหลดจาก .json (None = ยังไม่ได้โหลด, ใช้ live recompute จาก app.current_holes แทน)
+        self.loaded_expected_points_source = None   # basename ของไฟล์ .json ที่โหลดล่าสุด — แสดงผลใน Evaluation left panel
+        self.loaded_expected_points_view   = None   # view_name จาก metadata ของไฟล์ที่โหลด (informational เท่านั้น)
 
         self.selection_tab     = SelectionTab(self)
         self.customization_tab = CustomizationTab(self)
