@@ -15,24 +15,24 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 15
-# CHANGE LOG (v14 -> v15):
-#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md):
-#   new additive state fields for the "Load Expected Points (.json)" flow
-#   used by ui/evaluation_left_panel.py v03 — initialized here so they
-#   always exist (avoids getattr-default sprinkling elsewhere):
-#     self.loaded_expected_points        = None
-#     self.loaded_expected_points_source = None
-#     self.loaded_expected_points_view   = None
-#   No other behavior change — everything else in this file is identical
-#   to v14 (see that version's own changelog for the toolbar/dialog
-#   restructuring history).
-# ------------------------------------------------------------------------------
-# (v12 -> v14 changelog unchanged — see prior version for full history:
-#  v14 moved btn_rotate/btn_reset to the new top toolbar, removed the
-#  inline Probe Stylus / G-code Export sidebar panels in favor of
-#  floating dialogs, and instantiated self.machine_profile for the
-#  first time.)
+# VERSION: 17
+# CHANGE LOG (v16 -> v17):
+#   FEATURE (user request — merge-into-one-click + rename to "Schema"):
+#   renamed the v16 state field to match ui/evaluation_left_panel.py v07 /
+#   core/expected_points_io.py v03's "Schema" terminology:
+#     self.loaded_export_record -> self.loaded_schema   # full dict from
+#                                   # core/expected_points_io.py::
+#                                   # load_schema_json() (points +
+#                                   # settings_snapshot + metadata, all
+#                                   # from one export — same shape as
+#                                   # before, just renamed field/file)
+#   No other change — v07 of evaluation_left_panel.py now applies a
+#   loaded schema's settings_snapshot to app.current_holes immediately on
+#   load (via core/evaluation_engine.py v04's apply_settings_snapshot()),
+#   reusing the existing _refresh_after_inspection_toggle() below
+#   unmodified for renumbering/treeview/tab-redraw — no changes needed to
+#   that method or anywhere else in this file. See v16's changelog (and
+#   v14's before it) for older history.
 # ==============================================================================
 import os
 import customtkinter as ctk
@@ -98,13 +98,19 @@ class UIManager:
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel
         self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
         self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
-        self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด — เขียนโดย core/gcode_export_panel.py
+        self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด (live path) — เขียนโดย core/gcode_export_panel.py
 
         # v15: Expected Points (.json) import state
-        # (PLAN_evaluation-expected-points-json-and-offset-only_v01.md §4.2)
-        self.loaded_expected_points        = None   # list ของ point dicts ที่โหลดจาก .json (None = ยังไม่ได้โหลด, ใช้ live recompute จาก app.current_holes แทน)
-        self.loaded_expected_points_source = None   # basename ของไฟล์ .json ที่โหลดล่าสุด — แสดงผลใน Evaluation left panel
+        self.loaded_expected_points        = None   # list ของ point dicts ที่โหลดมา (None = ยังไม่ได้โหลด, ใช้ live recompute จาก app.current_holes แทน)
+        self.loaded_expected_points_source = None   # basename ของไฟล์ที่โหลดล่าสุด — แสดงผลใน Evaluation left panel
         self.loaded_expected_points_view   = None   # view_name จาก metadata ของไฟล์ที่โหลด (informational เท่านั้น)
+
+        # v17: Schema (.json) state (renamed from v16's "Export Record")
+        self.loaded_schema = None   # dict เต็มจาก core/expected_points_io.py::load_schema_json()
+                                     # (points + settings_snapshot + metadata จาก export ครั้งเดียวกันเสมอ)
+                                     # None = ยังไม่ได้โหลด schema ใด ๆ — loaded_expected_points ด้านบนจะว่างตามไปด้วย
+                                     # v07 ของ ui/evaluation_left_panel.py จะเรียก apply_settings_snapshot()
+                                     # ทันทีตอนโหลดสำเร็จ (แทนที่ค่าปัจจุบันทั้งหมด) ไม่ใช่แค่เก็บไว้เฉย ๆ
 
         self.selection_tab     = SelectionTab(self)
         self.customization_tab = CustomizationTab(self)

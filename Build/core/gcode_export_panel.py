@@ -1,30 +1,36 @@
 # core/gcode_export_panel.py
-# VERSION: 07
-# CHANGE LOG (v06 -> v07):
-#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
-#   §4.1/§6): two additions, both using the new core/expected_points_io.py:
-#     1) After every successful full G-code export, _capture_expected_
-#        points_sidecar() now also writes "<name>.points.json" next to
-#        the existing "<name>.snapshot.json" — best-effort, non-blocking,
-#        same pattern as _capture_export_snapshot().
-#     2) New standalone button "📄 Export Expected Points Only (.json)"
-#        in the Export Settings category — calls
-#        core.expected_points_io.export_expected_points_json() directly.
-#        Deliberately does NOT go through _read_settings() / GCodeSettings
-#        validation (Safe Z, feedrate, etc.) at all, since none of that
-#        affects expected point coordinates — satisfies Requirement 3
-#        ("...โดยที่ไม่ต้องสร้าง G-code ใหม่") literally: a user can get
-#        this file without ever touching the G-code Export fields.
-#   No change to _read_settings(), the G-code text emission in
-#   _on_export(), or _capture_export_snapshot() — both keep working
-#   exactly as before, just with one extra sidecar write appended.
+# VERSION: 09
+# CHANGE LOG (v08 -> v09):
+#   FEATURE (user request, follow-up to
+#   PLAN_merged-export-record-non-destructive_v01.md): renamed the
+#   written sidecar from "<name>.export.json" to "<name>_schema.json"
+#   (matches core/expected_points_io.py v03's export_schema_json() /
+#   load_schema_json() rename), and the standalone button now suggests
+#   that filename as its default save name too.
+#   FIX (bug report — see core/evaluation_engine.py v04's changelog):
+#   the settings snapshot written into the schema file must capture ALL
+#   current holes (selected AND unselected), not just the ones currently
+#   selected for inspection — otherwise a loaded schema can never
+#   restore "which holes were selected at export time" at all, since
+#   unselected holes never appeared in the snapshot in the first place.
+#   _build_snapshot_or_none() now takes the holes to snapshot as an
+#   explicit parameter and both call sites (_capture_export_record(),
+#   _on_export_points_only()) now pass `app.current_holes` (ALL holes)
+#   instead of the `selected` list used for the G-code/points
+#   calculation — those two lists serve different purposes and are now
+#   kept explicitly separate: `selected` still drives build_point_map()/
+#   generate_gcode() (only selected holes are ever machined/probed), while
+#   `app.current_holes` drives the settings snapshot (needs the full
+#   picture so a later full-replace restore is possible).
+#   Renamed export_combined_record_json import -> export_schema_json to
+#   match core/expected_points_io.py v03. Wording updated from "Export
+#   Record" to "Schema" throughout button labels/dialogs/messages.
 import os
-import json
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
 from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height
-from core.expected_points_io import export_expected_points_json
+from core.expected_points_io import export_schema_json
 from ui.settings_dialog_base import SettingsDialogBase
 
 
@@ -82,19 +88,22 @@ class GCodeExportPanel:
             font=ctk.CTkFont(size=13, weight="bold"), height=34,
             command=self._on_export).pack(fill="x")
 
-        # v07: standalone action — no GCodeSettings needed at all (only
-        # needs a loaded model + selected holes + current view), so it's
+        # v09: standalone action — still no GCodeSettings needed at all
+        # (only needs a loaded model + selected holes + current view),
         # deliberately placed outside the field-validation flow above.
+        # Writes the "<name>_schema.json" combined format (points + full
+        # settings snapshot) — see file changelog.
         ctk.CTkButton(
-            parent, text="📄 Export Expected Points Only (.json)",
+            parent, text="📄 Export Schema Only (.json)",
             fg_color="#37474f", hover_color="#546e7a",
             font=ctk.CTkFont(size=12), height=30,
             command=self._on_export_points_only).pack(fill="x", pady=(8, 0))
 
         ctk.CTkLabel(
-            parent, text="Expected Points (.json) is also written automatically\n"
-                         "as a sidecar next to every G-code export — use the\n"
-                         "button above only if you want the points WITHOUT\n"
+            parent, text="A Schema (.json) — points + full settings — is\n"
+                         "also written automatically next to every G-code\n"
+                         "export, as \"<name>_schema.json\". Use the button\n"
+                         "above only if you want the schema WITHOUT\n"
                          "exporting a G-code file.",
             font=ctk.CTkFont(size=10), text_color="#5a6570", justify="left"
         ).pack(anchor="w", pady=(8, 0))
@@ -177,6 +186,17 @@ class GCodeExportPanel:
             return app.view_combobox.get()
         return "Top"
 
+    def _default_schema_filename(self) -> str:
+        """v09: suggested filename for the standalone save dialog —
+        "<step basename>_schema.json" when a STEP file is loaded,
+        otherwise just "schema.json"."""
+        app = self.app
+        base = getattr(app, 'loaded_step_filename', None)
+        if base:
+            base = os.path.splitext(base)[0]
+            return f"{base}_schema.json"
+        return "schema.json"
+
     # ------------------------------------------------------------------
     def _on_export(self):
         app = self.app
@@ -214,17 +234,17 @@ class GCodeExportPanel:
             _mb.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
-        self._capture_export_snapshot(selected, view_name, filepath)
-        self._capture_expected_points_sidecar(selected, view_name, filepath)   # v07
+        self._capture_export_record(selected, view_name, filepath)   # v09
 
         app.notify.show(f"บันทึก G-code แล้ว: {filepath}", severity="success")
 
     # ------------------------------------------------------------------
     def _on_export_points_only(self):
-        """v07: standalone action — write ONLY the Expected Points (.json)
-        artifact, without validating/requiring any G-code Export Settings
-        field and without writing a .gcode file at all (Requirement §3).
-        Needs just a loaded model + selected holes + the active view."""
+        """v09: standalone action — writes ONLY the Schema (.json),
+        without validating/requiring any G-code Export Settings field and
+        without writing a .gcode file at all. Writes the combined format
+        (points + FULL settings snapshot, built from ALL current holes —
+        see file changelog) as "<name>_schema.json"."""
         app = self.app
         selected = self._get_selected_holes_or_warn()
         if selected is None:
@@ -233,66 +253,72 @@ class GCodeExportPanel:
         view_name = self._resolve_view_name()
 
         filepath = ctk.filedialog.asksaveasfilename(
-            title="Save Expected Points", defaultextension=".json",
-            filetypes=[("Expected Points JSON", "*.json")])
+            title="Save Schema", defaultextension=".json",
+            initialfile=self._default_schema_filename(),
+            filetypes=[("Schema JSON", "*.json")])
         if not filepath:
             return
 
+        # v09: snapshot ALL current holes (selected + unselected), not
+        # just `selected` — the schema must be able to fully replace the
+        # current configuration on load, including which holes are
+        # selected at all.
+        settings_snapshot = self._build_snapshot_or_none(app.current_holes, view_name)
+
         try:
-            export_expected_points_json(
+            export_schema_json(
                 selected, view_name, filepath,
+                settings_snapshot=settings_snapshot or {'view_name': view_name, 'holes': {}},
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
         except Exception as e:
-            _mb.showerror("Export Failed", f"เขียนไฟล์ Expected Points ไม่สำเร็จ:\n{e!r}")
+            _mb.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
 
-        app.notify.show(f"บันทึก Expected Points แล้ว: {filepath}", severity="success")
+        app.notify.show(f"บันทึก Schema แล้ว: {filepath}", severity="success")
 
     # ------------------------------------------------------------------
-    def _capture_export_snapshot(self, selected_holes, view_name, gcode_filepath):
-        """หลัง export สำเร็จ — จับภาพค่าตั้งค่าการตรวจสอบของรูที่เพิ่ง
-        export ไป ทั้งแบบเก็บใน memory (app.last_export_snapshot) และเขียน
-        เป็นไฟล์ sidecar "<ชื่อ .gcode>.snapshot.json" (best-effort) —
-        ความล้มเหลวที่นี่ต้องไม่กระทบการ export ที่สำเร็จไปแล้ว"""
-        app = self.app
+    def _build_snapshot_or_none(self, holes_to_snapshot, view_name):
+        """v09: best-effort build of the settings snapshot — returns None
+        (never raises) if core/evaluation_engine.py isn't importable yet
+        or the build itself fails, so a schema can still be written with
+        a placeholder empty snapshot rather than failing the whole
+        export. `holes_to_snapshot` should be ALL of app.current_holes
+        (not just the selected ones) so the written snapshot is a
+        complete picture — see file changelog. Shared by both the
+        automatic sidecar path (_capture_export_record) and the
+        standalone button (_on_export_points_only)."""
         try:
             from core.evaluation_engine import build_settings_snapshot
         except ImportError as e:
-            print(f"[gcode_export_panel] snapshot skipped — "
+            print(f"[gcode_export_panel] settings_snapshot skipped — "
                   f"core/evaluation_engine.py not available yet ({e!r})")
-            return
-
+            return None
         try:
-            snapshot = build_settings_snapshot(selected_holes, view_name)
+            return build_settings_snapshot(holes_to_snapshot, view_name)
         except Exception as e:
-            print(f"[gcode_export_panel] snapshot build failed (non-blocking): {e!r}")
-            return
-
-        app.last_export_snapshot = snapshot
-
-        try:
-            sidecar_path = os.path.splitext(gcode_filepath)[0] + ".snapshot.json"
-            with open(sidecar_path, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f, indent=2)
-            print(f"[gcode_export_panel] export snapshot written to {sidecar_path}")
-        except Exception as e:
-            print(f"[gcode_export_panel] sidecar snapshot write failed (non-blocking): {e!r}")
+            print(f"[gcode_export_panel] settings_snapshot build failed (non-blocking): {e!r}")
+            return None
 
     # ------------------------------------------------------------------
-    def _capture_expected_points_sidecar(self, selected_holes, view_name, gcode_filepath):
-        """v07: after a successful full G-code export, also write the
-        Expected Points (.json) sidecar "<name>.points.json" next to the
-        .snapshot.json sidecar — satisfies "users who DO export G-code
-        get it for free" (plan §4.1). Best-effort only, never blocks a
-        successful export that already wrote the .gcode file."""
+    def _capture_export_record(self, selected_holes, view_name, gcode_filepath):
+        """v09: หลัง export G-code สำเร็จ — สร้าง settings snapshot จาก
+        รูทั้งหมด (app.current_holes ไม่ใช่แค่ selected_holes) ครั้งเดียว
+        แล้วเขียนไฟล์ Schema "<name>_schema.json" ไฟล์เดียว (แทนที่
+        "<name>.export.json" เดิม) — best-effort, ความล้มเหลวที่นี่ต้อง
+        ไม่กระทบการ export G-code ที่สำเร็จไปแล้ว"""
         app = self.app
+        snapshot = self._build_snapshot_or_none(app.current_holes, view_name)   # v09: ALL holes
+        if snapshot is not None:
+            app.last_export_snapshot = snapshot   # kept in-memory for this session's stale-settings guard
+
         try:
-            sidecar_path = os.path.splitext(gcode_filepath)[0] + ".points.json"
-            export_expected_points_json(
+            sidecar_path = os.path.splitext(gcode_filepath)[0] + "_schema.json"   # v09: renamed
+            export_schema_json(
                 selected_holes, view_name, sidecar_path,
+                settings_snapshot=snapshot or {'view_name': view_name, 'holes': {}},
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
-            print(f"[gcode_export_panel] expected points sidecar written to {sidecar_path}")
+            print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
-            print(f"[gcode_export_panel] expected points sidecar write failed (non-blocking): {e!r}")
+            print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")

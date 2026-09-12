@@ -142,7 +142,7 @@ class EvaluationTab:
             self._draw_placeholder(
                 "🧪",
                 "No evaluation results yet.\n"
-                "Load an OpenBuilds Control .log file from the left panel to "
+                "Load an OpenBuilds Control .log file from the left panel to \n"
                 "compare it against the expected probe points.")
             return
 
