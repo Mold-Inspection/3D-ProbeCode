@@ -1,5 +1,34 @@
 # core/gcode_export_panel.py
-# VERSION: 09
+# VERSION: 10
+# CHANGE LOG (v09 -> v10):
+#   FEATURE (user request — "after exporting G-code, auto-set the Schema
+#   as the active one, without the user picking it by hand"): both
+#   sidecar-writing paths now push the schema they just wrote straight
+#   into the app's "active schema" state — the exact same state
+#   ui/evaluation_left_panel.py v08's "📂 Load Schema (.json)" button
+#   sets, just without a file dialog:
+#     - _capture_export_record() (the automatic sidecar after
+#       "🖨 Export G-code")
+#     - _on_export_points_only() (the standalone "📄 Export Schema Only"
+#       button)
+#   New shared helper _auto_load_schema(payload, filepath) does this:
+#   sets app.loaded_schema / loaded_expected_points / _source / _view
+#   from the `payload` dict that core/expected_points_io.py v04's
+#   export_schema_json() now RETURNS (no re-reading the file back from
+#   disk, no recomputing build_point_map() a second time). Does NOT call
+#   apply_settings_snapshot() — unnecessary here, since the
+#   settings_snapshot was built from app.current_holes at the exact
+#   moment of export, i.e. it already IS the current configuration,
+#   nothing to replace. Also calls
+#   app.evaluation_left_panel._auto_refresh_if_result_exists() (added in
+#   v08) so an already-loaded .log's results are recomputed immediately
+#   too, and refreshes the evaluation left/right sidebars + redraws the
+#   Evaluation tab if it's the one currently visible — all best-effort
+#   (wrapped so a UI refresh failure never affects the export that
+#   already succeeded).
+#   Both success toasts now mention that the schema was set active (and
+#   whether results were refreshed), so the user doesn't have to guess.
+#
 # CHANGE LOG (v08 -> v09):
 #   FEATURE (user request, follow-up to
 #   PLAN_merged-export-record-non-destructive_v01.md): renamed the
@@ -234,17 +263,23 @@ class GCodeExportPanel:
             _mb.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
-        self._capture_export_record(selected, view_name, filepath)   # v09
+        schema_report = self._capture_export_record(selected, view_name, filepath)   # v09/v10
 
-        app.notify.show(f"บันทึก G-code แล้ว: {filepath}", severity="success")
+        msg = f"บันทึก G-code แล้ว: {filepath}"
+        if schema_report.get('written'):
+            msg += "\nตั้ง Schema นี้เป็นค่าที่ใช้งานอยู่แล้ว"
+            if schema_report.get('refreshed'):
+                msg += " — คำนวณผลลัพธ์ Evaluation ใหม่แล้ว"
+        app.notify.show(msg, severity="success")
 
     # ------------------------------------------------------------------
     def _on_export_points_only(self):
-        """v09: standalone action — writes ONLY the Schema (.json),
-        without validating/requiring any G-code Export Settings field and
-        without writing a .gcode file at all. Writes the combined format
-        (points + FULL settings snapshot, built from ALL current holes —
-        see file changelog) as "<name>_schema.json"."""
+        """standalone action — writes ONLY the Schema (.json), without
+        validating/requiring any G-code Export Settings field and without
+        writing a .gcode file at all. Writes the combined format (points
+        + FULL settings snapshot, built from ALL current holes — see
+        file changelog) as "<name>_schema.json", then (v10) immediately
+        sets it as the app's active schema — see _auto_load_schema()."""
         app = self.app
         selected = self._get_selected_holes_or_warn()
         if selected is None:
@@ -266,7 +301,7 @@ class GCodeExportPanel:
         settings_snapshot = self._build_snapshot_or_none(app.current_holes, view_name)
 
         try:
-            export_schema_json(
+            payload = export_schema_json(
                 selected, view_name, filepath,
                 settings_snapshot=settings_snapshot or {'view_name': view_name, 'holes': {}},
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
@@ -275,7 +310,15 @@ class GCodeExportPanel:
             _mb.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
 
-        app.notify.show(f"บันทึก Schema แล้ว: {filepath}", severity="success")
+        # v10: this schema was just built from the CURRENT app.current_holes
+        # config — set it active immediately, same as picking it via
+        # "Load Schema (.json)" would, minus the file dialog.
+        refreshed = self._auto_load_schema(payload, filepath)
+
+        msg = f"บันทึก Schema แล้ว: {filepath}\nตั้งเป็น Schema ที่ใช้งานอยู่แล้ว"
+        if refreshed:
+            msg += " — คำนวณผลลัพธ์ Evaluation ใหม่แล้ว"
+        app.notify.show(msg, severity="success")
 
     # ------------------------------------------------------------------
     def _build_snapshot_or_none(self, holes_to_snapshot, view_name):
@@ -301,12 +344,19 @@ class GCodeExportPanel:
             return None
 
     # ------------------------------------------------------------------
-    def _capture_export_record(self, selected_holes, view_name, gcode_filepath):
-        """v09: หลัง export G-code สำเร็จ — สร้าง settings snapshot จาก
-        รูทั้งหมด (app.current_holes ไม่ใช่แค่ selected_holes) ครั้งเดียว
-        แล้วเขียนไฟล์ Schema "<name>_schema.json" ไฟล์เดียว (แทนที่
-        "<name>.export.json" เดิม) — best-effort, ความล้มเหลวที่นี่ต้อง
-        ไม่กระทบการ export G-code ที่สำเร็จไปแล้ว"""
+    def _capture_export_record(self, selected_holes, view_name, gcode_filepath) -> dict:
+        """หลัง export G-code สำเร็จ — สร้าง settings snapshot จากรูทั้งหมด
+        (app.current_holes ไม่ใช่แค่ selected_holes) ครั้งเดียว แล้วเขียน
+        ไฟล์ Schema "<name>_schema.json" ไฟล์เดียว — best-effort, ความ
+        ล้มเหลวที่นี่ต้องไม่กระทบการ export G-code ที่สำเร็จไปแล้ว v10:
+        ยังตั้ง schema ที่เพิ่งเขียนเป็น "schema ที่ใช้งานอยู่" ของแอปทันที
+        ผ่าน _auto_load_schema() ด้วย
+
+        Returns
+        -------
+        dict: {'written': bool, 'refreshed': bool} — ใช้โดย _on_export()
+        เพื่อแต่งข้อความ toast เท่านั้น ไม่มีผลต่อการ export G-code
+        """
         app = self.app
         snapshot = self._build_snapshot_or_none(app.current_holes, view_name)   # v09: ALL holes
         if snapshot is not None:
@@ -314,7 +364,7 @@ class GCodeExportPanel:
 
         try:
             sidecar_path = os.path.splitext(gcode_filepath)[0] + "_schema.json"   # v09: renamed
-            export_schema_json(
+            payload = export_schema_json(
                 selected_holes, view_name, sidecar_path,
                 settings_snapshot=snapshot or {'view_name': view_name, 'holes': {}},
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
@@ -322,3 +372,46 @@ class GCodeExportPanel:
             print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")
+            return {'written': False, 'refreshed': False}
+
+        refreshed = self._auto_load_schema(payload, sidecar_path)   # v10
+        return {'written': True, 'refreshed': refreshed}
+
+    # ------------------------------------------------------------------
+    def _auto_load_schema(self, payload: dict, filepath: str) -> bool:
+        """v10: sets `payload` (the schema dict just written to `filepath`)
+        as the app's active schema — the same app-state fields
+        ui/evaluation_left_panel.py's "📂 Load Schema (.json)" sets, minus
+        the file dialog and minus apply_settings_snapshot() (not needed
+        here: `payload['settings_snapshot']` was built from
+        app.current_holes at the exact moment of export, i.e. it already
+        matches the current configuration exactly — there is nothing to
+        replace). Best-effort: any failure here is logged and swallowed,
+        never allowed to affect the export that already succeeded.
+
+        Returns True if an already-loaded .log's results were also
+        recomputed against this schema (via
+        evaluation_left_panel._auto_refresh_if_result_exists()), False
+        otherwise (including if that refresh mechanism isn't available
+        yet, or there was nothing to refresh)."""
+        app = self.app
+        try:
+            app.loaded_schema                 = payload
+            app.loaded_expected_points        = payload.get('points') or []
+            app.loaded_expected_points_source = os.path.basename(filepath)
+            app.loaded_expected_points_view   = payload.get('view_name')
+
+            refreshed = False
+            left_panel = getattr(app, 'evaluation_left_panel', None)
+            if left_panel is not None:
+                if hasattr(left_panel, '_auto_refresh_if_result_exists'):
+                    refreshed = left_panel._auto_refresh_if_result_exists()
+                left_panel.refresh()
+            if hasattr(app, 'evaluation_sidebar_panel'):
+                app.evaluation_sidebar_panel.refresh()
+            if getattr(app, 'current_tab', None) == "Evaluation" and hasattr(app, 'evaluation_tab'):
+                app.evaluation_tab.draw_evaluation()
+            return refreshed
+        except Exception as e:
+            print(f"[gcode_export_panel] auto-load schema into app state failed (non-blocking): {e!r}")
+            return False
