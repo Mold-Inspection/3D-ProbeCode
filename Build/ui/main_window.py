@@ -119,7 +119,11 @@ class UIManager:
 
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
-        self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง พิกเซล) — ปรับได้
+        self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล) — fallback ถ้าไม่ maximize
+        try:
+            self.root.state('zoomed')   # v18: เปิดโปรแกรมแบบ maximize เสมอ (Windows/Linux — macOS ไม่รองรับ 'zoomed')
+        except Exception:
+            pass   # best-effort — ไม่ให้การ maximize ล้มเหลวไปบล็อกการเปิดโปรแกรม
 
         # v14: full-width toolbar (Thonny-style) pinned above the 3-pane row
         self.tool_bar = ToolBar(self)
