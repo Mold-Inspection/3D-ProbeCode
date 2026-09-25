@@ -91,6 +91,8 @@ class SettingsDialogBase:
         self._active_key      = None
 
         self.toplevel = None
+        self._drag_offset_x = 0   # v06 — draggable custom header (replaces native titlebar drag)
+        self._drag_offset_y = 0
 
         self._master_focus_bind_id = None   # v04: <FocusIn> hook id on self.master, set/cleared in show()/_on_close()
 
@@ -120,6 +122,7 @@ class SettingsDialogBase:
         self.toplevel.minsize(_DIALOG_MIN_WIDTH, _DIALOG_MIN_HEIGHT)   # v05: floor only, not fixed size
         self.toplevel.configure(fg_color=_COLOR_BODY)
         self.toplevel.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.toplevel.overrideredirect(True)
 
         self._build_header()
         self._build_search_bar()
@@ -236,13 +239,41 @@ class SettingsDialogBase:
         header.pack(fill="x", side="top")
         header.pack_propagate(False)
 
-        ctk.CTkLabel(header, text=self.title_text, font=ctk.CTkFont(size=15, weight="bold"),
-                    text_color="#e0e0e0").pack(side="left", padx=16)
+        title_label = ctk.CTkLabel(header, text=self.title_text, font=ctk.CTkFont(size=15, weight="bold"),
+                    text_color="#e0e0e0")
+        title_label.pack(side="left", padx=16)
 
         ctk.CTkButton(header, text="✕", width=32, height=28, fg_color="transparent",
                      hover_color="#3a1f1f", text_color="#cccccc", font=ctk.CTkFont(size=14),
                      command=self._on_close).pack(side="right", padx=8)
 
+        # v06: overrideredirect() removed the native OS titlebar — this
+        # header (and its title label) is now the only way to move the
+        # window, so make both draggable.
+        self._make_draggable(header)
+        self._make_draggable(title_label)
+        # ------------------------------------------------------------------
+    # v06: manual drag — replaces native title-bar drag lost to overrideredirect()
+    # ------------------------------------------------------------------
+    def _make_draggable(self, widget):
+        """bind ButtonPress-1 / B1-Motion on `widget` so dragging it moves
+        self.toplevel. Safe to call on more than one widget (header frame
+        + its title label) so dragging works from either."""
+        widget.bind("<ButtonPress-1>", self._on_drag_start)
+        widget.bind("<B1-Motion>", self._on_drag_motion)
+
+    def _on_drag_start(self, event):
+        if self.toplevel is None:
+            return
+        self._drag_offset_x = event.x_root - self.toplevel.winfo_x()
+        self._drag_offset_y = event.y_root - self.toplevel.winfo_y()
+
+    def _on_drag_motion(self, event):
+        if self.toplevel is None:
+            return
+        x = event.x_root - self._drag_offset_x
+        y = event.y_root - self._drag_offset_y
+        self.toplevel.geometry(f"+{x}+{y}")
     def _build_search_bar(self):
         # Cosmetic only (PLAN §2) — matches VS Code's search-bar strip
         # visually, does not filter fields.
@@ -304,7 +335,45 @@ class SettingsDialogBase:
 
         self._fit_to_content()
         self._center_on_master()
+        # ------------------------------------------------------------------
+    def _fit_to_content(self):
+        """v06: synchronous first pass + a second pass scheduled via
+        after_idle() — a wraplength CTkLabel (e.g. the G-code Export
+        note) doesn't always report its true reqheight() after only one
+        update_idletasks(), so relying on a single measurement can leave
+        the toplevel sized against a stale layout pass (visible dead
+        space). The second pass re-measures once Tk has settled and also
+        re-centers, since the size may have changed."""
+        self._apply_fit_geometry()
+        if self.toplevel is None:
+            return
+        try:
+            self.toplevel.after_idle(self._second_pass_fit)
+        except Exception:
+            pass   # best-effort only
 
+    def _second_pass_fit(self):
+        if self.toplevel is None or not self.toplevel.winfo_exists():
+            return
+        self._apply_fit_geometry()
+        self._center_on_master()
+
+    def _apply_fit_geometry(self):
+        """Measures the currently-packed category frame and resizes
+        self.toplevel to hug it, floored at _DIALOG_MIN_WIDTH/
+        _DIALOG_MIN_HEIGHT. Safe to call before any category is packed
+        (falls back to the floor via max())."""
+        if self.toplevel is None:
+            return
+        try:
+            self.toplevel.update_idletasks()
+            req_w = self.toplevel.winfo_reqwidth()
+            req_h = self.toplevel.winfo_reqheight()
+            width  = max(_DIALOG_MIN_WIDTH, req_w)
+            height = max(_DIALOG_MIN_HEIGHT, req_h)
+            self.toplevel.geometry(f"{width}x{height}")
+        except Exception:
+            pass   # best-effort only — never block the dialog from opening/switching
     # ------------------------------------------------------------------
     def _on_close(self):
         """v02 FIX: clear cached per-category frames/buttons so the next
