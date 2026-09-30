@@ -61,8 +61,10 @@ import os
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
-_COLOR_GOOD = "#66bb6a"
-_COLOR_BAD  = "#e53935"
+from ui import theme
+
+_COLOR_GOOD = theme.OK_TEXT
+_COLOR_BAD  = theme.ERR_TEXT
 
 
 def _remap_holes_by_gi(result: dict, current_holes: list) -> None:
@@ -101,9 +103,9 @@ class EvaluationLeftPanel:
         ctk.CTkLabel(parent, text="🧪 Evaluation", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(20, 10))
 
         # --- STEP file info -------------------------------------------------
-        self.file_frame = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=5)
+        self.file_frame = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
         self.file_frame.pack(pady=(0, 15), padx=20, fill="x")
-        ctk.CTkLabel(self.file_frame, text="STEP File", text_color="gray",
+        ctk.CTkLabel(self.file_frame, text="STEP File", text_color=theme.TEXT_MUTED,
                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=10, pady=(8, 0))
         self.lbl_step_filename = ctk.CTkLabel(
             self.file_frame, text="—", font=ctk.CTkFont(size=12, weight="bold"),
@@ -111,9 +113,9 @@ class EvaluationLeftPanel:
         self.lbl_step_filename.pack(anchor="w", padx=10, pady=(0, 8))
 
         # --- Physical dimensions (raw X/Y/Z, no view-relabeling) ------------
-        self.dim_frame = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=5)
+        self.dim_frame = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
         self.dim_frame.pack(pady=(0, 15), padx=20, fill="x")
-        ctk.CTkLabel(self.dim_frame, text="Physical Dimensions", text_color="gray",
+        ctk.CTkLabel(self.dim_frame, text="Physical Dimensions", text_color=theme.TEXT_MUTED,
                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=10, pady=(8, 0))
         self.lbl_dim_x = ctk.CTkLabel(self.dim_frame, text="X: -- mm", font=ctk.CTkFont(size=12))
         self.lbl_dim_x.pack(anchor="w", padx=10)
@@ -122,60 +124,60 @@ class EvaluationLeftPanel:
         self.lbl_dim_z = ctk.CTkLabel(self.dim_frame, text="Z: -- mm", font=ctk.CTkFont(size=12))
         self.lbl_dim_z.pack(anchor="w", padx=10, pady=(0, 8))
 
-        ctk.CTkFrame(parent, height=1, fg_color="#333333").pack(fill="x", padx=20, pady=(5, 15))
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(5, 15))
 
         # --- Schema (.json) — load = direct replace, auto-refreshes
         # results if a .log has already been loaded (v08) ------------------
         self.btn_load_schema = ctk.CTkButton(
             parent, text="📂 Load Schema (.json)",
-            fg_color="#1565c0", hover_color="#1976d2",
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._on_load_schema)
         self.btn_load_schema.pack(pady=(0, 5), padx=20, fill="x")
 
         self.lbl_schema_info = ctk.CTkLabel(
-            parent, text="Using live hole config (no schema loaded)", text_color="gray",
+            parent, text="Using live hole config (no schema loaded)", text_color=theme.TEXT_MUTED,
             font=ctk.CTkFont(size=11), wraplength=220, justify="left")
         self.lbl_schema_info.pack(pady=(0, 8), padx=20, anchor="w")
 
         self.btn_clear_schema = ctk.CTkButton(
             parent, text="↺ Clear loaded schema",
-            fg_color="transparent", hover_color="#2a2a4e",
-            text_color="#90caf9", font=ctk.CTkFont(size=11),
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+            font=ctk.CTkFont(size=11),
             command=self._on_clear_schema)
         self.btn_clear_schema.pack(pady=(0, 15), padx=20, fill="x")
 
-        ctk.CTkFrame(parent, height=1, fg_color="#333333").pack(fill="x", padx=20, pady=(0, 15))
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(0, 15))
 
         # --- Load .log ---------------------------------------------------
         self.btn_load_log = ctk.CTkButton(
             parent, text="📥 Load OpenBuilds .log",
-            fg_color="#1565c0", hover_color="#1976d2",
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self._on_load_log)
         self.btn_load_log.pack(pady=(0, 5), padx=20, fill="x")
 
         self.lbl_log_info = ctk.CTkLabel(
-            parent, text="No .log file loaded", text_color="gray",
+            parent, text="No .log file loaded", text_color=theme.TEXT_MUTED,
             font=ctk.CTkFont(size=11), wraplength=220, justify="left")
         self.lbl_log_info.pack(pady=(0, 15), padx=20, anchor="w")
 
-        ctk.CTkFrame(parent, height=1, fg_color="#333333").pack(fill="x", padx=20, pady=(0, 15))
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(0, 15))
 
         # --- Results -----------------------------------------------------
-        self.results_frame = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=5)
+        self.results_frame = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
         self.results_frame.pack(pady=(0, 15), padx=20, fill="x")
 
         results_header = ctk.CTkFrame(self.results_frame, fg_color="transparent")
         results_header.pack(fill="x", padx=10, pady=(8, 0))
-        ctk.CTkLabel(results_header, text="Results", text_color="gray",
+        ctk.CTkLabel(results_header, text="Results", text_color=theme.TEXT_MUTED,
                     font=ctk.CTkFont(size=11)).pack(side="left")
         # v08: manual refresh — re-runs evaluation against whatever the
         # CURRENT hole config / schema is, reusing the last-loaded .log's
         # cached actual points (no file dialog).
         self.btn_refresh_results = ctk.CTkButton(
             results_header, text="🔄 Refresh Results", width=110, height=22,
-            fg_color="#37474f", hover_color="#546e7a", font=ctk.CTkFont(size=10),
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER, font=ctk.CTkFont(size=10),
             state="disabled", command=self._on_refresh_results)
         self.btn_refresh_results.pack(side="right")
 
@@ -183,7 +185,7 @@ class EvaluationLeftPanel:
                                        font=ctk.CTkFont(size=18, weight="bold"))
         self.lbl_failed.pack(anchor="w", padx=10, pady=(4, 2))
         self.lbl_hole_rate = ctk.CTkLabel(self.results_frame, text="",
-                                          text_color="#9aa4b2", font=ctk.CTkFont(size=11))
+                                          text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11))
         self.lbl_hole_rate.pack(anchor="w", padx=10, pady=(0, 8))
 
         self._built = True
@@ -203,13 +205,13 @@ class EvaluationLeftPanel:
 
         if app.geo.mesh is not None:
             ext = app.geo.get_physical_dimensions()
-            self.lbl_dim_x.configure(text=f"X: {ext[0]:.2f} mm", text_color="white")
-            self.lbl_dim_y.configure(text=f"Y: {ext[1]:.2f} mm", text_color="white")
-            self.lbl_dim_z.configure(text=f"Z: {ext[2]:.2f} mm", text_color="white")
+            self.lbl_dim_x.configure(text=f"X: {ext[0]:.2f} mm", text_color=theme.TEXT)
+            self.lbl_dim_y.configure(text=f"Y: {ext[1]:.2f} mm", text_color=theme.TEXT)
+            self.lbl_dim_z.configure(text=f"Z: {ext[2]:.2f} mm", text_color=theme.TEXT)
         else:
-            self.lbl_dim_x.configure(text="X: -- mm", text_color="gray")
-            self.lbl_dim_y.configure(text="Y: -- mm", text_color="gray")
-            self.lbl_dim_z.configure(text="Z: -- mm", text_color="gray")
+            self.lbl_dim_x.configure(text="X: -- mm", text_color=theme.TEXT_MUTED)
+            self.lbl_dim_y.configure(text="Y: -- mm", text_color=theme.TEXT_MUTED)
+            self.lbl_dim_z.configure(text="Z: -- mm", text_color=theme.TEXT_MUTED)
 
         # --- Schema source readout ---------------------------------------
         schema        = getattr(app, 'loaded_schema', None)
@@ -221,10 +223,10 @@ class EvaluationLeftPanel:
             self.lbl_schema_info.configure(
                 text=f"Loaded: {source}\n{len(loaded_points)} points{view_tag}\n"
                      f"(hole selection + settings already applied)",
-                text_color="#b0bec5")
+                text_color=theme.TEXT_SECONDARY)
         else:
             self.lbl_schema_info.configure(
-                text="Using live hole config (no schema loaded)", text_color="gray")
+                text="Using live hole config (no schema loaded)", text_color=theme.TEXT_MUTED)
 
         ready = (app.geo.mesh is not None and app.geo.step_data is not None
                 and getattr(app, 'holes_detected', False) and app.current_holes)
@@ -242,7 +244,7 @@ class EvaluationLeftPanel:
             total_pts = result.get('total_points', 0)
             self.lbl_log_info.configure(
                 text=f"Loaded: {log_name}\n{total_pts} points parsed",
-                text_color="#b0bec5")
+                text_color=theme.TEXT_SECONDARY)
 
             failed = result.get('failed_points', 0)
             if total_pts:
@@ -251,7 +253,7 @@ class EvaluationLeftPanel:
                     text=f"{failed} / {total_pts} points failed",
                     text_color=color)
             else:
-                self.lbl_failed.configure(text="—", text_color="white")
+                self.lbl_failed.configure(text="—", text_color=theme.TEXT)
 
             holes_r = result.get('holes', {}) or {}
             n_holes = len(holes_r)
@@ -259,8 +261,8 @@ class EvaluationLeftPanel:
             self.lbl_hole_rate.configure(
                 text=f"{n_pass} / {n_holes} holes fully passed" if n_holes else "")
         else:
-            self.lbl_log_info.configure(text="No .log file loaded", text_color="gray")
-            self.lbl_failed.configure(text="—", text_color="white")
+            self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
+            self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
 
     # ------------------------------------------------------------------

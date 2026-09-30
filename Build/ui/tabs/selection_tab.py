@@ -17,6 +17,8 @@
 # ==============================================================================
 import numpy as np
 
+from ui import theme
+
 
 class SelectionTab:
     def __init__(self, app):
@@ -59,7 +61,7 @@ class SelectionTab:
             f"▶ {depth:.2f} mm",
             xy=(px, py), xytext=(12, 12),
             textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.35", fc="#1e1e1e",
+            bbox=dict(boxstyle="round,pad=0.35", fc=theme.c(theme.BG_PANEL),
                       ec="#ff4444", alpha=0.95),
             color="#ff9999", fontsize=9, fontweight='bold',
             zorder=19)
@@ -386,11 +388,11 @@ class SelectionTab:
 
         lock_text = " [LOCKED]" if getattr(app, 'holes_detected', False) else ""
         rot_text  = f" (Rotated {app.screen_rotation}°)" if getattr(app, 'screen_rotation', 0) > 0 else ""
-        app.ax.set_title(title + rot_text + lock_text, fontsize=16, color="white")
+        app.ax.set_title(title + rot_text + lock_text, fontsize=16, color=theme.c(theme.TEXT))
 
-        app.ax.grid(True, linestyle='--', alpha=0.3, color='#444444')
-        app.ax.set_xlabel("X-Axis (mm)", fontsize=12, fontweight='bold', color="white")
-        app.ax.set_ylabel("Y-Axis (mm)", fontsize=12, fontweight='bold', color="white")
+        app.ax.grid(True, linestyle='--', alpha=0.3, color=theme.c(theme.PLOT_GRID))
+        app.ax.set_xlabel("X-Axis (mm)", fontsize=12, fontweight='bold', color=theme.c(theme.TEXT))
+        app.ax.set_ylabel("Y-Axis (mm)", fontsize=12, fontweight='bold', color=theme.c(theme.TEXT))
 
         if getattr(app, 'max_physical_dim', None) is not None and len(app.current_x) > 0:
             cx        = (np.min(app.current_x) + np.max(app.current_x)) / 2.0
@@ -403,21 +405,21 @@ class SelectionTab:
 
         if hasattr(app, 'cax') and app.cax is not None:
             cbar = app.fig.colorbar(tpc, cax=app.cax)
-            cbar.set_label("Depth / Z-Axis (mm)", fontsize=12, color="white")
-            cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
+            cbar.set_label("Depth / Z-Axis (mm)", fontsize=12, color=theme.c(theme.TEXT))
+            cbar.ax.yaxis.set_tick_params(color=theme.c(theme.TEXT_MUTED), labelcolor=theme.c(theme.TEXT_MUTED))
 
         app.hover_text = app.ax.annotate(
             "", xy=(0, 0), xytext=(14, 14),
             textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.4", fc="#1e1e1e",
+            bbox=dict(boxstyle="round,pad=0.4", fc=theme.c(theme.BG_PANEL),
                       ec="#3694ED", alpha=0.92),
-            color="white", fontsize=10, visible=False, zorder=20)
+            color=theme.c(theme.TEXT), fontsize=10, visible=False, zorder=20)
 
         app.ax.text(
             0.01, 0.01,
             f"Click = Pin depth (max {self.MAX_PINS})  |  Right-click = Remove last pin",
             transform=app.ax.transAxes,
-            fontsize=8, color='#666666', va='bottom', ha='left', zorder=15)
+            fontsize=8, color=theme.c(theme.TEXT_MUTED), va='bottom', ha='left', zorder=15)
 
         app.canvas.draw()
 

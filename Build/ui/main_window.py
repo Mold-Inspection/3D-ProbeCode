@@ -53,8 +53,32 @@ from ui.evaluation_left_panel import EvaluationLeftPanel
 from ui.evaluation_sidebar_panel import EvaluationSidebarPanel
 from core.gcode_export_panel import GCodeExportPanel
 from ui.tool_bar import ToolBar
+from ui.tab_strip import TabStrip
 from ui.hardware_setting_dialog import HardwareSettingDialog
 from core.ui_notify import UINotify
+from ui import theme
+
+
+_LEFT_WIDTH       = 420   # ความกว้างแผง Hole schedule (ซ้าย) — ปรับได้
+_RIGHT_WIDTH      = 330   # ความกว้างแผง Properties (ขวา) — ปรับได้
+_RIGHT_WIDTH_EVAL = 430   # ความกว้างแผงขวาตอนอยู่แท็บ Evaluation (ตารางจุดวัดกว้างกว่า)
+
+# คอลัมน์ของ Hole schedule — ใช้ฟอนต์ความกว้างคงที่ (theme.FONT_MONO) ให้ตรงแนวกัน
+_HOLE_COLS_HEADER = f"{'#':>3} {'Dia':>8} {'Depth':>8} {'X':>8} {'Y':>8}"
+
+
+def _fmt_num(value) -> str:
+    return f"{value:>8.2f}" if isinstance(value, (int, float)) else f"{'--':>8}"
+
+
+def _hole_row_text(hole) -> str:
+    """ข้อความ 1 แถวของ Hole schedule (เรียงคอลัมน์ตาม _HOLE_COLS_HEADER)"""
+    segs = getattr(hole, 'segments', None)
+    radius = getattr(hole, 'radius', None)
+    dia = radius * 2 if isinstance(radius, (int, float)) else None
+    tail = f" x{len(segs)}" if segs else ""
+    return (f"{str(hole.display_id):>3} {_fmt_num(dia)} {_fmt_num(getattr(hole, 'depth', None))} "
+            f"{_fmt_num(getattr(hole, 'x', None))} {_fmt_num(getattr(hole, 'y', None))}{tail}")
 
 
 def _build_segment_settings(sh) -> list:
@@ -117,54 +141,54 @@ class UIManager:
         self.path_mapper_tab   = PathMapperTab(self)
         self.evaluation_tab    = EvaluationTab(self)
 
+        theme.apply()   # ต้องมาก่อน ctk.CTk() — ตั้ง default สีของ widget ทุกตัว
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
         self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล) — fallback ถ้าไม่ maximize
-        try:
-            self.root.state('zoomed')   # v18: เปิดโปรแกรมแบบ maximize เสมอ (Windows/Linux — macOS ไม่รองรับ 'zoomed')
-        except Exception:
-            pass   # best-effort — ไม่ให้การ maximize ล้มเหลวไปบล็อกการเปิดโปรแกรม
+        # การ maximize ย้ายไปทำใน show() — ดูเหตุผลที่ _maximize()
 
-        # v14: full-width toolbar (Thonny-style) pinned above the 3-pane row
+        # โครงหน้าต่าง (mockup "A · Metrology"), บนลงล่าง:
+        #   ribbon (ui/tool_bar.py) → แถบแท็บ (ui/tab_strip.py) →
+        #   [Hole schedule | กราฟ | Properties] → status bar
         self.tool_bar = ToolBar(self)
         self.tool_bar.pack(fill="x", side="top")
+        # ปุ่มที่เคยอยู่ใน sidebar ซ้าย ตอนนี้อยู่บน ribbon — คงชื่อ attribute เดิมไว้
+        self.btn_upload   = self.tool_bar.btn_open
+        self.btn_detect   = self.tool_bar.btn_detect
+        self.btn_clear    = self.tool_bar.btn_clear
+        self.view_buttons = self.tool_bar.view_buttons
+        ctk.CTkFrame(self.root, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x", side="top")
 
-        # v14: sidebar_left / center_frame / sidebar_right now live inside
-        # main_body instead of directly in root — mechanical re-parent only,
-        # no behavior change to what's inside each pane.
+        self.nav_selector = TabStrip(
+            self.root, values=["Selection", "Customization", "Path Mapper", "Evaluation"],
+            command=self.on_nav_change)
+        self.nav_selector.set("Selection")
+        self.nav_selector.pack(fill="x", side="top")
+        ctk.CTkFrame(self.root, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x", side="top")
+
+        self._setup_status_bar()   # pack(side="bottom") ก่อน main_body เพื่อให้ติดขอบล่างเสมอ
+
         self.main_body = ctk.CTkFrame(self.root, fg_color="transparent", corner_radius=0)
         self.main_body.pack(fill="both", expand=True, side="top")
 
-        self.sidebar_left = ctk.CTkFrame(self.main_body, width=300, corner_radius=0)   # ความกว้าง sidebar ซ้าย — ปรับได้
+        self.sidebar_left = ctk.CTkFrame(self.main_body, width=_LEFT_WIDTH, corner_radius=0, fg_color=theme.BG_PANEL)
+        self.sidebar_left.pack_propagate(False)
         self.sidebar_left.pack(side="left", fill="y")
 
-        self.sidebar_right = ctk.CTkFrame(self.main_body, width=430, corner_radius=0, fg_color="#181818")   # ความกว้าง sidebar ขวา — ปรับได้
+        self.sidebar_right = ctk.CTkFrame(self.main_body, width=_RIGHT_WIDTH, corner_radius=0, fg_color=theme.BG_PANEL)
         self.sidebar_right.pack_propagate(False)
         self.sidebar_right.pack(side="right", fill="y")
 
-        self.center_frame = ctk.CTkFrame(self.main_body, corner_radius=0, fg_color="#242424")
+        self.center_frame = ctk.CTkFrame(self.main_body, corner_radius=0, fg_color=theme.BG_CANVAS)
         self.center_frame.pack(side="left", fill="both", expand=True)
 
-        self.top_bar = ctk.CTkFrame(self.center_frame, fg_color="transparent", height=50)
-        self.top_bar.pack(side="top", fill="x", padx=20, pady=(10, 0))
-
-        self.nav_selector = ctk.CTkSegmentedButton(
-            self.top_bar,
-            values=["Selection", "Customization", "Path Mapper", "Evaluation"],
-            command=self.on_nav_change,
-            height=35,
-            font=ctk.CTkFont(size=14, weight="bold")
-        )
-        self.nav_selector.set("Selection")
-        self.nav_selector.pack(side="top", pady=5)
-
-        plt.style.use('dark_background')
+        theme.apply_matplotlib()   # รวม plt.style.use(...) ตามโหมด Light/Dark
         colors    = ["white", "yellow", "orange", "red"]   # สีไล่ระดับความลึก (Depth colormap) — ปรับลำดับ/เพิ่มสีได้
         self.cmap = LinearSegmentedColormap.from_list("depth_color", colors)
 
-        self.fig = Figure(figsize=(10, 8), facecolor='#242424')   # ขนาดพื้นที่วาดกราฟ (นิ้ว) — ปรับได้
+        self.fig = Figure(figsize=(10, 8), facecolor=theme.c(theme.PLOT_FIG))   # ขนาดพื้นที่วาดกราฟ (นิ้ว) — ปรับได้
         self.fig.tight_layout(pad=3.0)
-        self.ax  = self.fig.add_subplot(111, facecolor='#1e1e1e')
+        self.ax  = self.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
         self.fig.subplots_adjust(bottom=0.1, right=0.85, left=0.1, top=0.9)
         self.cax = self.fig.add_axes([0.88, 0.15, 0.03, 0.7])
 
@@ -176,7 +200,7 @@ class UIManager:
 
         self.hover_text = self.ax.annotate(
             "", xy=(0, 0), xytext=(15, 15), textcoords="offset points",
-            bbox=dict(boxstyle="round,pad=0.3", fc="red", ec="gray", alpha=1), visible=False
+            bbox=dict(boxstyle="round,pad=0.3", fc=theme.c(theme.BG_PANEL), ec=theme.c(theme.BORDER_STRONG), alpha=1), visible=False
         )
 
         self._setup_left_sidebar()
@@ -205,86 +229,81 @@ class UIManager:
         if self.geo.mesh is not None:
             self.show_view('Top')
 
+    def _setup_status_bar(self):
+        """แถบสถานะล่างสุด: ชื่อไฟล์ + ขนาดชิ้นงานตามแกนของมุมมองปัจจุบัน
+        (lbl_width / lbl_length / lbl_thick อัปเดตโดย _update_dimensions_for_view)"""
+        self.status_bar = ctk.CTkFrame(self.root, height=28, corner_radius=0, fg_color=theme.BG_PANEL)
+        self.status_bar.pack_propagate(False)
+        self.status_bar.pack(fill="x", side="bottom")
+        ctk.CTkFrame(self.root, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x", side="bottom")
+
+        font = ctk.CTkFont(size=12)
+        self.lbl_file = ctk.CTkLabel(self.status_bar, text="No model loaded", text_color=theme.TEXT_MUTED, font=font)
+        self.lbl_file.pack(side="left", padx=(14, 18))
+
+        self.lbl_width = ctk.CTkLabel(self.status_bar, text="Width (X): -- mm", text_color=theme.TEXT_MUTED, font=font)
+        self.lbl_width.pack(side="left", padx=(0, 18))
+
+        self.lbl_length = ctk.CTkLabel(self.status_bar, text="Length (Y): -- mm", text_color=theme.TEXT_MUTED, font=font)
+        self.lbl_length.pack(side="left", padx=(0, 18))
+
+        self.lbl_thick = ctk.CTkLabel(self.status_bar, text="Thickness (Z): -- mm", text_color=theme.TEXT_MUTED, font=font)
+        self.lbl_thick.pack(side="left", padx=(0, 18))
+
+        ctk.CTkLabel(self.status_bar, text="Units: mm", text_color=theme.TEXT_MUTED, font=font).pack(side="right", padx=14)
+
     def _setup_left_sidebar(self):
-        self._left_scroll = ctk.CTkScrollableFrame(self.sidebar_left, fg_color="transparent", width=230)
+        # แผงซ้าย = Hole schedule (ตารางรู) — ห่อใน _left_scroll เพื่อให้
+        # pack_forget() ทั้งแผงแล้วสลับเป็น evaluation_left_frame ตอนอยู่แท็บ
+        # Evaluation ได้ (ชื่อ _left_scroll คงไว้จากโครงเดิม)
+        self._left_scroll = ctk.CTkFrame(self.sidebar_left, fg_color="transparent")
         self._left_scroll.pack(fill="both", expand=True, padx=0, pady=0)
 
-        ctk.CTkLabel(self._left_scroll, text="3D ProbeCode Control", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(20, 10))
+        header_frame = ctk.CTkFrame(self._left_scroll, fg_color="transparent")
+        header_frame.pack(pady=(12, 6), padx=14, fill="x")
 
-        self.btn_upload = ctk.CTkButton(
-            self._left_scroll, text="Upload STEP or STP",
-            fg_color="#2e7d32", hover_color="#4caf50", command=self.open_file_dialog)
-        self.btn_upload.pack(pady=10, padx=20, fill="x")
+        self.right_header = ctk.CTkLabel(header_frame, text="Hole schedule", font=ctk.CTkFont(size=14, weight="bold"))
+        self.right_header.pack(side="left")
 
-        self.info_frame = ctk.CTkFrame(self._left_scroll, fg_color="#1e1e1e", corner_radius=5)
-        self.info_frame.pack(pady=(0, 15), padx=20, fill="x")
+        self.lbl_selected_count = ctk.CTkLabel(header_frame, text="", font=ctk.CTkFont(size=12), text_color=theme.TEXT_MUTED)
+        self.lbl_selected_count.pack(side="right")
 
-        self.lbl_width = ctk.CTkLabel(self.info_frame, text="Width (X): -- mm", text_color="gray", font=ctk.CTkFont(size=12))
-        self.lbl_width.pack(pady=(5, 0), padx=10, anchor="w")
+        ctk.CTkFrame(self._left_scroll, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x")
 
-        self.lbl_length = ctk.CTkLabel(self.info_frame, text="Length (Y): -- mm", text_color="gray", font=ctk.CTkFont(size=12))
-        self.lbl_length.pack(pady=0, padx=10, anchor="w")
+        self.holes_list_frame = ctk.CTkScrollableFrame(self._left_scroll, fg_color="transparent")
+        self.holes_list_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
-        self.lbl_thick = ctk.CTkLabel(self.info_frame, text="Thickness (Z): -- mm", text_color="gray", font=ctk.CTkFont(size=12))
-        self.lbl_thick.pack(pady=(0, 5), padx=10, anchor="w")
-
-        self.btn_detect = ctk.CTkButton(
-            self._left_scroll, text="🔍 Generate Holes",
-            fg_color="#f57c00", hover_color="#ef6c00", command=self.on_generate_holes)
-        self.btn_detect.pack(pady=(10, 5), padx=20, fill="x")
-
-        self.btn_clear = ctk.CTkButton(
-            self._left_scroll, text="❌ Clear & Unlock",
-            fg_color="#c62828", hover_color="#b71c1c", command=self.on_clear_holes, state="disabled")
-        self.btn_clear.pack(pady=(0, 10), padx=20, fill="x")
-
-        ctk.CTkLabel(self._left_scroll, text="--- View Controls ---", text_color="gray").pack(pady=(20, 5))
-
-        # v14: Rotate 90° / Reset Position moved to the top toolbar
-        # (ui/tool_bar.py — self.tool_bar.btn_rotate / .btn_reset) —
-        # same self.rotate_screen / self.reset_position handlers, no
-        # behavior change, just a different button location.
-
-        view_frame = ctk.CTkFrame(self._left_scroll, fg_color="transparent")
-        view_frame.pack(pady=10, padx=20, fill="x")
-
-        # ตำแหน่งปุ่มมุมมองบน grid (ชื่อ, แถว, คอลัมน์) — ปรับ layout ปุ่มได้ที่นี่
-        views = [('Top', 0, 0), ('Bottom', 0, 1), ('Front', 1, 0), ('Back', 1, 1), ('Left', 2, 0), ('Right', 2, 1)]
-
-        for name, row, col in views:
-            btn = ctk.CTkButton(
-                view_frame, text=name, width=85,
-                fg_color="#424242", hover_color="#616161",
-                command=lambda v=name: self.show_view(v))
-            btn.grid(row=row, column=col, padx=5, pady=5)
-            self.view_buttons[name] = btn
-
-        # v14: Probe Stylus panel + G-code Export panel removed from here —
-        # moved to ui/hardware_setting_dialog.py and core/gcode_export_panel.py
-        # v05 respectively, both opened from self.tool_bar as floating dialogs.
+        self.lbl_holes_empty = ctk.CTkLabel(
+            self.holes_list_frame, justify="left", text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12),
+            text="No holes yet.\n\n1. Open a STEP model\n2. Pick a view\n3. Press Detect")
+        self.lbl_holes_empty.pack(anchor="w", padx=12, pady=12)
 
     def _setup_right_sidebar(self):
-        # v12: wrapped in normal_right_frame so the whole "Detected Holes"
-        # sidebar (header + list) can be pack_forget()'d as one unit and
-        # swapped for self.evaluation_right_frame while on the Evaluation tab.
+        # แผงขวา = Properties ของรูที่เลือกอยู่ — ห่อใน normal_right_frame เพื่อ
+        # สลับเป็น evaluation_right_frame ตอนอยู่แท็บ Evaluation ได้
+        # การ์ดตั้งค่าของแต่ละรู (settings_frame) ถูกสร้างไว้ใน props_body โดย
+        # _build_selected_item() แล้ว pack()/pack_forget() ตอนเลือก/เลิกเลือกรู
         self.normal_right_frame = ctk.CTkFrame(self.sidebar_right, fg_color="transparent")
         self.normal_right_frame.pack(fill="both", expand=True, padx=0, pady=0)
 
         header_frame = ctk.CTkFrame(self.normal_right_frame, fg_color="transparent")
-        header_frame.pack(pady=(20, 4), padx=20, fill="x")
+        header_frame.pack(pady=(12, 6), padx=14, fill="x")
+        ctk.CTkLabel(header_frame, text="Properties", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
 
-        self.right_header = ctk.CTkLabel(header_frame, text="Detected Holes", font=ctk.CTkFont(size=16, weight="bold"))
-        self.right_header.pack(side="left")
+        ctk.CTkFrame(self.normal_right_frame, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x")
 
-        self.lbl_selected_count = ctk.CTkLabel(header_frame, text="", font=ctk.CTkFont(size=11), text_color="#3694ED")
-        self.lbl_selected_count.pack(side="right")
+        ctk.CTkLabel(
+            self.normal_right_frame, justify="left", anchor="w", wraplength=_RIGHT_WIDTH - 40,
+            text="Click a hole in the schedule to edit its probing plan.",
+            text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12)
+        ).pack(fill="x", padx=14, pady=(10, 4))
 
-        self.holes_list_frame = ctk.CTkScrollableFrame(self.normal_right_frame, fg_color="transparent")
-        self.holes_list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        self.props_body = ctk.CTkScrollableFrame(self.normal_right_frame, fg_color="transparent")
+        self.props_body.pack(fill="both", expand=True, padx=4, pady=4)
 
     def _refresh_selected_count_label(self):
         count = len(self.inspection_selected_holes)
-        self.lbl_selected_count.configure(text=f"✅ {count} selected" if count > 0 else "")
+        self.lbl_selected_count.configure(text=f"{count} selected" if count > 0 else "")
 
     def _set_view_controls_locked(self, is_locked):
         rotate_state = "disabled" if is_locked else "normal"
@@ -304,6 +323,7 @@ class UIManager:
             self.evaluation_left_frame.pack_forget()
         if hasattr(self, 'evaluation_right_frame'):
             self.evaluation_right_frame.pack_forget()
+        self.sidebar_right.configure(width=_RIGHT_WIDTH)
         self._left_scroll.pack(fill="both", expand=True, padx=0, pady=0)
         self.normal_right_frame.pack(fill="both", expand=True, padx=0, pady=0)
 
@@ -312,6 +332,7 @@ class UIManager:
         และรีเฟรชทั้งสองแผงให้ตรงกับ state ล่าสุดทุกครั้งที่เข้าแท็บนี้"""
         self._left_scroll.pack_forget()
         self.normal_right_frame.pack_forget()
+        self.sidebar_right.configure(width=_RIGHT_WIDTH_EVAL)
         self.evaluation_left_frame.pack(fill="both", expand=True, padx=0, pady=0)
         self.evaluation_right_frame.pack(fill="both", expand=True, padx=0, pady=0)
         self.evaluation_left_panel.refresh()
@@ -350,7 +371,7 @@ class UIManager:
 
         if selected_tab == "Selection":
             self.fig.clf()
-            self.ax  = self.fig.add_subplot(111, facecolor='#1e1e1e')
+            self.ax  = self.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
             self.fig.subplots_adjust(bottom=0.1, right=0.85, left=0.1, top=0.9)
             self.cax = self.fig.add_axes([0.88, 0.15, 0.03, 0.7])
             self.selection_tab.setup_events()
@@ -362,8 +383,40 @@ class UIManager:
         elif selected_tab == "Evaluation":
             self.evaluation_tab.draw_evaluation()
 
+    def _maximize(self):
+        try:
+            self.root.state('zoomed')   # Windows/Linux — macOS ไม่รองรับ 'zoomed'
+        except Exception:
+            pass   # best-effort — ไม่ให้การ maximize ล้มเหลวไปบล็อกการเปิดโปรแกรม
+
     def show(self):
+        # FIX: ตอนเริ่ม mainloop() customtkinter จะ withdraw() แล้ว deiconify()
+        # หน้าต่าง 1 รอบ (เพื่อเปลี่ยนสี title bar บน Windows) ซึ่งล้าง state
+        # 'zoomed' ที่ตั้งไว้ก่อนหน้า ทำให้หน้าต่างเปิดเต็มจอแล้วหดกลับเป็น
+        # 1400x800 เอง — จึงต้องสั่ง maximize หลัง mainloop เริ่มทำงานแล้ว
+        self.root.after(0, self._maximize)
         self.root.mainloop()
+
+    def set_appearance(self, mode):
+        """สลับ Light/Dark (เรียกจากปุ่มบน ui/tool_bar.py) — widget ของ
+        customtkinter เปลี่ยนสีเอง ส่วนกราฟ matplotlib ต้องวาดใหม่ทั้งหมด"""
+        ctk.set_appearance_mode(mode)
+        theme.apply_matplotlib()
+        self.fig.set_facecolor(theme.c(theme.PLOT_FIG))
+
+        if self.geo.mesh is None:
+            self.fig.clf()
+            self.ax  = self.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
+            self.fig.subplots_adjust(bottom=0.1, right=0.85, left=0.1, top=0.9)
+            self.cax = self.fig.add_axes([0.88, 0.15, 0.03, 0.7])
+            self.selection_tab.setup_events()
+            self.canvas.draw_idle()
+            return
+
+        saved_pins = list(self.selection_tab._pinned_pin_data) if self.current_tab == "Selection" else []
+        self.on_nav_change(self.current_tab)
+        if saved_pins:
+            self.selection_tab._restore_pins(saved_pins)
 
     def open_file_dialog(self):
         filepath = ctk.filedialog.askopenfilename(
@@ -378,6 +431,7 @@ class UIManager:
 
         self.loaded_step_filepath = filepath
         self.loaded_step_filename = os.path.basename(filepath)
+        self.lbl_file.configure(text=self.loaded_step_filename, text_color=theme.TEXT)
 
         self.screen_rotation   = 0
         self.holes_detected    = False
@@ -421,14 +475,15 @@ class UIManager:
             l_lbl, l_val = "Y", dy
             t_lbl, t_val = "Z", dz
 
-        self.lbl_width.configure(text=f"Width ({w_lbl}): {w_val:.2f} mm", text_color="white")
-        self.lbl_length.configure(text=f"Length ({l_lbl}): {l_val:.2f} mm", text_color="white")
-        self.lbl_thick.configure(text=f"Thickness ({t_lbl}): {t_val:.2f} mm", text_color="white")
+        self.lbl_width.configure(text=f"Width ({w_lbl}): {w_val:.2f} mm", text_color=theme.TEXT)
+        self.lbl_length.configure(text=f"Length ({l_lbl}): {l_val:.2f} mm", text_color=theme.TEXT)
+        self.lbl_thick.configure(text=f"Thickness ({t_lbl}): {t_val:.2f} mm", text_color=theme.TEXT)
 
     def show_view(self, view_name):
         if self.geo.mesh is None: return
         if view_name != self.current_view: self.selection_tab.clear_pins()
         self.current_view = view_name
+        self.tool_bar.set_active_view(view_name)
         self.selected_segment_idx = None
         rot = self.screen_rotation
 
@@ -579,51 +634,62 @@ class UIManager:
         แก้ไข hex สี 3 ค่านี้ได้โดยตรงที่นี่"""
         segs = getattr(hole, 'segments', None) or []
         if any(getattr(seg, 'size_warning', '') for seg in segs):
-            return "#b71c1c"
+            return theme.ERR_BG
 
         if hasattr(self, 'probe_profile'):
             chk = self.probe_profile.check_hole(hole.depth, hole.radius)
             if not chk['ok']:
-                return "#8a6d00"
+                return theme.WARN_BG
 
-        return "#1a3a5c"
-
-    def _lighten_hex(self, hex_color: str, factor: float = 0.38) -> str:
-        h = hex_color.lstrip('#')
-        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        r = int(r + (255 - r) * factor)
-        g = int(g + (255 - g) * factor)
-        b = int(b + (255 - b) * factor)
-        return f"#{r:02x}{g:02x}{b:02x}"
+        return theme.BG_CARD
 
     def _hole_tab_selected_color(self, hole) -> str:
-        return self._lighten_hex(self._hole_tab_default_color(hole))
+        return theme.ROW_SELECTED
 
     def update_treeview(self, holes):
         for widget in self.holes_list_frame.winfo_children():
             widget.destroy()
+        for widget in self.props_body.winfo_children():   # การ์ดตั้งค่าของรูชุดเก่า
+            widget.destroy()
 
         self.hole_widgets = {}
 
+        if not holes:
+            ctk.CTkLabel(
+                self.holes_list_frame, justify="left", text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12),
+                text="No holes yet.\n\n1. Open a STEP model\n2. Pick a view\n3. Press Detect"
+            ).pack(anchor="w", padx=12, pady=12)
+            return
+
         apply_btn = ctk.CTkButton(
-            self.holes_list_frame, text="✅ Apply Selection",
-            fg_color="#2E7D32", hover_color="#1B5E20", font=("", 14, "bold"),
+            self.holes_list_frame, text="Apply selection",
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, font=("", 13, "bold"),
             command=self._refresh_after_inspection_toggle
         )
-        apply_btn.pack(fill="x", padx=10, pady=(10, 15))
+        apply_btn.pack(fill="x", padx=8, pady=(6, 10))
 
         selected = [h for h in holes if h.selected_for_inspection]
         unselected = [h for h in holes if not h.selected_for_inspection]
 
-        lbl_sel = ctk.CTkLabel(self.holes_list_frame, text=f"🟢 Selected Holes ({len(selected)})", font=("", 14, "bold"), text_color="#66bb6a")
-        lbl_sel.pack(anchor="w", padx=10, pady=(5, 5))
+        # หัวตาราง — ใช้ CTkButton แบบเดียวกับแถวข้อมูล เพื่อให้คอลัมน์ตรงแนวกันพอดี
+        col_row = ctk.CTkFrame(self.holes_list_frame, fg_color="transparent")
+        col_row.pack(fill="x", padx=8, pady=(0, 2))
+        ctk.CTkButton(
+            col_row, text=_HOLE_COLS_HEADER, anchor="w", height=24, hover=False,
+            fg_color=theme.BG_CARD_HOVER, text_color=theme.TEXT_MUTED,
+            font=ctk.CTkFont(family=theme.FONT_MONO, size=12)
+        ).pack(side="left", fill="x", expand=True, padx=(0, 10))
+        ctk.CTkFrame(col_row, width=24, height=24, fg_color="transparent").pack(side="right")
+
+        lbl_sel = ctk.CTkLabel(self.holes_list_frame, text=f"Selected for inspection ({len(selected)})", font=("", 12, "bold"), text_color=theme.OK_TEXT)
+        lbl_sel.pack(anchor="w", padx=10, pady=(6, 2))
 
         for h in selected:
             idx = self.current_holes.index(h)
             self._build_selected_item(self.holes_list_frame, idx, h)
 
-        lbl_unsel = ctk.CTkLabel(self.holes_list_frame, text=f"⚪ Unselected Holes ({len(unselected)})", font=("", 14, "bold"), text_color="#9aa4b2")
-        lbl_unsel.pack(anchor="w", padx=10, pady=(20, 5))
+        lbl_unsel = ctk.CTkLabel(self.holes_list_frame, text=f"Not inspected ({len(unselected)})", font=("", 12, "bold"), text_color=theme.TEXT_MUTED)
+        lbl_unsel.pack(anchor="w", padx=10, pady=(14, 2))
 
         for h in unselected:
             idx = self.current_holes.index(h)
@@ -637,11 +703,12 @@ class UIManager:
 
     def _build_selected_item(self, parent, idx, hole):
         if idx not in self.hole_widgets:
-            self.hole_widgets[idx] = {'is_expanded': False}
+            # รูที่เลือกค้างอยู่ก่อนสร้างรายการใหม่ → โชว์การ์ด Properties ของมันต่อเลย
+            self.hole_widgets[idx] = {'is_expanded': self.selected_hole_idx == idx}
         widgets = self.hole_widgets[idx]
 
         item_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        item_frame.pack(fill="x", padx=10, pady=4)
+        item_frame.pack(fill="x", padx=8, pady=1)
 
         header_row = ctk.CTkFrame(item_frame, fg_color="transparent")
         header_row.pack(fill="x")
@@ -651,11 +718,10 @@ class UIManager:
         current_color = self._hole_tab_selected_color(hole) if self.selected_hole_idx == idx else default_color
 
         is_multi_seg = bool(getattr(hole, 'segments', None))
-        folder_tag = f" 📂×{len(hole.segments)}" if is_multi_seg else ""
-        btn_text = f"🎯 Hole {hole.display_id}{folder_tag} [X: {hole.x:.2f}, Y: {hole.y:.2f}] D: {hole.depth:.2f}"
         header_btn = ctk.CTkButton(
-            header_row, text=btn_text, anchor="w", fg_color=current_color,
-            hover_color=current_color,
+            header_row, text=_hole_row_text(hole), anchor="w", height=28, corner_radius=4,
+            fg_color=current_color, hover_color=current_color, text_color=theme.TEXT,
+            font=ctk.CTkFont(family=theme.FONT_MONO, size=12),
             command=lambda: self.on_hole_select(idx)
         )
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
@@ -690,23 +756,37 @@ class UIManager:
 
         self._bind_hover_recursive(item_frame, enter_selected, leave_selected)
 
-        setting_frame = ctk.CTkFrame(item_frame, fg_color="#1c212c", corner_radius=6)
+        # การ์ดตั้งค่าของรูนี้อยู่ในแผง Properties (ขวา) ไม่ได้อยู่ใต้แถวแล้ว —
+        # on_hole_select() ยัง pack()/pack_forget() ตัวเดิมเหมือนเดิมทุกประการ
+        setting_frame = ctk.CTkFrame(self.props_body, fg_color=theme.BG_CARD, corner_radius=6)
         widgets['settings_frame'] = setting_frame
+
+        ctk.CTkLabel(setting_frame, text=f"Hole {hole.display_id}", anchor="w",
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(fill="x", padx=10, pady=(8, 0))
+        ctk.CTkLabel(
+            setting_frame, anchor="w", justify="left", text_color=theme.TEXT_MUTED,
+            font=ctk.CTkFont(family=theme.FONT_MONO, size=12),
+            text=(f"Dia   {hole.radius * 2:.2f} mm\n"
+                  f"Depth {hole.depth:.2f} mm\n"
+                  f"X {hole.x:.2f}   Y {hole.y:.2f}")
+        ).pack(fill="x", padx=10, pady=(2, 6))
+        ctk.CTkFrame(setting_frame, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x", padx=10, pady=(0, 4))
 
         segs_for_warn = getattr(hole, 'segments', None) or []
         size_warnings = [seg.size_warning for seg in segs_for_warn if getattr(seg, 'size_warning', '')]
         if size_warnings:
             combined_size_warn = "\n".join(size_warnings)
             lbl_size_warn = ctk.CTkLabel(
-                setting_frame, text=combined_size_warn, text_color="#ff1744",
-                font=("", 11, "bold"), wraplength=280, justify="left")
+                setting_frame, text=combined_size_warn, text_color=theme.ERR_TEXT,
+                font=("", 11, "bold"), wraplength=_RIGHT_WIDTH - 70, justify="left")
             lbl_size_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
         if hasattr(self, 'probe_profile'):
             chk_res = self.probe_profile.check_hole(hole.depth, hole.radius)
             if not chk_res['ok']:
                 warn_text = chk_res['depth_warning'] or chk_res['fit_warning']
-                lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color="#eed202", font=("", 11, "bold"))
+                lbl_warn = ctk.CTkLabel(setting_frame, text=warn_text, text_color=theme.WARN_TEXT, font=("", 11, "bold"),
+                                        wraplength=_RIGHT_WIDTH - 70, justify="left")
                 lbl_warn.pack(anchor="w", padx=10, pady=(5, 0))
 
         if is_multi_seg:
@@ -716,7 +796,7 @@ class UIManager:
         else:
             row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row1.pack(fill="x", padx=10, pady=(5,0))
-            ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5").pack(side="left")
+            ctk.CTkLabel(row1, text="Z-Layers:", text_color=theme.TEXT_SECONDARY).pack(side="left")
             opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_layers.set(str(hole.layers))
@@ -725,7 +805,7 @@ class UIManager:
 
             row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row2.pack(fill="x", padx=10, pady=(5,0))
-            ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5").pack(side="left")
+            ctk.CTkLabel(row2, text="Points/Layer:", text_color=theme.TEXT_SECONDARY).pack(side="left")
             opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_points.set(str(hole.points_per_layer))
@@ -733,13 +813,13 @@ class UIManager:
             widgets['opt_points'] = opt_points
 
             zig_var = ctk.BooleanVar(value=hole.zigzag_inspection)
-            chk_zig = ctk.CTkCheckBox(setting_frame, text="↕ Zigzag Inspection", text_color="#b0bec5", variable=zig_var,
+            chk_zig = ctk.CTkCheckBox(setting_frame, text="↕ Zigzag Inspection", text_color=theme.TEXT_SECONDARY, variable=zig_var,
                                       command=lambda: self._on_zigzag_toggle(idx, zig_var))
             chk_zig.pack(anchor="w", padx=10, pady=(10,5))
             widgets['chk_zigzag'] = chk_zig
 
             df = ctk.CTkFrame(setting_frame, fg_color="transparent")
-            ctk.CTkLabel(df, text="Degree/Layer:", text_color="#b0bec5").pack(side="left")
+            ctk.CTkLabel(df, text="Degree/Layer:", text_color=theme.TEXT_SECONDARY).pack(side="left")
             deg_ent = ctk.CTkEntry(df, width=50)
             deg_ent.insert(0, str(hole.zigzag_degree))
             deg_ent.pack(side="left", padx=5)
@@ -754,7 +834,7 @@ class UIManager:
             setting_frame.pack(fill="x", pady=(5, 0))
 
     def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
-        block = ctk.CTkFrame(parent, fg_color="#000000", corner_radius=6)
+        block = ctk.CTkFrame(parent, fg_color=theme.BG_INPUT, corner_radius=6)
         block.pack(fill="x", padx=8, pady=(8 if seg_idx == 0 else 4, 4))
 
         seg_header = ctk.CTkFrame(block, fg_color="transparent")
@@ -765,7 +845,7 @@ class UIManager:
         label_text = (f"{arrow} Segment {seg_idx + 1}  "
                       f"⌀{cfg.radius_open*2:.1f}→⌀{cfg.radius_deep*2:.1f} mm  "
                       f"D={cfg.depth:.1f} mm{warn_tag}")
-        header_fg = "#22283a" if cfg.selected_for_inspection else "#3a1f1f"
+        header_fg = theme.SELECT_BG if cfg.selected_for_inspection else theme.ERR_BG
 
         sel_var = ctk.BooleanVar(value=cfg.selected_for_inspection)
         sel_chk = ctk.CTkCheckBox(
@@ -775,20 +855,20 @@ class UIManager:
 
         seg_btn = ctk.CTkButton(
             seg_header, text=label_text, anchor="w",
-            fg_color=header_fg, hover_color="#2c3348", font=("", 12),
+            fg_color=header_fg, hover_color=theme.BG_CARD_HOVER, text_color=theme.TEXT, font=("", 12),
             command=lambda: self._toggle_segment_expand(hole_idx, seg_idx))
         seg_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
         seg_body = ctk.CTkFrame(block, fg_color="transparent")
 
         if cfg.size_warning:
-            lbl_seg_warn = ctk.CTkLabel(seg_body, text=cfg.size_warning, text_color="#ef5350",
+            lbl_seg_warn = ctk.CTkLabel(seg_body, text=cfg.size_warning, text_color=theme.ERR_TEXT,
                                         font=("", 10, "bold"), wraplength=210, justify="left")
             lbl_seg_warn.pack(anchor="w", padx=8, pady=(6, 0))
 
         row1 = ctk.CTkFrame(seg_body, fg_color="transparent")
         row1.pack(fill="x", padx=8, pady=(6, 0))
-        ctk.CTkLabel(row1, text="Z-Layers:", text_color="#b0bec5", font=("", 11)).pack(side="left")
+        ctk.CTkLabel(row1, text="Z-Layers:", text_color=theme.TEXT_SECONDARY, font=("", 11)).pack(side="left")
         opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60,
                                        command=lambda val: self._on_segment_config_change(hole_idx, seg_idx))
         opt_layers.set(str(cfg.layers))
@@ -796,20 +876,20 @@ class UIManager:
 
         row2 = ctk.CTkFrame(seg_body, fg_color="transparent")
         row2.pack(fill="x", padx=8, pady=(4, 0))
-        ctk.CTkLabel(row2, text="Points/Layer:", text_color="#b0bec5", font=("", 11)).pack(side="left")
+        ctk.CTkLabel(row2, text="Points/Layer:", text_color=theme.TEXT_SECONDARY, font=("", 11)).pack(side="left")
         opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
                                        command=lambda val: self._on_segment_config_change(hole_idx, seg_idx))
         opt_points.set(str(cfg.points_per_layer))
         opt_points.pack(side="right")
 
         zig_var = ctk.BooleanVar(value=cfg.zigzag_inspection)
-        chk_zig = ctk.CTkCheckBox(seg_body, text="↕ Zigzag Inspection", text_color="#b0bec5", font=("", 11),
+        chk_zig = ctk.CTkCheckBox(seg_body, text="↕ Zigzag Inspection", text_color=theme.TEXT_SECONDARY, font=("", 11),
                                   variable=zig_var,
                                   command=lambda: self._on_segment_zigzag_toggle(hole_idx, seg_idx, zig_var))
         chk_zig.pack(anchor="w", padx=8, pady=(8, 4))
 
         deg_row = ctk.CTkFrame(seg_body, fg_color="transparent")
-        ctk.CTkLabel(deg_row, text="Degree/Layer:", text_color="#b0bec5", font=("", 11)).pack(side="left")
+        ctk.CTkLabel(deg_row, text="Degree/Layer:", text_color=theme.TEXT_SECONDARY, font=("", 11)).pack(side="left")
         deg_ent = ctk.CTkEntry(deg_row, width=50)
         deg_ent.insert(0, str(cfg.zigzag_degree))
         deg_ent.pack(side="left", padx=5)
@@ -874,7 +954,7 @@ class UIManager:
         cfg.selected_for_inspection = var.get()
 
         blk = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
-        blk['btn'].configure(fg_color="#22283a" if cfg.selected_for_inspection else "#3a1f1f")
+        blk['btn'].configure(fg_color=theme.SELECT_BG if cfg.selected_for_inspection else theme.ERR_BG)
 
         if self.current_tab == "Path Mapper":
             self.path_mapper_tab.draw_path_mapper()
@@ -915,20 +995,20 @@ class UIManager:
         widgets = self.hole_widgets[idx]
 
         item_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        item_frame.pack(fill="x", padx=10, pady=4)
+        item_frame.pack(fill="x", padx=8, pady=1)
 
         header_row = ctk.CTkFrame(item_frame, fg_color="transparent")
         header_row.pack(fill="x")
 
-        btn_text = f"Hole {hole.display_id} [X: {hole.x:.2f}, Y: {hole.y:.2f}]"
         header_btn = ctk.CTkButton(
-            header_row, text=btn_text, anchor="w",
-            fg_color="#1f1f1f", hover_color="#1f1f1f", text_color="#9aa4b2",
+            header_row, text=_hole_row_text(hole), anchor="w", height=28, corner_radius=4,
+            fg_color=theme.BG_CARD, hover_color=theme.BG_CARD, text_color=theme.TEXT_MUTED,
+            font=ctk.CTkFont(family=theme.FONT_MONO, size=12),
             command=lambda: self.on_hole_select(idx) if not hole.position_unknown else None
         )
         header_btn.pack(side="left", fill="x", expand=True, padx=(0, 10))
         widgets['btn'] = header_btn
-        widgets['resting_color'] = "#1f1f1f"
+        widgets['resting_color'] = theme.BG_CARD
 
         chk_var = ctk.BooleanVar(value=hole.selected_for_inspection)
         chk = ctk.CTkCheckBox(
@@ -955,7 +1035,7 @@ class UIManager:
         self._bind_hover_recursive(item_frame, enter_unselected, leave_unselected)
 
         reason_text = f"⚠ {hole.reject_reason}" if hole.is_rejected else "└ Not selected for inspection"
-        lbl_reason = ctk.CTkLabel(item_frame, text=reason_text, text_color="#ffb74d", font=("", 11))
+        lbl_reason = ctk.CTkLabel(item_frame, text=reason_text, text_color=theme.WARN_TEXT, font=("", 11))
         lbl_reason.pack(anchor="w", padx=10, pady=(2, 0))
 
     def _on_inspection_select_toggle(self, idx, var):
@@ -1031,7 +1111,7 @@ class UIManager:
         is_deselecting = (self.selected_hole_idx == idx)
         for i, widgets in self.hole_widgets.items():
             if 'btn' not in widgets: continue
-            default_color = widgets.get('resting_color', "#1f1f1f")
+            default_color = widgets.get('resting_color', theme.BG_CARD)
             widgets['btn'].configure(fg_color=default_color, hover_color=default_color)
             if widgets.get('is_expanded') and i != idx:
                 if 'settings_frame' in widgets:
@@ -1042,7 +1122,7 @@ class UIManager:
 
         sel = self.hole_widgets[idx]
         if is_deselecting:
-            resting_color = sel.get('resting_color', "#1f1f1f")
+            resting_color = sel.get('resting_color', theme.BG_CARD)
             sel['btn'].configure(fg_color=resting_color, hover_color=resting_color)
             if sel.get('is_expanded'):
                 if 'settings_frame' in sel:
@@ -1050,8 +1130,8 @@ class UIManager:
                 sel['is_expanded'] = False
             self.selected_hole_idx = None
         else:
-            resting_color  = sel.get('resting_color', "#1f1f1f")
-            selected_color = self._lighten_hex(resting_color)
+            resting_color  = sel.get('resting_color', theme.BG_CARD)
+            selected_color = theme.ROW_SELECTED
             sel['btn'].configure(fg_color=selected_color, hover_color=selected_color)
 
             if not sel.get('is_expanded'):

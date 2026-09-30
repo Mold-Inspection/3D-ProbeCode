@@ -10,18 +10,22 @@
 #   - Removed dynamic sizing methods (_fit_to_content, _apply_fit_geometry, 
 #     _second_pass_fit) as geometry is now statically set once in show().
 # ==============================================================================
+import sys
+import tkinter.messagebox as _mb
 import customtkinter as ctk
+
+from ui import theme
 
 _DIALOG_WIDTH        = 640
 _DIALOG_HEIGHT       = 640
 _CATEGORY_LIST_WIDTH = 190
 
-_COLOR_HEADER    = "#1e1e1e"
-_COLOR_BODY      = "#181818"
-_COLOR_CAT_BG    = "#141414"
-_COLOR_CAT_SEL   = "#2a2a4e"
-_COLOR_CAT_HOVER = "#232338"
-_COLOR_FIELD_BG  = "#1c1c1c"
+_COLOR_HEADER    = theme.BG_CARD
+_COLOR_BODY      = theme.BG_PANEL
+_COLOR_CAT_BG    = theme.BG_CANVAS
+_COLOR_CAT_SEL   = theme.SELECT_BG
+_COLOR_CAT_HOVER = theme.BG_CARD_HOVER
+_COLOR_FIELD_BG  = theme.BG_INPUT
 
 
 class SettingsDialogBase:
@@ -50,7 +54,7 @@ class SettingsDialogBase:
     def show(self):
         if self.toplevel is not None and self.toplevel.winfo_exists():
             self.toplevel.lift()
-            self.toplevel.focus_set()
+            self.toplevel.focus_force()
             return
 
         self.toplevel = ctk.CTkToplevel(self.master)
@@ -73,10 +77,15 @@ class SettingsDialogBase:
         self.toplevel.transient(self.master)
         try:
             self.toplevel.wait_visibility()
+            self._set_owner_window()
             self.toplevel.grab_set()
         except Exception:
             pass
-        self.toplevel.focus_set()
+        # FIX: focus_force() (not focus_set()) - after an earlier settings dialog was
+        # closed while it held the keyboard focus, Tk can be left believing the app
+        # has no focus at all; a plain focus_set() is then only "remembered" and the
+        # entry fields of the next dialog ignore typing. Forcing it always works.
+        self.toplevel.focus_force()
 
         self.toplevel.bind("<Unmap>", self._on_dialog_unmap)
         self.toplevel.bind("<Map>",   self._on_dialog_map)
@@ -84,6 +93,70 @@ class SettingsDialogBase:
 
         self._master_focus_bind_id = self.master.bind(
             "<FocusIn>", self._on_master_focus_in, add="+")
+
+    def _set_owner_window(self):
+        """Windows: ผูก dialog นี้เป็น "owned window" ของหน้าต่างหลัก
+
+        FIX: dialog ใช้ overrideredirect(True) (ไม่มี title bar ของระบบ) ซึ่งทำให้
+        transient() ของ Tk ไม่มีผลบน Windows — dialog จึงเป็นหน้าต่างอิสระที่ไม่
+        ผูกลำดับชั้นกับหน้าต่างหลัก พอ Alt-Tab ออกแล้วกลับเข้ามา Windows ยกเฉพาะ
+        หน้าต่างหลักขึ้นมาทับ dialog (dialog "หายไป") ทั้งที่ dialog ยังถือ
+        grab_set() อยู่ ทุกคลิกจึงถูกกลืน โปรแกรมดูเหมือนค้างทั้งจอ
+        การตั้ง owner ให้ Windows รู้จัก ทำให้ dialog อยู่เหนือหน้าต่างหลักเสมอ
+        และย่อ/คืนหน้าต่างไปพร้อมกัน (ระบบอื่นที่ไม่ใช่ Windows ข้ามไป)"""
+        if sys.platform != "win32" or self.toplevel is None:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            setter = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+            setter.restype  = ctypes.c_void_p
+            setter.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            dialog_hwnd = int(self.toplevel.wm_frame(), 16)
+            owner_hwnd  = int(self.master.winfo_toplevel().wm_frame(), 16)
+            setter(dialog_hwnd, -8, owner_hwnd)   # -8 = GWLP_HWNDPARENT (owner)
+        except Exception:
+            pass   # best-effort — ถ้าตั้งไม่ได้ก็ยังทำงานแบบเดิม
+
+    # ------------------------------------------------------------------
+    # Native popups (messagebox / file dialog) ที่เปิดจากใน dialog นี้
+    # ------------------------------------------------------------------
+    def run_native(self, fn, *args, **kwargs):
+        """เรียก popup ของระบบ (tkinter.messagebox.*, filedialog.*) โดยมี dialog
+        นี้เป็นเจ้าของ แล้วคืนค่าที่ popup คืนมา
+
+        FIX: เดิมเรียก _mb.showerror(...) ตรง ๆ โดยไม่ระบุ parent → popup ไปผูกกับ
+        หน้าต่างหลักแทน ทำให้ Windows ดันหน้าต่างหลักขึ้นมาทับ dialog นี้ (dialog
+        "หายไป") ในขณะที่ dialog ยังถือ grab_set() อยู่ — พอปิด popup ทุกคลิกจึง
+        ยังถูกส่งไปที่ dialog ที่มองไม่เห็น โปรแกรมเลยดูเหมือนค้างทั้งจอ
+        ที่นี่จึง (1) ปล่อย grab ก่อน (2) ให้ popup มี dialog เป็น parent
+        (3) ยก dialog กลับขึ้นมาและ grab ใหม่หลัง popup ปิด"""
+        top = self.toplevel
+        if top is None or not top.winfo_exists():
+            return fn(*args, parent=self.master, **kwargs)
+        try:
+            top.grab_release()
+        except Exception:
+            pass
+        try:
+            return fn(*args, parent=top, **kwargs)
+        finally:
+            if self.toplevel is not None and self.toplevel.winfo_exists():
+                try:
+                    self.toplevel.lift()
+                    self.toplevel.focus_force()
+                    self.toplevel.grab_set()
+                except Exception:
+                    pass
+
+    def showerror(self, title: str, message: str):
+        return self.run_native(_mb.showerror, title, message)
+
+    def showwarning(self, title: str, message: str):
+        return self.run_native(_mb.showwarning, title, message)
+
+    def showinfo(self, title: str, message: str):
+        return self.run_native(_mb.showinfo, title, message)
 
     def _on_dialog_unmap(self, _event=None):
         if self.toplevel is not None:
@@ -122,11 +195,11 @@ class SettingsDialogBase:
         header.pack_propagate(False)
 
         title_label = ctk.CTkLabel(header, text=self.title_text, font=ctk.CTkFont(size=15, weight="bold"),
-                    text_color="#e0e0e0")
+                    text_color=theme.TEXT)
         title_label.pack(side="left", padx=16)
 
         ctk.CTkButton(header, text="✕", width=32, height=28, fg_color="transparent",
-                     hover_color="#3a1f1f", text_color="#cccccc", font=ctk.CTkFont(size=14),
+                     hover_color=theme.ERR_BG, text_color=theme.TEXT_SECONDARY, font=ctk.CTkFont(size=14),
                      command=self._on_close).pack(side="right", padx=8)
 
         self._make_draggable(header)
@@ -153,7 +226,7 @@ class SettingsDialogBase:
         bar = ctk.CTkFrame(self.toplevel, fg_color=_COLOR_HEADER, corner_radius=0)
         bar.pack(fill="x", side="top", padx=16, pady=(8, 8))
         ctk.CTkEntry(bar, placeholder_text="Search settings...",
-                    fg_color=_COLOR_FIELD_BG, border_color="#333333").pack(fill="x")
+                    fg_color=_COLOR_FIELD_BG, border_color=theme.BORDER).pack(fill="x")
 
     def _build_body(self):
         body = ctk.CTkFrame(self.toplevel, fg_color=_COLOR_BODY, corner_radius=0)
@@ -175,7 +248,7 @@ class SettingsDialogBase:
         btn = ctk.CTkButton(
             self._category_frame, text=label, anchor="w",
             fg_color="transparent", hover_color=_COLOR_CAT_HOVER,
-            text_color="#b0bec5", corner_radius=0, height=36,
+            text_color=theme.TEXT_SECONDARY, corner_radius=0, height=36,
             font=ctk.CTkFont(size=12),
             command=lambda k=key: self.show_category(k))
         btn.pack(fill="x")

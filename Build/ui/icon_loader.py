@@ -23,9 +23,11 @@ import math
 import customtkinter as ctk
 from PIL import Image, ImageDraw
 
+from ui import theme
+
 _SUPERSAMPLE   = 8       # วาดที่ N เท่าของขนาดจริงแล้วย่อลง — ปรับได้
 _STROKE_FRAC   = 0.09    # ความหนาเส้น (สัดส่วนของ canvas เต็ม) — ปรับได้
-_DEFAULT_COLOR = "#ffffff"
+_DEFAULT_COLOR = theme.ICON   # คู่สี (light, dark) — ไอคอนเปลี่ยนสีตามโหมดเอง
 
 _cache: dict = {}   # (name, size, color) -> CTkImage
 
@@ -134,7 +136,46 @@ def _icon_ruler(px: int, color: str) -> Image.Image:
     return img
 
 
+def _icon_folder(px: int, color: str) -> Image.Image:
+    """แฟ้ม — ใช้กับปุ่ม Open (โหลดไฟล์ STEP)"""
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    w = _stroke_w(px)
+    d.line([(px * 0.12, px * 0.80), (px * 0.12, px * 0.22), (px * 0.40, px * 0.22),
+            (px * 0.50, px * 0.34), (px * 0.88, px * 0.34), (px * 0.88, px * 0.80),
+            (px * 0.12, px * 0.80)], fill=color, width=w, joint="curve")
+    return img
+
+
+def _icon_target(px: int, color: str) -> Image.Image:
+    """วงกลม + กากบาทเล็ง — ใช้กับปุ่ม Detect (ค้นหารู)"""
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    w = _stroke_w(px)
+    r = px * 0.28
+    c = px / 2
+    d.ellipse([c - r, c - r, c + r, c + r], outline=color, width=w)
+    for a, b in (((c, px * 0.06), (c, px * 0.34)), ((c, px * 0.66), (c, px * 0.94)),
+                 ((px * 0.06, c), (px * 0.34, c)), ((px * 0.66, c), (px * 0.94, c))):
+        d.line([a, b], fill=color, width=w)
+    return img
+
+
+def _icon_clear(px: int, color: str) -> Image.Image:
+    """กากบาท — ใช้กับปุ่ม Clear (ล้างรูที่ตรวจพบ + ปลดล็อก view)"""
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    w = _stroke_w(px)
+    a, b = px * 0.22, px * 0.78
+    d.line([(a, a), (b, b)], fill=color, width=w)
+    d.line([(b, a), (a, b)], fill=color, width=w)
+    return img
+
+
 _DRAWERS = {
+    "folder": _icon_folder,
+    "target": _icon_target,
+    "clear":  _icon_clear,
     "rotate": _icon_rotate,
     "home":   _icon_home,
     "gear":   _icon_gear,
@@ -143,7 +184,7 @@ _DRAWERS = {
 }
 
 
-def get_icon(name: str, size: int = 18, color: str = _DEFAULT_COLOR) -> ctk.CTkImage:
+def get_icon(name: str, size: int = 18, color=_DEFAULT_COLOR) -> ctk.CTkImage:
     """คืน CTkImage ของไอคอนที่ขอ (แคชไว้ — เรียกซ้ำไม่เสียเวลาวาดใหม่)
     ใช้กับปุ่ม/label ผ่าน image=get_icon(...), compound="left" """
     key = (name, size, color)
@@ -156,8 +197,9 @@ def get_icon(name: str, size: int = 18, color: str = _DEFAULT_COLOR) -> ctk.CTkI
         raise ValueError(f"Unknown icon name: {name!r} (available: {list(_DRAWERS)})")
 
     px = size * _SUPERSAMPLE
-    big = drawer(px, color)
-    small = big.resize((size, size), Image.LANCZOS)
-    ctk_img = ctk.CTkImage(light_image=small, dark_image=small, size=(size, size))
+    light, dark = color if isinstance(color, (tuple, list)) else (color, color)
+    small_light = drawer(px, light).resize((size, size), Image.LANCZOS)
+    small_dark  = drawer(px, dark).resize((size, size), Image.LANCZOS)
+    ctk_img = ctk.CTkImage(light_image=small_light, dark_image=small_dark, size=(size, size))
     _cache[key] = ctk_img
     return ctk_img

@@ -55,6 +55,8 @@ import trimesh
 from trimesh.transformations import euler_matrix
 from mpl_toolkits.mplot3d import proj3d
 
+from ui import theme
+
 # ชุดสีของแต่ละ layer เมื่อเปิดโหมด Zigzag — 24 สี วนซ้ำถ้า layer มากกว่านี้
 # หลีกเลี่ยงโทนเหลือง/ทอง เพื่อไม่ให้ปนกับสี Tool Path / จุดดาว (star marker)
 ZIGZAG_LAYER_COLORS = [
@@ -118,14 +120,14 @@ class CustomizationTab:
         has_hole = (app.selected_hole_idx is not None and len(app.current_holes) > 0)
 
         if not has_mesh:
-            app.ax = app.fig.add_subplot(111, facecolor='#1e1e1e')
-            app.ax.set_title("Please upload a model and generate holes first.", color="white", fontsize=15)
+            app.ax = app.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
+            app.ax.set_title("Please upload a model and generate holes first.", color=theme.c(theme.TEXT), fontsize=15)
             app.ax.set_axis_off()
             app.canvas.draw()
             return
 
         app.fig.subplots_adjust(left=0.0, right=1.0, top=1.0, bottom=0.0)
-        ax3d = app.fig.add_subplot(111, projection='3d', facecolor='#1e1e1e')
+        ax3d = app.fig.add_subplot(111, projection='3d', facecolor=theme.VIEW3D_BG)
         app.ax = ax3d
         self._text_objects = {}
 
@@ -210,13 +212,13 @@ class CustomizationTab:
             base_alpha = 1.0 if is_selected_cat else 0.1
             
             txt = ax3d.text(h.x, h.y, r_z + half * 0.02,
-                            _hole_display_label(h), color='white', fontsize=7,
+                            _hole_display_label(h), color=theme.VIEW3D_TEXT, fontsize=7,
                             ha='center', va='bottom', alpha=base_alpha)
             
             self._text_objects[i] = {
                 'text': txt,
                 'base_alpha': base_alpha,
-                'base_color': 'white',
+                'base_color': theme.VIEW3D_TEXT,
                 'base_zorder': txt.get_zorder()
             }
 
@@ -248,7 +250,7 @@ class CustomizationTab:
                 hxs   = np.hstack([htx[:, [0, 1, 2, 0]], nan_h]).ravel()
                 hys   = np.hstack([hty[:, [0, 1, 2, 0]], nan_h]).ravel()
                 hzs   = np.hstack([htz[:, [0, 1, 2, 0]], nan_h]).ravel()
-                ax3d.plot(hxs, hys, hzs, color="white", linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
+                ax3d.plot(hxs, hys, hzs, color=theme.VIEW3D_TEXT, linewidth=1.6, alpha=0.76, label='Selected Hole Mesh')
 
         probe_warn_lines = []
         probe_ok         = True
@@ -520,16 +522,16 @@ class CustomizationTab:
             ax3d.set_ylim([cy - half, cy + half])
             ax3d.set_zlim([cz - half, cz + half])
 
-        ax3d.set_title(title_str, color='#ef5350' if not probe_ok else 'white', fontsize=11, pad=10)
+        ax3d.set_title(title_str, color='#ef5350' if not probe_ok else theme.VIEW3D_TEXT, fontsize=11, pad=10)
         for spine in [ax3d.xaxis, ax3d.yaxis, ax3d.zaxis]:
             spine.set_pane_color((0.10, 0.10, 0.10, 1.0))
-            spine.line.set_color('gray')
-        ax3d.tick_params(colors='white', labelsize=7)
-        ax3d.set_xlabel("X (mm)", color='white', fontsize=9, labelpad=2)
-        ax3d.set_ylabel("Y (mm)", color='white', fontsize=9, labelpad=2)
-        ax3d.set_zlabel("Z (mm)", color='white', fontsize=9, labelpad=2)
+            spine.line.set_color(theme.VIEW3D_MUTED)
+        ax3d.tick_params(colors=theme.VIEW3D_MUTED, labelsize=7)
+        ax3d.set_xlabel("X (mm)", color=theme.VIEW3D_TEXT, fontsize=9, labelpad=2)
+        ax3d.set_ylabel("Y (mm)", color=theme.VIEW3D_TEXT, fontsize=9, labelpad=2)
+        ax3d.set_zlabel("Z (mm)", color=theme.VIEW3D_TEXT, fontsize=9, labelpad=2)
         if has_hole:
-            ax3d.legend(facecolor='#1e1e1e', edgecolor='gray', labelcolor='white', loc='upper right', fontsize=7)
+            ax3d.legend(facecolor=theme.VIEW3D_BG, edgecolor=theme.VIEW3D_MUTED, labelcolor=theme.VIEW3D_TEXT, loc='upper right', fontsize=7)
         ax3d.invert_xaxis()
         app.canvas.draw()
 
