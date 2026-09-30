@@ -329,9 +329,23 @@ class UIManager:
         count = len(self.inspection_selected_holes)
         self.lbl_selected_count.configure(text=f"{count} selected" if count > 0 else "")
 
+    def _update_rotate_button(self):
+        """Rotate ใช้ได้เฉพาะแท็บ Selection และตอนที่มุมมองยังไม่ถูกล็อก (ยังไม่ได้ Detect)
+        — เมื่อใช้ไม่ได้ ปุ่มจะจางลงและ tooltip บอกเหตุผล แทนที่จะกดแล้วเงียบ"""
+        btn = self.tool_bar.btn_rotate
+        if getattr(self, '_view_locked', False):
+            state, tip = "disabled", "Rotate is locked while holes are detected.\nPress Clear to unlock the view."
+        elif self.current_tab != "Selection":
+            state, tip = "disabled", "Rotate is only available on the Selection tab."
+        else:
+            state, tip = "normal", "Rotate the view 90\u00b0"
+        btn.configure(state=state)
+        btn.tooltip.text = tip
+
     def _set_view_controls_locked(self, is_locked):
         rotate_state = "disabled" if is_locked else "normal"
-        self.tool_bar.btn_rotate.configure(state=rotate_state)   # v14: was self.btn_rotate
+        self._view_locked = is_locked
+        self._update_rotate_button()
         for btn in self.view_buttons.values(): btn.configure(state=rotate_state)
         self.tool_bar.btn_reset.configure(state="normal")        # v14: was self.btn_reset
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
@@ -381,6 +395,7 @@ class UIManager:
 
         self.selection_tab.clear_pins()
         self.current_tab = selected_tab
+        self._update_rotate_button()
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
 
         if selected_tab in ("Customization", "Evaluation"):
@@ -657,6 +672,9 @@ class UIManager:
 
     def rotate_screen(self):
         if self.geo.mesh is None: return
+        # FIX: เดิมกด Rotate ในแท็บอื่นได้ — ค่ามุมหมุนเปลี่ยนจริงแต่ไม่มีอะไรวาดใหม่
+        # (ดูเหมือนปุ่มไม่ทำงาน แล้วมุมมองไปเปลี่ยนเองตอนกลับมาแท็บ Selection)
+        if self.current_tab != "Selection" or getattr(self, '_view_locked', False): return
         self.selection_tab.clear_pins()
         self.screen_rotation = (self.screen_rotation + 90) % 360
         self.show_view(self.current_view)

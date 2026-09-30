@@ -97,6 +97,21 @@ class _Tooltip:
             self._tip_window = None
 
 
+class _RibbonButton(ctk.CTkButton):
+    """ปุ่มใหญ่บน ribbon (ไอคอนบน ข้อความล่าง) — ไอคอนจางลงเองเมื่อปุ่มถูก disable
+    (CTkButton ปกติจางแค่ข้อความ ไอคอนยังเข้มเหมือนกดได้ ทำให้ดูไม่ออกว่าปุ่มถูกปิดอยู่)"""
+
+    def __init__(self, master, icon_name: str, **kwargs):
+        self._icon_name = icon_name
+        super().__init__(master, image=get_icon(icon_name, _ICON_SIZE), **kwargs)
+
+    def configure(self, require_redraw=False, **kwargs):
+        if "state" in kwargs and "image" not in kwargs:
+            color = theme.TEXT_FAINT if kwargs["state"] == "disabled" else theme.ICON
+            kwargs["image"] = get_icon(self._icon_name, _ICON_SIZE, color)
+        super().configure(require_redraw=require_redraw, **kwargs)
+
+
 class ToolBar:
     """Ribbon บนสุดของหน้าต่าง — สร้างครั้งเดียวใน ui/main_window.py และ
     .pack() ไว้เหนือแถบแท็บ"""
@@ -178,13 +193,13 @@ class ToolBar:
         return row
 
     def _add_big_button(self, parent, icon_name: str, label: str, tooltip_text: str, command):
-        btn = ctk.CTkButton(
-            parent, text=label, image=get_icon(icon_name, _ICON_SIZE), compound="top",
+        btn = _RibbonButton(
+            parent, icon_name, text=label, compound="top",
             width=62, height=52, corner_radius=4, font=ctk.CTkFont(size=11),
             fg_color="transparent", hover_color=theme.BG_CARD_HOVER,
             text_color=theme.TEXT, text_color_disabled=theme.TEXT_FAINT, command=command)
         btn.pack(side="left", padx=1)
-        _Tooltip(btn, tooltip_text)
+        btn.tooltip = _Tooltip(btn, tooltip_text)   # .tooltip.text แก้ได้ภายหลัง (เช่นบอกเหตุผลที่ปุ่มถูกปิด)
         return btn
 
     # ------------------------------------------------------------------
