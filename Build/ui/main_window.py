@@ -35,6 +35,8 @@
 #   v14's before it) for older history.
 # ==============================================================================
 import os
+import contextlib
+import threading
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -252,6 +254,28 @@ class UIManager:
 
         ctk.CTkLabel(self.status_bar, text="Units: mm", text_color=theme.TEXT_MUTED, font=font).pack(side="right", padx=14)
 
+        self.lbl_status = ctk.CTkLabel(self.status_bar, text="Ready", text_color=theme.TEXT_MUTED, font=font)
+        self.lbl_status.pack(side="right", padx=14)
+
+    @contextlib.contextmanager
+    def _busy(self, text: str):
+        """งานที่ใช้เวลานาน (โหลด STEP, ค้นหารู): เปลี่ยนเคอร์เซอร์เป็นนาฬิกาทราย +
+        แสดงข้อความบน status bar ก่อนเริ่มงาน เพื่อให้รู้ว่าโปรแกรมกำลังทำงาน ไม่ได้ค้าง"""
+        self.lbl_status.configure(text=text, text_color=theme.ACCENT_TEXT)
+        try:
+            self.root.configure(cursor="watch")
+        except Exception:
+            pass
+        self.root.update_idletasks()   # ให้ข้อความ/เคอร์เซอร์ขึ้นจอก่อนงานหนักเริ่ม
+        try:
+            yield
+        finally:
+            try:
+                self.root.configure(cursor="")
+            except Exception:
+                pass
+            self.lbl_status.configure(text="Ready", text_color=theme.TEXT_MUTED)
+
     def _setup_left_sidebar(self):
         # แผงซ้าย = Hole schedule (ตารางรู) — ห่อใน _left_scroll เพื่อให้
         # pack_forget() ทั้งแผงแล้วสลับเป็น evaluation_left_frame ตอนอยู่แท็บ
@@ -305,9 +329,23 @@ class UIManager:
         count = len(self.inspection_selected_holes)
         self.lbl_selected_count.configure(text=f"{count} selected" if count > 0 else "")
 
+    def _update_rotate_button(self):
+        """Rotate ใช้ได้เฉพาะแท็บ Selection และตอนที่มุมมองยังไม่ถูกล็อก (ยังไม่ได้ Detect)
+        — เมื่อใช้ไม่ได้ ปุ่มจะจางลงและ tooltip บอกเหตุผล แทนที่จะกดแล้วเงียบ"""
+        btn = self.tool_bar.btn_rotate
+        if getattr(self, '_view_locked', False):
+            state, tip = "disabled", "Rotate is locked while holes are detected.\nPress Clear to unlock the view."
+        elif self.current_tab != "Selection":
+            state, tip = "disabled", "Rotate is only available on the Selection tab."
+        else:
+            state, tip = "normal", "Rotate the view 90\u00b0"
+        btn.configure(state=state)
+        btn.tooltip.text = tip
+
     def _set_view_controls_locked(self, is_locked):
         rotate_state = "disabled" if is_locked else "normal"
-        self.tool_bar.btn_rotate.configure(state=rotate_state)   # v14: was self.btn_rotate
+        self._view_locked = is_locked
+        self._update_rotate_button()
         for btn in self.view_buttons.values(): btn.configure(state=rotate_state)
         self.tool_bar.btn_reset.configure(state="normal")        # v14: was self.btn_reset
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
@@ -357,6 +395,7 @@ class UIManager:
 
         self.selection_tab.clear_pins()
         self.current_tab = selected_tab
+        self._update_rotate_button()
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
 
         if selected_tab in ("Customization", "Evaluation"):
@@ -395,7 +434,20 @@ class UIManager:
         # 'zoomed' ที่ตั้งไว้ก่อนหน้า ทำให้หน้าต่างเปิดเต็มจอแล้วหดกลับเป็น
         # 1400x800 เอง — จึงต้องสั่ง maximize หลัง mainloop เริ่มทำงานแล้ว
         self.root.after(0, self._maximize)
+        self.root.after(300, self._warm_up_heavy_imports)
         self.root.mainloop()
+
+    def _warm_up_heavy_imports(self):
+        """cadquery + trimesh ถูกเลื่อนไป import ตอนใช้งานครั้งแรก (ดู core/cad_loader.py)
+        เพื่อให้หน้าต่างขึ้นเร็ว — ที่นี่ import ล่วงหน้าใน thread เบื้องหลังหลังหน้าต่าง
+        ขึ้นแล้ว เพื่อไม่ให้การกด Open ครั้งแรกต้องรอ import เอง"""
+        def work():
+            try:
+                import trimesh      # noqa: F401
+                import cadquery     # noqa: F401
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True, name="warm-up-imports").start()
 
     def set_appearance(self, mode):
         """สลับ Light/Dark (เรียกจากปุ่มบน ui/tool_bar.py) — widget ของ
@@ -422,6 +474,10 @@ class UIManager:
         filepath = ctk.filedialog.askopenfilename(
             title="Select STEP/STP CAD Model", filetypes=[("STEP Files", "*.stp *.step")])
         if not filepath: return
+        with self._busy("Loading model…"):
+            self._load_model(filepath)
+
+    def _load_model(self, filepath):
         self.selection_tab.clear_pins()
         try:
             self.geo.load_file(filepath)
@@ -570,6 +626,10 @@ class UIManager:
 
     def on_generate_holes(self):
         if self.geo.mesh is None: return
+        with self._busy("Detecting holes…"):
+            self._generate_holes()
+
+    def _generate_holes(self):
         rot = self.screen_rotation
         view_name = self.current_view
         has_step = (hasattr(self.geo, 'step_data') and self.geo.step_data is not None)
@@ -612,6 +672,9 @@ class UIManager:
 
     def rotate_screen(self):
         if self.geo.mesh is None: return
+        # FIX: เดิมกด Rotate ในแท็บอื่นได้ — ค่ามุมหมุนเปลี่ยนจริงแต่ไม่มีอะไรวาดใหม่
+        # (ดูเหมือนปุ่มไม่ทำงาน แล้วมุมมองไปเปลี่ยนเองตอนกลับมาแท็บ Selection)
+        if self.current_tab != "Selection" or getattr(self, '_view_locked', False): return
         self.selection_tab.clear_pins()
         self.screen_rotation = (self.screen_rotation + 90) % 360
         self.show_view(self.current_view)
@@ -646,7 +709,38 @@ class UIManager:
     def _hole_tab_selected_color(self, hole) -> str:
         return theme.ROW_SELECTED
 
+    def _hole_list_signature(self, holes) -> tuple:
+        """ทุกอย่างที่มีผลต่อหน้าตาของ Hole schedule + การ์ด Properties ของรูชุดนี้
+        (ข้อความแถว, การเลือก, เหตุผลที่ถูกตัดออก, ค่าตั้งค่า, segment, probe profile)
+        ใช้เทียบว่ารายการที่แสดงอยู่ยังตรงกับข้อมูลหรือไม่ — ดู update_treeview()"""
+        def plain(obj):
+            return tuple(sorted((k, v) for k, v in vars(obj).items()
+                                if isinstance(v, (int, float, str, bool, type(None)))))
+        parts = [plain(self.probe_profile)]
+        for h in holes:
+            parts.append((
+                _hole_row_text(h), bool(h.selected_for_inspection),
+                bool(getattr(h, 'is_rejected', False)), getattr(h, 'reject_reason', ''),
+                bool(getattr(h, 'position_unknown', False)),
+                getattr(h, 'layers', None), getattr(h, 'points_per_layer', None),
+                getattr(h, 'zigzag_inspection', None), getattr(h, 'zigzag_degree', None),
+                tuple(plain(seg) for seg in (getattr(h, 'segments', None) or [])),
+            ))
+        return tuple(parts)
+
     def update_treeview(self, holes):
+        # PERF: widget ของ customtkinter สร้างช้า (รายการ 30 รู ≈ 3 วินาที) และ
+        # show_view() เรียกเมธอดนี้ทุกครั้ง แม้ข้อมูลรูไม่เปลี่ยนเลย (กลับมาแท็บ
+        # Selection, สลับ Light/Dark) — ถ้ารายการที่แสดงอยู่ยังตรงกับข้อมูล ให้ใช้ของเดิม
+        signature = self._hole_list_signature(holes)
+        if holes and self.hole_widgets and signature == getattr(self, '_hole_list_sig', None):
+            for idx, h in enumerate(self.current_holes):   # show_view สร้าง HoleFeature ชุดใหม่ทุกครั้ง
+                widgets = self.hole_widgets.get(idx)
+                if widgets is not None and 'hole' in widgets:
+                    widgets['hole'] = h
+            return
+        self._hole_list_sig = signature
+
         for widget in self.holes_list_frame.winfo_children():
             widget.destroy()
         for widget in self.props_body.winfo_children():   # การ์ดตั้งค่าของรูชุดเก่า
@@ -756,8 +850,26 @@ class UIManager:
 
         self._bind_hover_recursive(item_frame, enter_selected, leave_selected)
 
-        # การ์ดตั้งค่าของรูนี้อยู่ในแผง Properties (ขวา) ไม่ได้อยู่ใต้แถวแล้ว —
-        # on_hole_select() ยัง pack()/pack_forget() ตัวเดิมเหมือนเดิมทุกประการ
+        # การ์ดตั้งค่าของรูนี้ (แผง Properties ด้านขวา) สร้างแบบ lazy — ดู
+        # _ensure_settings_card(): สร้างเฉพาะตอนรูถูกเลือกครั้งแรก
+        widgets['hole'] = hole
+        if widgets['is_expanded']:
+            self._ensure_settings_card(idx)
+            widgets['settings_frame'].pack(fill="x", pady=(5, 0))
+
+    def _ensure_settings_card(self, idx):
+        """สร้างการ์ดตั้งค่า (Properties) ของรู idx ถ้ายังไม่เคยสร้าง
+
+        PERF: เดิมสร้างการ์ดของทุกรูทันทีตอนสร้างรายการ (option menu, checkbox,
+        entry ของ customtkinter แต่ละตัวช้า — ราว 150 ms ต่อรู) ทั้งที่เห็นได้ทีละ
+        การ์ดเดียว ตอนนี้สร้างเฉพาะของรูที่ถูกเลือก รายการรูจึงขึ้นเร็วขึ้นมาก
+        โดยเฉพาะชิ้นงานที่มีรูหลายสิบรู"""
+        widgets = self.hole_widgets.get(idx)
+        if widgets is None or 'settings_frame' in widgets or 'hole' not in widgets:
+            return
+        hole = widgets['hole']
+        is_multi_seg = bool(getattr(hole, 'segments', None))
+
         setting_frame = ctk.CTkFrame(self.props_body, fg_color=theme.BG_CARD, corner_radius=6)
         widgets['settings_frame'] = setting_frame
 
@@ -829,9 +941,6 @@ class UIManager:
 
             if hole.zigzag_inspection:
                 df.pack(fill="x", padx=15, pady=(0, 8))
-
-        if widgets['is_expanded']:
-            setting_frame.pack(fill="x", pady=(5, 0))
 
     def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
         block = ctk.CTkFrame(parent, fg_color=theme.BG_INPUT, corner_radius=6)
@@ -1135,6 +1244,7 @@ class UIManager:
             sel['btn'].configure(fg_color=selected_color, hover_color=selected_color)
 
             if not sel.get('is_expanded'):
+                self._ensure_settings_card(idx)
                 if 'settings_frame' in sel:
                     sel['settings_frame'].pack(fill="x", pady=(5, 0))
                 sel['is_expanded'] = True
@@ -1147,7 +1257,7 @@ class UIManager:
                 if local_idx is not None and local_idx < len(colors):
                     colors[local_idx] = 'yellow'
             self.scatter_holes.set_facecolors(colors)
-            self.canvas.draw_idle()
+            self.selection_tab.refresh_overlay()   # blit เฉพาะวงรู ไม่ต้องวาด mesh ใหม่
         elif self.current_tab == "Customization":
             self.customization_tab.draw_cross_section()
         elif self.current_tab == "Path Mapper":

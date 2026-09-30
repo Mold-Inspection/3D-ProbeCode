@@ -51,8 +51,12 @@
 #   overall deepest one — meant isolating a shallower segment silently
 #   hid its own star, which was confusing during manual inspection).
 import numpy as np
-import trimesh
-from trimesh.transformations import euler_matrix
+
+
+def _tf():
+    """trimesh.transformations แบบ lazy (ดู core/projector.py::_tf)"""
+    import trimesh.transformations as tf
+    return tf
 from mpl_toolkits.mplot3d import proj3d
 
 from ui import theme
@@ -82,9 +86,9 @@ def _build_combined_matrix(view_name: str, screen_rot: int):
     """รวม matrix การหมุนของมุมมอง (view) กับการหมุนหน้าจอ (screen_rot)
     ให้ตรงกับที่ Projector ใช้ เพื่อให้ตำแหน่ง layer ตรงกับ canvas"""
     rx, ry, rz = _VIEW_ROTATIONS.get(view_name, (0, 0, 0))
-    m_view = euler_matrix(*np.radians([rx, ry, rz]))
+    m_view = _tf().euler_matrix(*np.radians([rx, ry, rz]))
     if screen_rot != 0:
-        m_scrn = euler_matrix(0, 0, np.radians(screen_rot))
+        m_scrn = _tf().euler_matrix(0, 0, np.radians(screen_rot))
         return m_scrn @ m_view
     return m_view
 
@@ -133,7 +137,7 @@ class CustomizationTab:
 
         screen_rot = app.screen_rotation
         _matrix    = _build_combined_matrix(app.current_view, screen_rot)
-        _rotated = trimesh.transformations.transform_points(app.geo.mesh.vertices, _matrix)
+        _rotated = _tf().transform_points(app.geo.mesh.vertices, _matrix)
 
         faces = app.geo.mesh.faces
         x3    = _rotated[:, 0]

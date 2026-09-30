@@ -15,8 +15,13 @@
 #                      สามเหลี่ยมหน้าไหน "หันเข้าหาผู้สังเกต" (หน้าที่มองเห็นได้)
 # ==============================================================================
 import numpy as np
-import trimesh
-from trimesh.transformations import euler_matrix
+
+
+def _tf():
+    """trimesh.transformations แบบ lazy — import trimesh ใช้เวลา ~1.5 วินาที
+    จึงเลื่อนไปทำตอนใช้งานครั้งแรกแทนตอนเปิดโปรแกรม"""
+    import trimesh.transformations as tf
+    return tf
 
 _VIEW_ROTATIONS = {
     'Top':    (  0,  0,   0),
@@ -56,8 +61,8 @@ class Projector:
         if self.mesh is None:
             return [], [], [], [], []
 
-        matrix = euler_matrix(*np.radians([rx_deg, ry_deg, rz_deg]))
-        rv = trimesh.transformations.transform_points(self.mesh.vertices, matrix)
+        matrix = _tf().euler_matrix(*np.radians([rx_deg, ry_deg, rz_deg]))
+        rv = _tf().transform_points(self.mesh.vertices, matrix)
         rn = np.dot(self.mesh.face_normals, matrix[:3, :3].T)
 
         v0 = rv[self.triangles[:, 0]]
@@ -96,8 +101,8 @@ class Projector:
             return self._view_params_cache[cache_key]
 
         rx_deg, ry_deg, rz_deg = _VIEW_ROTATIONS.get(view_name, (0, 0, 0))
-        matrix = euler_matrix(*np.radians([rx_deg, ry_deg, rz_deg]))
-        rv = trimesh.transformations.transform_points(self.mesh.vertices, matrix)
+        matrix = _tf().euler_matrix(*np.radians([rx_deg, ry_deg, rz_deg]))
+        rv = _tf().transform_points(self.mesh.vertices, matrix)
 
         x2d, y2d = rv[:, 0].copy(), rv[:, 1].copy()
         if screen_rot != 0:
@@ -121,7 +126,7 @@ class Projector:
         """คืนค่า (display_x, display_y, depth_mm) ของจุด 3D หนึ่งจุดในมุมมองที่ระบุ"""
         p  = self.get_view_params(view_name, screen_rot)
         pt = np.array([[x_mesh, y_mesh, z_mesh]])
-        rp = trimesh.transformations.transform_points(pt, p['matrix'])[0]
+        rp = _tf().transform_points(pt, p['matrix'])[0]
         px, py, pz = rp
 
         if p['screen_rot'] != 0:

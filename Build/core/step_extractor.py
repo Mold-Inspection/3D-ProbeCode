@@ -50,7 +50,6 @@ import math
 import copy
 import os
 import datetime
-import cadquery as cq
 from core.models import StepHole, HoleSegment
 
 DEBUG = True
@@ -331,6 +330,51 @@ def _orient_each_segment_to_hole_mouth(h):
         _dbg(f"  SEGMENT MOUTH-ORIENT: flipped open/deep on {flipped}/{len(h.segments)} "
              f"segment(s) so radius_open always faces the hole's true mouth")
 
+def _is_hole_wall(face, geom_type):
+    """True ถ้าผิวโค้งนี้ "เว้า" (ผนังรู: เนื้อวัสดุอยู่ด้านนอก ช่องว่างอยู่ด้านใน)
+    False ถ้า "นูน" (ผิวด้านนอกของชิ้นงาน เช่น มุมโค้งของบล็อก, เสา/boss, โดม)
+    None ถ้าตัดสินไม่ได้ (ผู้เรียกจะถือว่าเป็นรูตามพฤติกรรมเดิม)
+
+    FIX: เดิม extract() ถือว่าผิว CYLINDER/CONE/TORUS/SPHERE ทุกผิวเป็นรู โดยไม่
+    ดูว่าผิวนั้นหันเข้าหรือหันออก — มุมโค้งด้านนอกของบล็อก (ทรงกระบอก 90° สูง
+    เท่าชิ้นงาน) จึงถูกนับเป็นรู (เช่น 11.stp มุมมอง Top เจอ "รู" 4 รูที่มุมทั้งสี่)
+
+    วิธีตัดสิน: normal ของ face ใน B-Rep ชี้ออกจากเนื้อวัสดุเสมอ (คิด orientation
+    ของ face แล้ว) — ถ้า normal ชี้ "เข้าหาแกน" ของผิวโค้ง แปลว่าช่องว่างอยู่
+    ด้านใน = ผนังรู; ถ้าชี้ "ออกจากแกน" แปลว่าเนื้อวัสดุอยู่ด้านใน = ผิวด้านนอก"""
+    try:
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepGProp import BRepGProp_Face
+        from OCP.BRepTools import BRepTools
+        from OCP.gp import gp_Pnt, gp_Vec
+
+        u0, u1, v0, v1 = BRepTools.UVBounds_s(face.wrapped)
+        pnt, nrm = gp_Pnt(), gp_Vec()
+        BRepGProp_Face(face.wrapped).Normal(0.5 * (u0 + u1), 0.5 * (v0 + v1), pnt, nrm)
+        point  = np.array([pnt.X(), pnt.Y(), pnt.Z()])
+        normal = np.array([nrm.X(), nrm.Y(), nrm.Z()])
+
+        adaptor = BRepAdaptor_Surface(face.wrapped)
+        if geom_type == 'SPHERE':
+            loc = adaptor.Sphere().Location()
+            radial = point - np.array([loc.X(), loc.Y(), loc.Z()])
+        else:
+            surf = {'CYLINDER': adaptor.Cylinder, 'CONE': adaptor.Cone, 'TORUS': adaptor.Torus}[geom_type]()
+            axis = surf.Axis()
+            loc, d = axis.Location(), axis.Direction()
+            axis_vec = np.array([d.X(), d.Y(), d.Z()])
+            rel = point - np.array([loc.X(), loc.Y(), loc.Z()])
+            radial = rel - float(np.dot(rel, axis_vec)) * axis_vec   # ส่วนที่ตั้งฉากกับแกน
+
+        n_len, r_len = float(np.linalg.norm(normal)), float(np.linalg.norm(radial))
+        if n_len < 1e-9 or r_len < 1e-9:
+            return None
+        return float(np.dot(normal, radial)) < 0.0
+    except Exception as e:
+        _dbg(f"concavity check failed ({geom_type}): {e!r}")
+        return None
+
+
 class StepExtractor:
     def __init__(self):
         self._step_holes_cache = []
@@ -343,12 +387,18 @@ class StepExtractor:
         seen  = {}
 
         total_faces       = 0
+        skipped_convex    = 0   # ผิวโค้งด้านนอก (มุมโค้ง, boss) ที่ไม่ใช่ผนังรู
 
         for face in step_data.faces().vals():
             total_faces += 1
             geom_type = face.geomType()
 
             if geom_type not in ('CYLINDER', 'CONE', 'TORUS', 'SPHERE'):
+                continue
+
+            if _is_hole_wall(face, geom_type) is False:
+                skipped_convex += 1
+                _dbg(f"SKIP face#{total_faces} ({geom_type}): convex outer surface, not a hole wall")
                 continue
 
             analytical_success = False
@@ -654,7 +704,8 @@ class StepExtractor:
             _orient_each_segment_to_hole_mouth(h)      # v02: always run — keeps radius_open facing the hole's true mouth per segment
 
         self._step_holes_cache = holes
-        print(f"[geo] STEP holes extracted: {len(holes)}")
+        print(f"[geo] STEP holes extracted: {len(holes)} "
+              f"({skipped_convex} convex outer surface(s) ignored)")
         return holes
 
     def _raycast_surface_depth(self, mesh, point_3d, dir_to_viewer, projector, view_name, screen_rot):
