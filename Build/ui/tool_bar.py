@@ -1,47 +1,41 @@
 # ==============================================================================
-# ui/tool_bar.py — Thonny-style top toolbar (icon-only, thin dividers)
+# ui/tool_bar.py — Ribbon ด้านบนของหน้าต่าง (ปุ่มไอคอน + ข้อความ จัดเป็นกลุ่ม)
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: แถบเครื่องมือแนวนอนเต็มความกว้าง ปักอยู่บนสุดของหน้าต่าง (เหนือ
-# sidebar ซ้าย/กลาง/ขวา) — ปุ่มไอคอนล้วน ไม่มีพื้นหลังสี ไม่มีข้อความยาว มี
-# เส้นแบ่งบาง ๆ คั่นกลุ่มปุ่มที่เกี่ยวข้องกัน (ตามแบบ Thonny) ใช้
-# ui/icon_loader.py ตัวเดียวกับที่ sidebar เดิมเคยใช้
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   เปลี่ยนจาก toolbar ไอคอนล้วนแบบ Thonny เป็น ribbon ตาม mockup "A · Metrology":
+#   ปุ่มที่เคยอยู่ใน sidebar ซ้าย (Upload / Generate Holes / Clear / ปุ่มมุมมอง 6 ปุ่ม)
+#   ย้ายมาอยู่ที่นี่ทั้งหมด จัดเป็นกลุ่มมีชื่อกำกับ:
+#     MODEL  [Open] [Detect] [Clear]
+#     VIEW   [Top Front Left / Bottom Back Right] [Rotate] [Reset]
+#     SETUP  [Hardware]
+#     ขวาสุด: สวิตช์ Light/Dark + ปุ่มหลัก "Export G-code"
+#   handler ทุกตัวยังเป็นของ UIManager เหมือนเดิม (app.open_file_dialog,
+#   app.on_generate_holes, app.on_clear_holes, app.show_view, app.rotate_screen,
+#   app.reset_position) — ย้ายแค่ตำแหน่งปุ่ม
 #
-# กลุ่มปุ่ม:
-#   [⟳ Rotate 90°] [⌂ Reset Position]  │  [⚙ Hardware Setting] [⇓ G-code Export]
-# 2 ปุ่มแรกเรียก handler เดิมของ UIManager ตรง ๆ (app.rotate_screen /
-# app.reset_position) — พฤติกรรมเหมือนเดิมทุกประการ แค่ย้ายตำแหน่งปุ่ม
-# ปุ่มหลังเปิด floating dialog (ui/hardware_setting_dialog.py /
-# core/gcode_export_panel.py v05) แทนการกาง/ยุบ panel ใน sidebar แบบเดิม
-#
-# btn_rotate / btn_reset ถูกเก็บเป็น attribute สาธารณะ (self.btn_rotate /
-# self.btn_reset) เพราะ ui/main_window.py ยังต้อง .configure(state=...)
-# ปุ่มเหล่านี้ตอนล็อก/ปลดล็อก view controls (ดู _set_view_controls_locked()
-# และ on_nav_change() ใน main_window.py v14) — เดิมเป็น self.btn_rotate/
-# self.btn_reset ของ UIManager เอง ตอนนี้ต้องอ้างผ่าน self.tool_bar.btn_*
-#
-# Hover ปุ่มใดก็ตามจะโชว์ tooltip ชื่อปุ่ม (customtkinter ไม่มี tooltip
-# built-in — ใช้ _Tooltip helper เล็ก ๆ ในไฟล์นี้เอง เป็น borderless
-# Toplevel ที่โผล่หลัง hover ค้างสักครู่)
+# attribute สาธารณะที่ ui/main_window.py ใช้ .configure(state=...):
+#   btn_open, btn_detect, btn_clear, btn_rotate, btn_reset, view_buttons (dict)
+# set_active_view(name) — ไฮไลต์ปุ่มมุมมองที่กำลังแสดงอยู่ (เรียกจาก show_view)
 #
 # ตัวแปรสำคัญที่ปรับจูนได้:
-#   _TOOLBAR_HEIGHT   = ความสูงของแถบ toolbar (พิกเซล)
-#   _ICON_SIZE        = ขนาดไอคอนในปุ่ม (พิกเซล) ส่งต่อให้ icon_loader.get_icon()
+#   _RIBBON_HEIGHT    = ความสูงของ ribbon (พิกเซล)
+#   _ICON_SIZE        = ขนาดไอคอนในปุ่มใหญ่ (พิกเซล)
 #   _TOOLTIP_DELAY_MS = หน่วงเวลาก่อนโชว์ tooltip หลัง hover ค้าง (ms)
-#   _COLOR_BG / _COLOR_HOVER / _COLOR_DIVIDER = สีพื้นหลัง/hover/เส้นแบ่ง
+#   _VIEW_GRID        = ตำแหน่งปุ่มมุมมอง (ชื่อ, แถว, คอลัมน์)
 # ==============================================================================
 import tkinter as tk
 import customtkinter as ctk
 
+from ui import theme
 from ui.icon_loader import get_icon
 
-_TOOLBAR_HEIGHT   = 40
-_ICON_SIZE        = 20
+_RIBBON_HEIGHT    = 86
+_ICON_SIZE        = 22
 _TOOLTIP_DELAY_MS = 500
 
-_COLOR_BG      = "#1a1a1a"
-_COLOR_HOVER   = "#2a2a2a"
-_COLOR_DIVIDER = "#3a3a3a"
+_VIEW_GRID = [('Top', 0, 0), ('Front', 0, 1), ('Left', 0, 2),
+              ('Bottom', 1, 0), ('Back', 1, 1), ('Right', 1, 2)]
 
 
 class _Tooltip:
@@ -89,9 +83,9 @@ class _Tooltip:
             tw.attributes("-topmost", True)
         except Exception:
             pass
-        tk.Label(tw, text=self.text, justify="left", background="#2e2e2e",
-                 foreground="#e0e0e0", relief="solid", borderwidth=1,
-                 font=("Segoe UI", 9), padx=6, pady=2).pack()
+        tk.Label(tw, text=self.text, justify="left", background=theme.c(theme.BG_CARD),
+                 foreground=theme.c(theme.TEXT), relief="solid", borderwidth=1,
+                 font=(theme.FONT_FAMILY, 9), padx=6, pady=2).pack()
         self._tip_window = tw
 
     def _hide(self):
@@ -104,39 +98,94 @@ class _Tooltip:
 
 
 class ToolBar:
-    """Thonny-style top toolbar — สร้างครั้งเดียวใน ui/main_window.py และ
-    .pack() ไว้เหนือ self.main_body (ดู PLAN_toolbar-and-settings-dialogs_v01.md
-    §Layout restructuring)"""
+    """Ribbon บนสุดของหน้าต่าง — สร้างครั้งเดียวใน ui/main_window.py และ
+    .pack() ไว้เหนือแถบแท็บ"""
 
     def __init__(self, app):
         self.app = app
-        self.frame = ctk.CTkFrame(app.root, fg_color=_COLOR_BG, corner_radius=0,
-                                  height=_TOOLBAR_HEIGHT)
+        self.view_buttons = {}
+        self._active_view = None
+
+        self.frame = ctk.CTkFrame(app.root, fg_color=theme.BG_CARD, corner_radius=0,
+                                  height=_RIBBON_HEIGHT)
         self.frame.pack_propagate(False)
-        self.btn_reset    = self._add_icon_button("home",   "Reset Position",   app.reset_position)
-        self.btn_rotate   = self._add_icon_button("rotate", "Rotate 90°",       app.rotate_screen)
-        self._add_divider()
-        self.btn_hardware = self._add_icon_button("gear",   "Hardware Setting", self._open_hardware_setting)
-        self.btn_export   = self._add_icon_button("export", "G-code Export",    self._open_gcode_export)
+
+        g = self._add_group("MODEL")
+        self.btn_open   = self._add_big_button(g, "folder", "Open",   "Open a STEP / STP model", app.open_file_dialog)
+        self.btn_detect = self._add_big_button(g, "target", "Detect", "Detect holes in this view", app.on_generate_holes)
+        self.btn_clear  = self._add_big_button(g, "clear",  "Clear",  "Clear detected holes and unlock the view", app.on_clear_holes)
+        self.btn_clear.configure(state="disabled")
+
+        g = self._add_group("VIEW")
+        grid = ctk.CTkFrame(g, fg_color="transparent")
+        grid.pack(side="left", padx=(2, 8))
+        for name, row, col in _VIEW_GRID:
+            btn = ctk.CTkButton(
+                grid, text=name, width=58, height=22, corner_radius=3,
+                font=ctk.CTkFont(size=11), border_width=1,
+                command=lambda v=name: app.show_view(v))
+            btn.grid(row=row, column=col, padx=2, pady=2)
+            self.view_buttons[name] = btn
+        self.set_active_view(None)
+        self.btn_rotate = self._add_big_button(g, "rotate", "Rotate", "Rotate the view 90\u00b0", app.rotate_screen)
+        self.btn_reset  = self._add_big_button(g, "home",   "Reset",  "Reset pan / zoom", app.reset_position)
+
+        g = self._add_group("SETUP")
+        self.btn_hardware = self._add_big_button(g, "gear", "Hardware", "Probe stylus and machine settings",
+                                                 self._open_hardware_setting)
+
+        # ขวาสุด: ปุ่มหลักของโปรแกรม + สวิตช์ Light/Dark
+        self.btn_export = ctk.CTkButton(
+            self.frame, text="  Export G-code", image=get_icon("export", 18, theme.ON_FILL),
+            compound="left", height=42, width=160, font=ctk.CTkFont(size=14, weight="bold"),
+            command=self._open_gcode_export)
+        self.btn_export.pack(side="right", padx=(8, 16))
+
+        self.mode_switch = ctk.CTkSegmentedButton(
+            self.frame, values=["Light", "Dark"], height=26,
+            font=ctk.CTkFont(size=12), command=app.set_appearance)
+        self.mode_switch.set(theme.DEFAULT_MODE)
+        self.mode_switch.pack(side="right", padx=8)
 
     # ------------------------------------------------------------------
     def pack(self, **kwargs):
         self.frame.pack(**kwargs)
 
+    def set_active_view(self, name):
+        """ไฮไลต์ปุ่มมุมมองที่กำลังแสดง (None = ยังไม่มีโมเดล ไม่ไฮไลต์ปุ่มใด)"""
+        self._active_view = name
+        for view, btn in self.view_buttons.items():
+            on = (view == name)
+            btn.configure(
+                fg_color=theme.ACCENT if on else theme.BG_PANEL,
+                hover_color=theme.ACCENT_HOVER if on else theme.BG_CARD_HOVER,
+                border_color=theme.ACCENT if on else theme.BORDER_STRONG,
+                text_color=theme.ON_FILL if on else theme.TEXT,
+                text_color_disabled=theme.ON_FILL if on else theme.TEXT_FAINT)
+
     # ------------------------------------------------------------------
-    def _add_icon_button(self, icon_name: str, tooltip_text: str, command):
+    def _add_group(self, caption: str):
+        """กลุ่มปุ่ม 1 กลุ่ม: แถวปุ่มด้านบน + ชื่อกลุ่มตัวเล็กด้านล่าง + เส้นแบ่งขวา
+        คืน frame แถวปุ่ม (ให้ _add_big_button ใส่ปุ่มลงไป)"""
+        group = ctk.CTkFrame(self.frame, fg_color="transparent", corner_radius=0)
+        group.pack(side="left", fill="y", padx=(10, 0), pady=(6, 4))
+        row = ctk.CTkFrame(group, fg_color="transparent", corner_radius=0)
+        row.pack(side="top", fill="both", expand=True)
+        ctk.CTkLabel(group, text=caption, height=14, font=ctk.CTkFont(size=10),
+                     text_color=theme.TEXT_MUTED).pack(side="bottom")
+        div = ctk.CTkFrame(self.frame, fg_color=theme.BORDER, width=1, corner_radius=0)
+        div.pack(side="left", fill="y", padx=(10, 0), pady=8)
+        return row
+
+    def _add_big_button(self, parent, icon_name: str, label: str, tooltip_text: str, command):
         btn = ctk.CTkButton(
-            self.frame, text="", image=get_icon(icon_name, _ICON_SIZE),
-            width=36, height=32, fg_color="transparent", hover_color=_COLOR_HOVER,
-            corner_radius=6, command=command)
-        btn.pack(side="left", padx=(6, 2), pady=4)
+            parent, text=label, image=get_icon(icon_name, _ICON_SIZE), compound="top",
+            width=62, height=52, corner_radius=4, font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=theme.BG_CARD_HOVER,
+            text_color=theme.TEXT, text_color_disabled=theme.TEXT_FAINT, command=command)
+        btn.pack(side="left", padx=1)
         _Tooltip(btn, tooltip_text)
         return btn
-
-    def _add_divider(self):
-        div = ctk.CTkFrame(self.frame, fg_color=_COLOR_DIVIDER, width=1,
-                           height=_TOOLBAR_HEIGHT - 14)
-        div.pack(side="left", padx=8, pady=7)
 
     # ------------------------------------------------------------------
     def _open_hardware_setting(self):

@@ -80,6 +80,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from ui import theme
+
 _PASS_FACE    = '#66bb6a'
 _PASS_EDGE    = '#43a047'
 _FAIL_FACE    = '#e53935'
@@ -104,7 +106,7 @@ class EvaluationTab:
         Evaluation"""
         app = self.app
         app.fig.clf()
-        app.ax = app.fig.add_subplot(111, facecolor='#1e1e1e')
+        app.ax = app.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
         app.fig.subplots_adjust(left=0.08, right=0.97, bottom=0.08, top=0.90)
 
         self._overview_scatter   = None
@@ -156,12 +158,12 @@ class EvaluationTab:
         app.ax.set_axis_off()
 
         app.ax.add_patch(plt.Rectangle((0.05, 0.1), 0.9, 0.8,
-                          linewidth=1.5, edgecolor='#1f538d',
-                          facecolor='#0d1117', zorder=1))
+                          linewidth=1.5, edgecolor=theme.c(theme.ACCENT),
+                          facecolor=theme.c(theme.BG_PANEL), zorder=1))
 
         app.ax.text(0.5, 0.58, icon, fontsize=42, ha='center', va='center',
                     transform=app.ax.transAxes, zorder=2)
-        app.ax.text(0.5, 0.46, message, fontsize=12, color='#aaaaaa',
+        app.ax.text(0.5, 0.46, message, fontsize=12, color=theme.c(theme.TEXT_MUTED),
                     ha='center', va='center', wrap=True,
                     transform=app.ax.transAxes, zorder=2)
 
@@ -261,10 +263,10 @@ class EvaluationTab:
         ax.set_title(
             f"Evaluation — {pass_count} passed, {fail_count} failed, "
             f"{nodata_count} no data{pts_tag}",
-            fontsize=13, color="white")
-        ax.grid(True, linestyle='--', alpha=0.3, color='#444444')
-        ax.set_xlabel("X-Axis (mm)", fontsize=11, color="white")
-        ax.set_ylabel("Y-Axis (mm)", fontsize=11, color="white")
+            fontsize=13, color=theme.c(theme.TEXT))
+        ax.grid(True, linestyle='--', alpha=0.3, color=theme.c(theme.PLOT_GRID))
+        ax.set_xlabel("X-Axis (mm)", fontsize=11, color=theme.c(theme.TEXT))
+        ax.set_ylabel("Y-Axis (mm)", fontsize=11, color=theme.c(theme.TEXT))
 
         if getattr(app, 'max_physical_dim', None) is not None and len(x) > 0:
             cx        = (np.min(x) + np.max(x)) / 2.0

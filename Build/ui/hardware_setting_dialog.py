@@ -46,9 +46,9 @@
 # เดียวกัน: X/Y/Z travel + Z Height ต้อง > 0 ทุกค่าถึงจะ apply — v02)
 # ==============================================================================
 import customtkinter as ctk
-import tkinter.messagebox as _mb
 
 from ui.settings_dialog_base import SettingsDialogBase
+from ui import theme
 from core.machine_profile import MachineProfile
 
 
@@ -86,7 +86,7 @@ class HardwareSettingDialog:
         holder_row = ctk.CTkFrame(parent, fg_color="transparent")
         holder_row.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(holder_row, text="Stylus Holder Height (mm):", font=ctk.CTkFont(size=13),
-                    text_color="#b0bec5").pack(anchor="w")
+                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
         holder_entry_row = ctk.CTkFrame(holder_row, fg_color="transparent")
         holder_entry_row.pack(fill="x", pady=(4, 0))
         self._probe_holder_entry = ctk.CTkEntry(holder_entry_row, width=110, height=30,
@@ -94,12 +94,12 @@ class HardwareSettingDialog:
         self._probe_holder_entry.insert(0, str(app.probe_profile.stylus_holder_height))
         self._probe_holder_entry.pack(side="left")
         ctk.CTkLabel(holder_entry_row, text="mm", font=ctk.CTkFont(size=11),
-                    text_color="#78909c").pack(side="left", padx=(6, 0))
+                    text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
         len_row = ctk.CTkFrame(parent, fg_color="transparent")
         len_row.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(len_row, text="Stylus Length (mm):", font=ctk.CTkFont(size=13),
-                    text_color="#b0bec5").pack(anchor="w")
+                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
         len_entry_row = ctk.CTkFrame(len_row, fg_color="transparent")
         len_entry_row.pack(fill="x", pady=(4, 0))
         self._probe_length_entry = ctk.CTkEntry(len_entry_row, width=110, height=30,
@@ -107,12 +107,12 @@ class HardwareSettingDialog:
         self._probe_length_entry.insert(0, str(app.probe_profile.stylus_length))
         self._probe_length_entry.pack(side="left")
         ctk.CTkLabel(len_entry_row, text="mm", font=ctk.CTkFont(size=11),
-                    text_color="#78909c").pack(side="left", padx=(6, 0))
+                    text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
         tip_row = ctk.CTkFrame(parent, fg_color="transparent")
         tip_row.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(tip_row, text="Tip Diameter ⌀ (mm):", font=ctk.CTkFont(size=13),
-                    text_color="#b0bec5").pack(anchor="w")
+                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
         tip_entry_row = ctk.CTkFrame(tip_row, fg_color="transparent")
         tip_entry_row.pack(fill="x", pady=(4, 0))
         self._probe_tip_entry = ctk.CTkEntry(tip_entry_row, width=110, height=30,
@@ -120,22 +120,22 @@ class HardwareSettingDialog:
         self._probe_tip_entry.insert(0, str(app.probe_profile.tip_diameter))
         self._probe_tip_entry.pack(side="left")
         ctk.CTkLabel(tip_entry_row, text="mm", font=ctk.CTkFont(size=11),
-                    text_color="#78909c").pack(side="left", padx=(6, 0))
+                    text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
-        ctk.CTkFrame(parent, height=1, fg_color="#2a2a4e").pack(fill="x", pady=(6, 14))
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
         btn_row.pack(fill="x")
-        ctk.CTkButton(btn_row, text="✔ Apply Profile", fg_color="#1565c0", hover_color="#1976d2",
+        ctk.CTkButton(btn_row, text="✔ Apply Profile", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      font=ctk.CTkFont(size=12, weight="bold"), height=32,
                      command=self._apply_probe_profile).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="↺ Reset to Default", fg_color="#37474f", hover_color="#546e7a",
+        ctk.CTkButton(btn_row, text="↺ Reset to Default", fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                      font=ctk.CTkFont(size=12), height=32,
                      command=self._reset_probe_profile).pack(side="left")
 
         self._lbl_probe_summary = ctk.CTkLabel(
             parent, text=self._probe_summary_text(), font=ctk.CTkFont(size=11),
-            text_color="#546e7a", justify="left")
+            text_color=theme.TEXT_MUTED, justify="left")
         self._lbl_probe_summary.pack(anchor="w", pady=(14, 0))
 
     def _probe_summary_text(self) -> str:
@@ -154,7 +154,7 @@ class HardwareSettingDialog:
             new_tip_d = float(self._probe_tip_entry.get().strip())
             if new_tip_d <= 0: raise ValueError("เส้นผ่าศูนย์กลางต้องมากกว่า 0")
         except ValueError as e:
-            _mb.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
+            self.dialog.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
             return
 
         app.probe_profile.stylus_holder_height = new_holder   # v02
@@ -198,43 +198,43 @@ class HardwareSettingDialog:
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", pady=(0, 10))
             ctk.CTkLabel(row, text=f"{axis} Travel (mm):", font=ctk.CTkFont(size=13),
-                        text_color="#b0bec5").pack(anchor="w")
+                        text_color=theme.TEXT_SECONDARY).pack(anchor="w")
             entry_row = ctk.CTkFrame(row, fg_color="transparent")
             entry_row.pack(fill="x", pady=(4, 0))
             entry = ctk.CTkEntry(entry_row, width=110, height=30, font=ctk.CTkFont(size=13))
             entry.insert(0, str(getattr(app.machine_profile, attr)))
             entry.pack(side="left")
             ctk.CTkLabel(entry_row, text="mm", font=ctk.CTkFont(size=11),
-                        text_color="#78909c").pack(side="left", padx=(6, 0))
+                        text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
             setattr(self, entry_attr, entry)
 
         # v02: Machine Z Height — 4th row, after X/Y/Z Travel.
         zh_row = ctk.CTkFrame(parent, fg_color="transparent")
         zh_row.pack(fill="x", pady=(0, 10))
         ctk.CTkLabel(zh_row, text="Machine Z Height (mm):", font=ctk.CTkFont(size=13),
-                    text_color="#b0bec5").pack(anchor="w")
+                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
         zh_entry_row = ctk.CTkFrame(zh_row, fg_color="transparent")
         zh_entry_row.pack(fill="x", pady=(4, 0))
         self._machine_zh_entry = ctk.CTkEntry(zh_entry_row, width=110, height=30, font=ctk.CTkFont(size=13))
         self._machine_zh_entry.insert(0, str(app.machine_profile.z_height))
         self._machine_zh_entry.pack(side="left")
         ctk.CTkLabel(zh_entry_row, text="mm", font=ctk.CTkFont(size=11),
-                    text_color="#78909c").pack(side="left", padx=(6, 0))
+                    text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
-        ctk.CTkFrame(parent, height=1, fg_color="#2a2a4e").pack(fill="x", pady=(6, 14))
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
         btn_row.pack(fill="x")
-        ctk.CTkButton(btn_row, text="✔ Apply", fg_color="#1565c0", hover_color="#1976d2",
+        ctk.CTkButton(btn_row, text="✔ Apply", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      font=ctk.CTkFont(size=12, weight="bold"), height=32,
                      command=self._apply_machine_profile).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(btn_row, text="↺ Reset to Default", fg_color="#37474f", hover_color="#546e7a",
+        ctk.CTkButton(btn_row, text="↺ Reset to Default", fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                      font=ctk.CTkFont(size=12), height=32,
                      command=self._reset_machine_profile).pack(side="left")
 
         self._lbl_machine_summary = ctk.CTkLabel(
             parent, text=self._machine_summary_text(), font=ctk.CTkFont(size=11),
-            text_color="#546e7a", justify="left")
+            text_color=theme.TEXT_MUTED, justify="left")
         self._lbl_machine_summary.pack(anchor="w", pady=(14, 0))
 
         # v02: reworded — Machine Z Height now feeds
@@ -245,7 +245,7 @@ class HardwareSettingDialog:
                          "used to block or warn about out-of-range probe moves.\n"
                          "Machine Z Height IS used — see G-code Export's\n"
                          "Padding Height suggestion.",
-            font=ctk.CTkFont(size=10), text_color="#5a6570", justify="left"
+            font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED, justify="left"
         ).pack(anchor="w", pady=(10, 0))
 
     def _machine_summary_text(self) -> str:
@@ -265,7 +265,7 @@ class HardwareSettingDialog:
             new_zh = float(self._machine_zh_entry.get().strip())   # v02
             if new_zh <= 0: raise ValueError("Machine Z Height ต้องมากกว่า 0")
         except ValueError as e:
-            _mb.showerror("Invalid Input", f"Machine profile ไม่ถูกต้อง:\n{e}")
+            self.dialog.showerror("Invalid Input", f"Machine profile ไม่ถูกต้อง:\n{e}")
             return
 
         app.machine_profile.x_travel = new_x

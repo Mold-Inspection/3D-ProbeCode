@@ -36,16 +36,18 @@
 import tkinter as tk
 import customtkinter as ctk
 
-_COLOR_INFO    = "#1565c0"
-_COLOR_SUCCESS = "#2E7D32"
-_COLOR_WARN    = "#8a6d00"
+from ui import theme
+
+_COLOR_INFO    = theme.ACCENT
+_COLOR_SUCCESS = theme.OK_FILL
+_COLOR_WARN    = theme.WARN_FILL
 
 _ICONS = {"info": "ℹ", "success": "✅", "warn": "⚠"}
 
 _DEFAULT_DURATION = {"info": 3500, "success": 3500, "warn": 5000}   # ms — ปรับได้
 
 _OVERLAY_STIPPLE = "gray50"   # ความหนาแน่นจุดของเงามืด — ปรับได้ ('gray25'/'gray50'/'gray75')
-_BOX_FG_COLOR    = "#1c1c1c"
+_BOX_FG_COLOR    = theme.BG_PANEL
 
 
 class UINotify:
@@ -96,7 +98,7 @@ class UINotify:
                            border_width=2, border_color=color)
         ctk.CTkLabel(box, text=f"{icon}  {message}", justify="left",
                     font=ctk.CTkFont(size=14, weight="bold"),
-                    text_color="white", wraplength=360).pack(padx=24, pady=(20, 12))
+                    text_color=theme.TEXT, wraplength=360).pack(padx=24, pady=(20, 12))
         ctk.CTkButton(box, text="OK", width=80, fg_color=color, hover_color=color,
                      command=self._dismiss).pack(pady=(0, 18))
         box.place(relx=0.5, rely=0.5, anchor="center")

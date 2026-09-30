@@ -56,11 +56,11 @@
 #   Record" to "Schema" throughout button labels/dialogs/messages.
 import os
 import customtkinter as ctk
-import tkinter.messagebox as _mb
 
 from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height
 from core.expected_points_io import export_schema_json
 from ui.settings_dialog_base import SettingsDialogBase
+from ui import theme
 
 
 class GCodeExportPanel:
@@ -88,7 +88,7 @@ class GCodeExportPanel:
             row = ctk.CTkFrame(parent, fg_color="transparent")
             row.pack(fill="x", pady=(0, 10))
             ctk.CTkLabel(row, text=label, font=ctk.CTkFont(size=13),
-                        text_color="#b0bec5").pack(anchor="w")
+                        text_color=theme.TEXT_SECONDARY).pack(anchor="w")
             entry_row = ctk.CTkFrame(row, fg_color="transparent")
             entry_row.pack(fill="x", pady=(4, 0))
             entry = ctk.CTkEntry(entry_row, width=120, height=30,
@@ -101,19 +101,19 @@ class GCodeExportPanel:
 
             if key == "safe_z":
                 ctk.CTkButton(entry_row, text="↻ Suggest", width=90, height=30,
-                             fg_color="#37474f", hover_color="#546e7a",
+                             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                              font=ctk.CTkFont(size=11),
                              command=self._suggest_safe_z).pack(side="left", padx=(8, 0))
             elif key == "padding_height":
                 ctk.CTkButton(entry_row, text="↻ Suggest", width=90, height=30,
-                             fg_color="#37474f", hover_color="#546e7a",
+                             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                              font=ctk.CTkFont(size=11),
                              command=self._suggest_padding_height).pack(side="left", padx=(8, 0))
 
-        ctk.CTkFrame(parent, height=1, fg_color="#2a2a4e").pack(fill="x", pady=(6, 14))
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
         ctk.CTkButton(
-            parent, text="🖨 Export G-code", fg_color="#1565c0", hover_color="#1976d2",
+            parent, text="🖨 Export G-code", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"), height=34,
             command=self._on_export).pack(fill="x")
 
@@ -124,7 +124,7 @@ class GCodeExportPanel:
         # settings snapshot) — see file changelog.
         ctk.CTkButton(
             parent, text="📄 Export Schema Only (.json)",
-            fg_color="#37474f", hover_color="#546e7a",
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
             font=ctk.CTkFont(size=12), height=30,
             command=self._on_export_points_only).pack(fill="x", pady=(8, 0))
 
@@ -134,14 +134,14 @@ class GCodeExportPanel:
                          "export, as \"<name>_schema.json\". Use the button\n"
                          "above only if you want the schema WITHOUT\n"
                          "exporting a G-code file.",
-            font=ctk.CTkFont(size=10), text_color="#5a6570", justify="left"
+            font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED, justify="left"
         ).pack(anchor="w", pady=(8, 0))
 
     # ------------------------------------------------------------------
     def _suggest_safe_z(self):
         app = self.app
         if app.geo.mesh is None:
-            _mb.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
+            self.dialog.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
             return
 
         view_name = "Top"
@@ -177,15 +177,15 @@ class GCodeExportPanel:
             padding_str     = self._entries["padding_height"].get().strip()
             padding_height  = float(padding_str) if padding_str else 0.0
         except ValueError:
-            _mb.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
+            self.dialog.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
             return None
 
         if entry_clearance <= 0 or probe_feedrate <= 0 or overtravel < 0 or backoff <= 0:
-            _mb.showerror("Invalid Input", "ค่าต้องมากกว่า 0 (Overtravel อนุญาต 0 ได้)")
+            self.dialog.showerror("Invalid Input", "ค่าต้องมากกว่า 0 (Overtravel อนุญาต 0 ได้)")
             return None
 
         if padding_height < 0:
-            _mb.showerror("Invalid Input", "Padding Height ต้องไม่ติดลบ")
+            self.dialog.showerror("Invalid Input", "Padding Height ต้องไม่ติดลบ")
             return None
 
         return GCodeSettings(
@@ -197,11 +197,11 @@ class GCodeExportPanel:
     def _get_selected_holes_or_warn(self):
         app = self.app
         if app.geo.mesh is None:
-            _mb.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
+            self.dialog.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
             return None
         selected = [h for h in app.current_holes if getattr(h, 'selected_for_inspection', False)]
         if not selected:
-            _mb.showwarning("No Holes Selected", "ไม่มีรูที่เลือกไว้สำหรับ inspection")
+            self.dialog.showwarning("No Holes Selected", "ไม่มีรูที่เลือกไว้สำหรับ inspection")
             return None
         return selected
 
@@ -242,15 +242,11 @@ class GCodeExportPanel:
         try:
             gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name)
         except Exception as e:
-            _mb.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
+            self.dialog.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
             return
 
-        if skipped:
-            names = ", ".join(str(getattr(h, 'display_id', '?')) for h in skipped)
-            app.notify.show(f"ข้ามรู {len(skipped)} รูที่ไม่มีข้อมูล STEP (mesh-only): {names}",
-                    severity="warn")
-
-        filepath = ctk.filedialog.asksaveasfilename(
+        filepath = self.dialog.run_native(
+            ctk.filedialog.asksaveasfilename,
             title="Save G-code", defaultextension=".gcode",
             filetypes=[("G-code Files", "*.gcode *.nc *.txt")])
         if not filepath:
@@ -260,17 +256,25 @@ class GCodeExportPanel:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(gcode_text)
         except Exception as e:
-            _mb.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
+            self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
         schema_report = self._capture_export_record(selected, view_name, filepath)   # v09/v10
 
-        msg = f"บันทึก G-code แล้ว: {filepath}"
+        # popup ยืนยันว่า export เสร็จ — ใช้ messagebox ที่มี dialog นี้เป็นเจ้าของ
+        # (toast ของ app.notify วางอยู่บนหน้าต่างหลัก จึงถูก dialog นี้บังไว้)
+        msg = f"บันทึก G-code แล้ว:\n{filepath}"
         if schema_report.get('written'):
-            msg += "\nตั้ง Schema นี้เป็นค่าที่ใช้งานอยู่แล้ว"
+            msg += f"\n\nบันทึก Schema แล้ว:\n{schema_report.get('path')}"
+            msg += "\n\nแท็บ Evaluation โหลด Schema นี้ให้แล้วอัตโนมัติ"
             if schema_report.get('refreshed'):
-                msg += " — คำนวณผลลัพธ์ Evaluation ใหม่แล้ว"
-        app.notify.show(msg, severity="success")
+                msg += " และคำนวณผลลัพธ์ใหม่แล้ว"
+        else:
+            msg += "\n\n(เขียนไฟล์ Schema ไม่สำเร็จ — แท็บ Evaluation จะใช้ค่ารูปัจจุบันแทน)"
+        if skipped:
+            names = ", ".join(str(getattr(h, 'display_id', '?')) for h in skipped)
+            msg += f"\n\nข้ามรู {len(skipped)} รูที่ไม่มีข้อมูล STEP (mesh-only): {names}"
+        self.dialog.showinfo("Export complete", msg)
 
     # ------------------------------------------------------------------
     def _on_export_points_only(self):
@@ -287,7 +291,8 @@ class GCodeExportPanel:
 
         view_name = self._resolve_view_name()
 
-        filepath = ctk.filedialog.asksaveasfilename(
+        filepath = self.dialog.run_native(
+            ctk.filedialog.asksaveasfilename,
             title="Save Schema", defaultextension=".json",
             initialfile=self._default_schema_filename(),
             filetypes=[("Schema JSON", "*.json")])
@@ -307,7 +312,7 @@ class GCodeExportPanel:
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
         except Exception as e:
-            _mb.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
+            self.dialog.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
 
         # v10: this schema was just built from the CURRENT app.current_holes
@@ -315,10 +320,10 @@ class GCodeExportPanel:
         # "Load Schema (.json)" would, minus the file dialog.
         refreshed = self._auto_load_schema(payload, filepath)
 
-        msg = f"บันทึก Schema แล้ว: {filepath}\nตั้งเป็น Schema ที่ใช้งานอยู่แล้ว"
+        msg = f"บันทึก Schema แล้ว:\n{filepath}\n\nแท็บ Evaluation โหลด Schema นี้ให้แล้วอัตโนมัติ"
         if refreshed:
-            msg += " — คำนวณผลลัพธ์ Evaluation ใหม่แล้ว"
-        app.notify.show(msg, severity="success")
+            msg += " และคำนวณผลลัพธ์ใหม่แล้ว"
+        self.dialog.showinfo("Export complete", msg)
 
     # ------------------------------------------------------------------
     def _build_snapshot_or_none(self, holes_to_snapshot, view_name):
@@ -372,10 +377,10 @@ class GCodeExportPanel:
             print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")
-            return {'written': False, 'refreshed': False}
+            return {'written': False, 'refreshed': False, 'path': None}
 
         refreshed = self._auto_load_schema(payload, sidecar_path)   # v10
-        return {'written': True, 'refreshed': refreshed}
+        return {'written': True, 'refreshed': refreshed, 'path': sidecar_path}
 
     # ------------------------------------------------------------------
     def _auto_load_schema(self, payload: dict, filepath: str) -> bool:

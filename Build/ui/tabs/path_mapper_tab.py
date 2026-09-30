@@ -40,6 +40,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+from ui import theme
+
 from core.hole_ordering import order_holes_nearest_neighbor, split_step_ready
 
 _START_COLOR = '#66bb6a'
@@ -63,7 +65,7 @@ class PathMapperTab:
     def draw_path_mapper(self):
         app = self.app
         app.fig.clf()
-        app.ax = app.fig.add_subplot(111, facecolor='#1e1e1e')
+        app.ax = app.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
         app.fig.subplots_adjust(left=0.08, right=0.97, bottom=0.08, top=0.90)
 
         self._overview_scatter   = None
@@ -86,12 +88,12 @@ class PathMapperTab:
         app.ax.set_axis_off()
 
         app.ax.add_patch(plt.Rectangle((0.05, 0.1), 0.9, 0.8,
-                          linewidth=1.5, edgecolor='#1f538d',
-                          facecolor='#0d1117', zorder=1))
+                          linewidth=1.5, edgecolor=theme.c(theme.ACCENT),
+                          facecolor=theme.c(theme.BG_PANEL), zorder=1))
 
         app.ax.text(0.5, 0.58, '📍', fontsize=42, ha='center', va='center',
                     transform=app.ax.transAxes, zorder=2)
-        app.ax.text(0.5, 0.46, message, fontsize=12, color='#aaaaaa',
+        app.ax.text(0.5, 0.46, message, fontsize=12, color=theme.c(theme.TEXT_MUTED),
                     ha='center', va='center', wrap=True,
                     transform=app.ax.transAxes, zorder=2)
 
@@ -169,10 +171,10 @@ class PathMapperTab:
 
         skip_tag = f", {len(skipped)} skipped (no STEP)" if skipped else ""
         ax.set_title(f"Path Mapper — Overview ({len(ordered)} holes, G-code visit order{skip_tag})",
-                    fontsize=14, color="white")
-        ax.grid(True, linestyle='--', alpha=0.3, color='#444444')
-        ax.set_xlabel("X-Axis (mm)", fontsize=11, color="white")
-        ax.set_ylabel("Y-Axis (mm)", fontsize=11, color="white")
+                    fontsize=14, color=theme.c(theme.TEXT))
+        ax.grid(True, linestyle='--', alpha=0.3, color=theme.c(theme.PLOT_GRID))
+        ax.set_xlabel("X-Axis (mm)", fontsize=11, color=theme.c(theme.TEXT))
+        ax.set_ylabel("Y-Axis (mm)", fontsize=11, color=theme.c(theme.TEXT))
 
         if getattr(app, 'max_physical_dim', None) is not None and len(x) > 0:
             cx        = (np.min(x) + np.max(x)) / 2.0

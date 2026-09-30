@@ -43,14 +43,15 @@ import customtkinter as ctk
 import tkinter.messagebox as _mb
 
 from ui.evaluation_left_panel import _remap_holes_by_gi
+from ui import theme
 
-_COLOR_PASS   = "#1b3a1f"
-_COLOR_FAIL   = "#3a1f1f"
-_COLOR_NODATA = "#2a2a2a"
+_COLOR_PASS   = theme.OK_FILL
+_COLOR_FAIL   = theme.ERR_FILL
+_COLOR_NODATA = theme.BTN_SECONDARY
 
 # v03 — per-point row background (Requirement 5: green pass / red fail)
-_ROW_PASS = "#173a1a"
-_ROW_FAIL = "#3a1717"
+_ROW_PASS = theme.OK_BG
+_ROW_FAIL = theme.ERR_BG
 
 
 class EvaluationSidebarPanel:
@@ -70,15 +71,15 @@ class EvaluationSidebarPanel:
         ctk.CTkLabel(header, text="Evaluation Results", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
 
         # --- tolerance row ---------------------------------------------
-        tol_frame = ctk.CTkFrame(parent, fg_color="#1e1e1e", corner_radius=5)
+        tol_frame = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
         tol_frame.pack(padx=20, pady=(0, 10), fill="x")
         row = ctk.CTkFrame(tol_frame, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=8)
-        ctk.CTkLabel(row, text="Tolerance (mm):", text_color="#b0bec5").pack(side="left")
+        ctk.CTkLabel(row, text="Tolerance (mm):", text_color=theme.TEXT_SECONDARY).pack(side="left")
         self.tol_entry = ctk.CTkEntry(row, width=70)
         self.tol_entry.insert(0, str(getattr(self.app, 'evaluation_tolerance_mm', 0.5)))
         self.tol_entry.pack(side="left", padx=(8, 8))
-        ctk.CTkButton(row, text="Apply", width=70, fg_color="#1565c0", hover_color="#1976d2",
+        ctk.CTkButton(row, text="Apply", width=70, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      command=self._on_apply_tolerance).pack(side="left")
 
         self.warning_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -109,7 +110,7 @@ class EvaluationSidebarPanel:
             ctk.CTkLabel(
                 self.list_frame,
                 text="No evaluation data yet.\nLoad a .log file from the left panel.",
-                text_color="gray", font=ctk.CTkFont(size=12), justify="left"
+                text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12), justify="left"
             ).pack(pady=20, padx=10)
             return
 
@@ -127,7 +128,7 @@ class EvaluationSidebarPanel:
         if not any_card:
             ctk.CTkLabel(
                 self.list_frame, text="No holes are currently selected for inspection.",
-                text_color="gray", font=ctk.CTkFont(size=12)
+                text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12)
             ).pack(pady=20, padx=10)
 
     def _build_warning_banner(self, result: dict):
@@ -144,16 +145,16 @@ class EvaluationSidebarPanel:
                 self.warning_frame,
                 text=f"⚠ Settings changed since export for: {names}\n"
                      f"Results may not reflect the actual machine run.",
-                text_color="#ffca28", font=ctk.CTkFont(size=11, weight="bold"),
+                text_color=theme.WARN_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
                 wraplength=380, justify="left",
-                fg_color="#1a1400", corner_radius=6
+                fg_color=theme.WARN_BG, corner_radius=6
             ).pack(fill="x", pady=(0, 10), ipady=6)
         elif result.get('expected_source') != 'json' and getattr(self.app, 'last_export_snapshot', None) is None:
             ctk.CTkLabel(
                 self.warning_frame,
                 text="ℹ Settings could not be verified against the actual export — "
                      "results assume the current configuration matches what was run.",
-                text_color="#78909c", font=ctk.CTkFont(size=10),
+                text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=10),
                 wraplength=380, justify="left"
             ).pack(fill="x", pady=(0, 10))
 
@@ -201,19 +202,19 @@ class EvaluationSidebarPanel:
 
         self._bind_hover_recursive(item_frame, enter, leave)
 
-        body = ctk.CTkFrame(item_frame, fg_color="#141822", corner_radius=6)
+        body = ctk.CTkFrame(item_frame, fg_color=theme.BG_INPUT, corner_radius=6)
         widgets['body'] = body
 
         if info is None:
             ctk.CTkLabel(
                 body, text="No matching probe data found for this hole in the log.",
-                text_color="#888888", font=ctk.CTkFont(size=11),
+                text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11),
                 wraplength=280, justify="left"
             ).pack(padx=10, pady=8, anchor="w")
         else:
             ctk.CTkLabel(
                 body, text=f"Max Offset: {info.get('max_deviation', 0):.3f} mm",   # v03: was "Max deviation"
-                text_color="#b0bec5", font=ctk.CTkFont(size=11)
+                text_color=theme.TEXT_SECONDARY, font=ctk.CTkFont(size=11)
             ).pack(anchor="w", padx=10, pady=(8, 2))
             for seg in info.get('segments', []):
                 self._build_segment_block(body, gi, seg)
@@ -236,7 +237,7 @@ class EvaluationSidebarPanel:
         seg_idx = seg.get('seg_idx', 0)
         frame = ctk.CTkFrame(parent, fg_color="transparent")
         frame.pack(fill="x", padx=6, pady=(4, 0))
-        ctk.CTkLabel(frame, text=f"Segment {seg_idx + 1}", text_color="#78909c",
+        ctk.CTkLabel(frame, text=f"Segment {seg_idx + 1}", text_color=theme.TEXT_MUTED,
                     font=ctk.CTkFont(size=10, weight="bold")).pack(anchor="w", padx=4)
         for layer in seg.get('layers', []):
             self._build_layer_row(frame, gi, seg_idx, layer)
@@ -247,14 +248,14 @@ class EvaluationSidebarPanel:
         state = self._hole_widgets[gi]['layer_state'].setdefault(
             key, {'expanded': False, 'show_all': False})
 
-        row = ctk.CTkFrame(parent, fg_color="#1c212c", corner_radius=5)
+        row = ctk.CTkFrame(parent, fg_color=theme.BG_CARD_HOVER, corner_radius=5)
         row.pack(fill="x", padx=4, pady=2)
 
         badge = "✅" if layer.get('passed') else "❌"
         text = f"{badge} Layer {layer_idx + 1}   max offset={layer.get('max_deviation', 0):.3f} mm"
         ctk.CTkButton(
             row, text=text, anchor="w",
-            fg_color="transparent", hover_color="#2c3348",
+            fg_color="transparent", hover_color=theme.SELECT_BG, text_color=theme.TEXT,
             font=ctk.CTkFont(size=11),
             command=lambda: self._toggle_layer(gi, seg_idx, layer_idx)
         ).pack(fill="x", padx=4, pady=4)
@@ -298,7 +299,7 @@ class EvaluationSidebarPanel:
         toggle_text = "Show failed only" if state['show_all'] else "Show all points"
         ctk.CTkButton(
             parent, text=toggle_text, width=140, height=22,
-            fg_color="#37474f", hover_color="#546e7a", font=ctk.CTkFont(size=10),
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER, font=ctk.CTkFont(size=10),
             command=lambda: self._toggle_show_all(gi, seg_idx, layer_idx)
         ).pack(anchor="w", pady=(2, 4))
 
@@ -307,7 +308,7 @@ class EvaluationSidebarPanel:
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x")
         for text, w in (("#", 22), ("Ideal", 130), ("Measured", 130), ("Offset(mm)", 68), ("", 24)):
-            ctk.CTkLabel(header, text=text, text_color="#78909c",
+            ctk.CTkLabel(header, text=text, text_color=theme.TEXT_MUTED,
                         font=ctk.CTkFont(size=9, weight="bold"), width=w).pack(side="left")
 
         for p in shown:
@@ -329,13 +330,13 @@ class EvaluationSidebarPanel:
             ctk.CTkLabel(r, text=f"{act[0]:.2f},{act[1]:.2f},{act[2]:.2f}", width=130,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
             ctk.CTkLabel(r, text=f"{dist:.3f}", width=68, font=ctk.CTkFont(size=9, weight="bold"),
-                        text_color=("#a5d6a7" if ok else "#ef9a9a")).pack(side="left", pady=2)
+                        text_color=(theme.OK_TEXT if ok else theme.ERR_TEXT)).pack(side="left", pady=2)
             ctk.CTkLabel(r, text=("✅" if ok else "❌"), width=24,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
 
         if not points:
             ctk.CTkLabel(parent, text="No points recorded for this layer.",
-                        text_color="#666666", font=ctk.CTkFont(size=10)).pack(anchor="w", pady=(4, 0))
+                        text_color=theme.TEXT_FAINT, font=ctk.CTkFont(size=10)).pack(anchor="w", pady=(4, 0))
 
     def _toggle_show_all(self, gi, seg_idx, layer_idx):
         key = (gi, seg_idx, layer_idx)
