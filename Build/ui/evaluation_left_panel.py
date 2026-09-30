@@ -290,9 +290,9 @@ class EvaluationLeftPanel:
         try:
             from core.expected_points_io import load_schema_json
         except ImportError as e:
-            self.app.notify.show(
-                f"ยังไม่มี core/expected_points_io.py::load_schema_json() ({e})",
-                severity="info", duration_ms=6000)
+            _mb.showwarning(
+                "Load Schema", f"ยังไม่มี core/expected_points_io.py::load_schema_json() ({e})",
+                parent=app.root)
             return
 
         try:
@@ -315,9 +315,9 @@ class EvaluationLeftPanel:
             try:
                 from core.evaluation_engine import apply_settings_snapshot
             except ImportError as e:
-                self.app.notify.show(
-                    f"ยังไม่มี core/evaluation_engine.py::apply_settings_snapshot() ({e})",
-                    severity="info", duration_ms=6000)
+                _mb.showwarning(
+                    "Load Schema", f"ยังไม่มี core/evaluation_engine.py::apply_settings_snapshot() ({e})",
+                    parent=app.root)
                 return
             report = apply_settings_snapshot(app.current_holes, snapshot, full_replace=True)
 
@@ -341,19 +341,22 @@ class EvaluationLeftPanel:
         if app.current_tab == "Evaluation":
             app.evaluation_tab.draw_evaluation()
 
-        refresh_tag = "\nผลลัพธ์ถูกคำนวณใหม่แล้ว" if refreshed else ""
+        # popup ปกติของ Windows (tkinter.messagebox) แทน toast ของ app.notify ที่ทำให้
+        # ทั้งหน้าจอมืดลง
+        refresh_tag = "\n\nผลลัพธ์ถูกคำนวณใหม่แล้ว" if refreshed else ""
         if snapshot.get('holes'):
-            self.app.notify.show(
-                f"โหลด Schema แล้ว — แทนที่การตั้งค่าปัจจุบัน: "
-                f"จับคู่ {report['matched']} รู, ปิดการเลือก {report['deselected']} รู "
-                f"({len(points)} points){refresh_tag}",
-                severity="success")
+            _mb.showinfo(
+                "Schema loaded",
+                f"โหลด Schema แล้ว: {os.path.basename(filepath)}\n\n"
+                f"แทนที่การตั้งค่าปัจจุบัน: จับคู่ {report['matched']} รู, "
+                f"ปิดการเลือก {report['deselected']} รู ({len(points)} points){refresh_tag}",
+                parent=app.root)
         else:
-            self.app.notify.show(
-                f"โหลด Schema แล้ว: {len(points)} points "
-                f"(ไฟล์นี้ไม่มีข้อมูล settings ให้แทนที่ — ใช้ค่าตั้งค่าปัจจุบันต่อไป)"
-                f"{refresh_tag}",
-                severity="warn")
+            _mb.showwarning(
+                "Schema loaded",
+                f"โหลด Schema แล้ว: {os.path.basename(filepath)} ({len(points)} points)\n\n"
+                f"ไฟล์นี้ไม่มีข้อมูล settings ให้แทนที่ — ใช้ค่าตั้งค่าปัจจุบันต่อไป{refresh_tag}",
+                parent=app.root)
 
     def _on_clear_schema(self):
         """only clears which points source Evaluation compares the .log

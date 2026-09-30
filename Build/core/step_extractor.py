@@ -50,7 +50,6 @@ import math
 import copy
 import os
 import datetime
-import cadquery as cq
 from core.models import StepHole, HoleSegment
 
 DEBUG = True

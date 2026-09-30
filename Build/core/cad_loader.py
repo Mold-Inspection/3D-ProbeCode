@@ -10,8 +10,6 @@
 #   tolerance / angularTolerance = ความละเอียดของ mesh ที่แปลงจาก STEP
 #                                  (ค่ายิ่งน้อย = mesh ละเอียดขึ้นแต่ช้าลง)
 # ==============================================================================
-import trimesh
-import cadquery as cq
 import os
 import numpy as np
 
@@ -29,6 +27,12 @@ class CADLoader:
                 f"Unsupported file type '{ext or '(no extension)'}'. "
                 f"3D ProbeCode only accepts .STEP / .STP files."
             )
+
+        # import ตรงนี้ (ไม่ใช่บนสุดของไฟล์): cadquery + trimesh ใช้เวลา import รวม
+        # ~3 วินาที ถ้า import ตอนเปิดโปรแกรม หน้าต่างจะขึ้นช้าไปเท่านั้น
+        # (ui/main_window.py อุ่นเครื่อง import สองตัวนี้ใน thread เบื้องหลังหลังหน้าต่างขึ้นแล้ว)
+        import trimesh
+        import cadquery as cq
 
         print("Loading STEP — tessellating for display, parsing B-Rep for geometry...")
         step_data = cq.importers.importStep(filepath)
