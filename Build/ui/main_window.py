@@ -65,6 +65,8 @@ from ui.tool_bar import ToolBar
 from ui.tab_strip import TabStrip
 from ui.hardware_setting_dialog import HardwareSettingDialog
 from core.ui_notify import UINotify
+from core import user_settings
+from core.work_zero import WORK_ZERO_CHOICES, DEFAULT_WORK_ZERO
 from ui import theme
 
 
@@ -131,6 +133,17 @@ class UIManager:
 
         self.probe_profile   = ProbeProfile()
         self.machine_profile = MachineProfile()   # v14: previously unused — now consumed by hardware_setting_dialog.py
+
+        # ค่าที่ผู้ใช้ตั้งไว้ครั้งก่อน (%APPDATA%\3D ProbeCode\settings.json — core/user_settings.py)
+        _saved = user_settings.load()
+        user_settings.apply_numbers(self.probe_profile, _saved.get('probe'),
+                                    ('stylus_holder_height', 'stylus_length', 'tip_diameter', 'wall_clearance'),
+                                    allow_zero=('wall_clearance',))
+        user_settings.apply_numbers(self.machine_profile, _saved.get('machine'),
+                                    ('x_travel', 'y_travel', 'z_travel', 'z_height'))
+        self.appearance_mode = (_saved.get('appearance')
+                                if _saved.get('appearance') in ("Light", "Dark") else theme.DEFAULT_MODE)
+        _zero = _saved.get('work_zero')
         self.inspection_selected_holes = []
 
         # v12: Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
@@ -139,6 +152,8 @@ class UIManager:
         self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
         self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
         self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด (live path) — เขียนโดย core/gcode_export_panel.py
+        # จุด X0 Y0 Z0 ของ G-code (core/work_zero.py) — เลือกได้ใน G-code Export, จำข้ามการเปิดโปรแกรม
+        self.work_zero = _zero if _zero in dict(WORK_ZERO_CHOICES) else DEFAULT_WORK_ZERO
 
         # v15: Expected Points (.json) import state
         self.loaded_expected_points        = None   # list ของ point dicts ที่โหลดมา (None = ยังไม่ได้โหลด, ใช้ live recompute จาก app.current_holes แทน)
@@ -157,7 +172,7 @@ class UIManager:
         self.path_mapper_tab   = PathMapperTab(self)
         self.evaluation_tab    = EvaluationTab(self)
 
-        theme.apply()   # ต้องมาก่อน ctk.CTk() — ตั้ง default สีของ widget ทุกตัว
+        theme.apply(self.appearance_mode)   # ต้องมาก่อน ctk.CTk() — ตั้ง default สีของ widget ทุกตัว
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
         self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล) — fallback ถ้าไม่ maximize
@@ -442,6 +457,15 @@ class UIManager:
         except Exception:
             pass   # best-effort — ไม่ให้การ maximize ล้มเหลวไปบล็อกการเปิดโปรแกรม
 
+    def refresh_work_zero_marker(self):
+        """วาดเครื่องหมาย Work zero ใหม่หลังเปลี่ยนจุด zero (G-code Export)"""
+        if self.geo.mesh is None:
+            return
+        if self.current_tab == "Selection":
+            self.selection_tab.refresh_zero_marker()
+        elif self.current_tab == "Customization":
+            self.customization_tab.draw_cross_section()
+
     def show(self):
         # FIX: ตอนเริ่ม mainloop() customtkinter จะ withdraw() แล้ว deiconify()
         # หน้าต่าง 1 รอบ (เพื่อเปลี่ยนสี title bar บน Windows) ซึ่งล้าง state
@@ -467,6 +491,8 @@ class UIManager:
         """สลับ Light/Dark (เรียกจากปุ่มบน ui/tool_bar.py) — widget ของ
         customtkinter เปลี่ยนสีเอง ส่วนกราฟ matplotlib ต้องวาดใหม่ทั้งหมด"""
         ctk.set_appearance_mode(mode)
+        self.appearance_mode = mode
+        user_settings.save_section("appearance", mode)
         theme.apply_matplotlib()
         self.fig.set_facecolor(theme.c(theme.PLOT_FIG))
 

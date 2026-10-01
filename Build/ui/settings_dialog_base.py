@@ -43,6 +43,7 @@ class SettingsDialogBase:
         self._active_key      = None
 
         self.toplevel = None
+        self.on_close = None   # callback ก่อนปิด dialog (เช่น จำค่าที่กรอกไว้) — ตั้งโดยเจ้าของ dialog
         self._drag_offset_x = 0
         self._drag_offset_y = 0
         self._master_focus_bind_id = None
@@ -157,6 +158,9 @@ class SettingsDialogBase:
 
     def showinfo(self, title: str, message: str):
         return self.run_native(_mb.showinfo, title, message)
+
+    def askyesno(self, title: str, message: str) -> bool:
+        return bool(self.run_native(_mb.askyesno, title, message, icon="warning"))
 
     def _on_dialog_unmap(self, _event=None):
         if self.toplevel is not None:
@@ -274,6 +278,11 @@ class SettingsDialogBase:
         cat['frame'].pack(fill="both", expand=True)
 
     def _on_close(self):
+        if self.toplevel is not None and self.on_close is not None:
+            try:
+                self.on_close()
+            except Exception as e:
+                print(f"[settings_dialog_base] on_close failed: {e!r}")
         if self.toplevel is not None:
             try:
                 self.toplevel.grab_release()

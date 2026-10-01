@@ -146,6 +146,11 @@ def _hole_vertex_mask(app, h, x3, y3, radius, scale, isolate_seg, screen_rot):
     return np.hypot(x3 - h.x, y3 - h.y) <= radius * scale
 
 
+# สีเครื่องหมาย Work zero — X แดง / Y เขียว / Z น้ำเงิน ตามธรรมเนียม CAD/CNC
+_ZERO_X_COLOR = '#e5484d'
+_ZERO_Y_COLOR = '#30a46c'
+_ZERO_Z_COLOR = '#3e8ef7'
+
 class CustomizationTab:
     def __init__(self, app):
         self.app = app
@@ -595,8 +600,35 @@ class CustomizationTab:
         ax3d.set_zlabel("Z (mm)", color=theme.VIEW3D_TEXT, fontsize=9, labelpad=2)
         if has_hole:
             ax3d.legend(facecolor=theme.VIEW3D_BG, edgecolor=theme.VIEW3D_MUTED, labelcolor=theme.VIEW3D_TEXT, loc='upper right', fontsize=7)
+        self._draw_zero_marker_3d(ax3d)
         ax3d.invert_xaxis()
         app.canvas.draw()
+
+    def _draw_zero_marker_3d(self, ax3d):
+        """เครื่องหมาย Work zero ในกราฟ 3D + ลูกศรแกน X+ / Y+ / Z+ ของ G-code
+        (คิดตามมุมมองและการหมุนจอปัจจุบัน) — วาดเฉพาะเมื่ออยู่ในกรอบที่ซูมอยู่
+        (ตอนซูมเข้ารูใดรูหนึ่ง จุด zero มักอยู่นอกกรอบ — matplotlib 3D ไม่ตัดขอบให้)"""
+        app = self.app
+        from core.work_zero import zero_in_view
+        mode = getattr(app, 'work_zero', 'centroid')
+        zx, zy, zd = zero_in_view(app.geo.mesh, app.current_view, app.screen_rotation, mode)
+        (x0, x1), (y0, y1), (z0, z1) = ax3d.get_xlim(), ax3d.get_ylim(), ax3d.get_zlim()
+        inside = (min(x0, x1) <= zx <= max(x0, x1) and min(y0, y1) <= zy <= max(y0, y1)
+                  and min(z0, z1) <= zd <= max(z0, z1))
+        if not inside:
+            return
+        arrow = 0.18 * max(abs(x1 - x0), abs(y1 - y0))
+        # แกน Z ของกราฟนี้คือ "ความลึกจากผิวบน" (ชี้ลง) — Z+ ของเครื่อง (ขึ้นหาโพรบ) จึงเป็นทิศลบ
+        for (dx, dy, dz), color, name in (((arrow, 0, 0), _ZERO_X_COLOR, "X+"),
+                                          ((0, arrow, 0), _ZERO_Y_COLOR, "Y+"),
+                                          ((0, 0, -arrow), _ZERO_Z_COLOR, "Z+")):
+            ax3d.quiver(zx, zy, zd, dx, dy, dz, color=color, linewidth=2.2, arrow_length_ratio=0.2)
+            ax3d.text(zx + dx * 1.15, zy + dy * 1.15, zd + dz * 1.15, name, color=color,
+                      fontsize=8, fontweight='bold', zorder=30)
+        ax3d.scatter([zx], [zy], [zd], s=70, c='white', edgecolors='#1c2630', linewidths=1.8,
+                     depthshade=False, zorder=30)
+        ax3d.text(zx, zy, zd, "  X0 Y0 Z0" if mode != 'centroid' else "  X0 Y0 (centroid)",
+                  color=theme.VIEW3D_TEXT, fontsize=8, fontweight='bold', zorder=30)
 
     def highlight_hole(self, global_idx):
         """ไฮไลต์ (สีเหลือง) ตัวเลข 3D ของรูที่ hover จาก Sidebar แบบเรียลไทม์"""

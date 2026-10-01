@@ -48,20 +48,26 @@ class AxisTestSettings:
         return ""
 
 
-def axis_test_corners(settings: AxisTestSettings) -> list:
-    """มุมทั้ง 4 ตามลำดับการเดิน (ชื่อ, X, Y) — เริ่ม/จบที่มุมซ้ายบน (0, 0)"""
+def axis_test_corners(settings: AxisTestSettings, zero_offset=(0.0, 0.0)) -> list:
+    """มุมทั้ง 4 ตามลำดับการเดิน (ชื่อ, X, Y) — เริ่ม/จบที่มุมซ้ายบน
+    zero_offset = ตำแหน่งจุด zero เทียบมุมซ้ายบน (X ขวา, Y ขึ้น) จาก
+    core/work_zero.py::zero_offset_from_upper_left() — (0, 0) = zero ที่มุมซ้ายบน
+    (ผลลัพธ์เหมือนเดิมทุกประการ)"""
     w, l = settings.width_x, settings.length_y
+    zx, zy = zero_offset
+    ul = "upper-left (zero)" if (zx, zy) == (0.0, 0.0) else "upper-left"
     return [
-        ("upper-left (zero)", 0.0, 0.0),
-        ("upper-right",       w,   0.0),
-        ("lower-right",       w,   -l),
-        ("lower-left",        0.0, -l),
-        ("upper-left (zero)", 0.0, 0.0),
+        (ul,            0.0 - zx, 0.0 - zy),
+        ("upper-right", w - zx,   0.0 - zy),
+        ("lower-right", w - zx,   -l - zy),
+        ("lower-left",  0.0 - zx, -l - zy),
+        (ul,            0.0 - zx, 0.0 - zy),
     ]
 
 
 def generate_axis_test_gcode(settings: AxisTestSettings, view_name: str = "Top",
-                             source_name: str = None) -> str:
+                             source_name: str = None, zero_offset=(0.0, 0.0),
+                             zero_name: str = "UPPER-LEFT corner") -> str:
     """สร้างข้อความ G-code ทดสอบแกน X/Y — ดูคำอธิบายด้านบนไฟล์"""
     err = settings.validate()
     if err:
@@ -73,7 +79,7 @@ def generate_axis_test_gcode(settings: AxisTestSettings, view_name: str = "Top",
         "; 3D ProbeCode - AXIS TEST (corner trace)",
         f"; Object: {source_name or '(no file)'}  View: {view_name}",
         f"; Size: X {s.width_x:.3f} mm  x  Y {s.length_y:.3f} mm",
-        "; BEFORE RUNNING: put the needle at the UPPER-LEFT corner of the",
+        f"; BEFORE RUNNING: put the needle at the {zero_name} of the",
         ";   object (as seen on screen) and Set Zero X/Y/Z there.",
         "; Path: upper-left -> upper-right -> lower-right -> lower-left -> upper-left",
         ";   X+ = right, Y+ = toward back of machine (up on screen).",
@@ -86,11 +92,16 @@ def generate_axis_test_gcode(settings: AxisTestSettings, view_name: str = "Top",
     if s.z_lift > 0:
         lines.append(f"G0 Z{s.z_lift:.3f} ; lift needle")
 
-    corners = axis_test_corners(s)
-    for name, x, y in corners[1:]:
+    corners = axis_test_corners(s, zero_offset)
+    zero_at_ul = tuple(zero_offset) == (0.0, 0.0)
+    # zero อยู่ที่มุมซ้ายบน: เริ่มที่มุมนั้นอยู่แล้ว (เหมือนเดิม) — zero อยู่จุดอื่น: เดินไปมุมซ้ายบนก่อน
+    for i, (name, x, y) in enumerate(corners if not zero_at_ul else corners[1:]):
         lines.append(f"G1 X{x:.3f} Y{y:.3f} F{s.feedrate:.0f} ; -> {name}")
-        if s.dwell_s > 0 and name != corners[-1][0]:
+        last = (i == len(corners) - 1) if not zero_at_ul else (name == corners[-1][0])
+        if s.dwell_s > 0 and not last:
             lines.append(f"G4 P{s.dwell_s:.1f} ; check needle is on the {name} corner")
+    if not zero_at_ul:
+        lines.append(f"G1 X0.000 Y0.000 F{s.feedrate:.0f} ; -> back to zero ({zero_name})")
 
     if s.z_lift > 0:
         lines.append(f"G1 Z0.000 F{min(s.feedrate, 200.0):.0f} ; lower back to set-zero point")
@@ -101,11 +112,12 @@ def generate_axis_test_gcode(settings: AxisTestSettings, view_name: str = "Top",
 # ==============================================================================
 # v02: Hole-center test — เดินไปจุดศูนย์กลางของทุกรู/ช่องที่เลือกไว้ตรวจ
 # ==============================================================================
-def hole_centers_from_view(holes, view_x, view_y) -> list:
+def hole_centers_from_view(holes, view_x, view_y, zero_offset=(0.0, 0.0)) -> list:
     """แปลงตำแหน่งรู (พิกัดจอ h.x/h.y) เป็นพิกัดเทียบ zero ที่มุมซ้ายบนของ
     ชิ้นงาน — view_x/view_y คือพิกัดจอของ vertex ทั้งชิ้นงาน (app.current_x/y)
     คืน list ของ (ชื่อ, X, Y) เฉพาะรูที่ selected_for_inspection และมีตำแหน่ง"""
     x0, y0 = float(min(view_x)), float(max(view_y))   # มุมซ้ายบนบนจอ
+    x0, y0 = x0 + zero_offset[0], y0 + zero_offset[1]   # เลื่อนไปจุด zero ที่เลือก (core/work_zero.py)
     out = []
     for h in holes:
         if not getattr(h, 'selected_for_inspection', False) or h.x is None or h.y is None:
@@ -128,7 +140,8 @@ def order_from_zero(points: list) -> list:
 
 
 def generate_hole_center_test_gcode(settings: AxisTestSettings, centers: list,
-                                    view_name: str = "Top", source_name: str = None) -> str:
+                                    view_name: str = "Top", source_name: str = None,
+                                    zero_name: str = "UPPER-LEFT corner") -> str:
     """G-code เดินไปจุดศูนย์กลางรูทีละรู (ยก Z ไว้ตลอด) หยุดค้างให้ดูว่าเข็ม
     ชี้ตรงกลางรูจริงหรือไม่ แล้วกลับ zero — centers จาก hole_centers_from_view()"""
     err = settings.validate()
@@ -144,7 +157,7 @@ def generate_hole_center_test_gcode(settings: AxisTestSettings, centers: list,
         "; 3D ProbeCode - HOLE CENTER TEST",
         f"; Object: {source_name or '(no file)'}  View: {view_name}",
         f"; Size: X {s.width_x:.3f} mm  x  Y {s.length_y:.3f} mm   Holes: {len(ordered)}",
-        "; BEFORE RUNNING: put the needle at the UPPER-LEFT corner of the",
+        f"; BEFORE RUNNING: put the needle at the {zero_name} of the",
         ";   object (as seen on screen) and Set Zero X/Y/Z there.",
         "; Visits the center of every hole selected for inspection, then",
         ";   returns to the zero point. Needle stays lifted the whole time.",
@@ -161,7 +174,7 @@ def generate_hole_center_test_gcode(settings: AxisTestSettings, centers: list,
         lines.append(f"G1 X{x:.3f} Y{y:.3f} F{s.feedrate:.0f} ; -> {i}/{len(ordered)} {name} center")
         if s.dwell_s > 0:
             lines.append(f"G4 P{s.dwell_s:.1f} ; check needle is over the center of {name}")
-    lines.append(f"G1 X0.000 Y0.000 F{s.feedrate:.0f} ; -> upper-left (zero)")
+    lines.append(f"G1 X0.000 Y0.000 F{s.feedrate:.0f} ; -> {zero_name.lower().replace(' corner', '')} (zero)")
     if s.z_lift > 0:
         lines.append(f"G1 Z0.000 F{min(s.feedrate, 200.0):.0f} ; lower back to set-zero point")
     lines.append("M30 ; program end")

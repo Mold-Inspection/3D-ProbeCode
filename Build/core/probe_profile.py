@@ -37,10 +37,14 @@ class ProbeProfile:
     stylus_holder_height: float = 20.0  # mm — ความสูงตัวจับก้านโพรบ ปรับได้ (v02)
     stylus_length: float = 50.0   # mm — ความยาวก้านโพรบ ปรับได้
     tip_diameter:  float = 2.0    # mm — เส้นผ่าศูนย์กลางหัวโพรบ ปรับได้
+    # ระยะว่างขั้นต่ำระหว่างหัวโพรบกับผนังรู (วัดจากจุดศูนย์กลาง layer) — หัวโพรบต้องมีที่
+    # ให้เคลื่อนที่ก่อนแตะผนัง รูที่แคบกว่านี้จะถูกเตือน/ข้ามตอน export — ปรับได้
+    wall_clearance: float = 0.5   # mm
  
     DEFAULT_HOLDER_HEIGHT: float = field(default=20.0, init=False, repr=False)  # v02
     DEFAULT_LENGTH: float = field(default=50.0, init=False, repr=False)
     DEFAULT_TIP_D:  float = field(default=2.0,  init=False, repr=False)
+    DEFAULT_CLEARANCE: float = field(default=0.5, init=False, repr=False)
  
     # ------------------------------------------------------------------
     @property
@@ -53,8 +57,9 @@ class ProbeProfile:
         return self.stylus_length >= hole_depth
  
     def can_fit_in_hole(self, hole_radius: float) -> bool:
-        """True ถ้าหัวโพรบเล็กพอที่จะเข้ารูรัศมี hole_radius ได้"""
-        return self.tip_radius <= hole_radius
+        """True ถ้าหัวโพรบเข้ารูรัศมี hole_radius ได้ โดยเหลือระยะว่างถึงผนัง
+        อย่างน้อย wall_clearance (เดิมยอมให้หัวโพรบใหญ่เท่ารูพอดี = ไม่มีที่ขยับเลย)"""
+        return self.tip_radius + self.wall_clearance <= hole_radius
  
     def check_hole(self, hole_depth: float, hole_radius: float) -> dict:
         """ตรวจสอบทั้งความลึกและขนาดหัวโพรบสำหรับรูหนึ่งรู คืนค่า dict:
@@ -67,7 +72,8 @@ class ProbeProfile:
             if not depth_ok else ""
         )
         fit_warn = (
-            f"⚠ Tip too large! Tip ⌀{self.tip_diameter:.2f} mm > Hole ⌀{hole_radius*2:.2f} mm"
+            f"⚠ Tip too large! Tip ⌀{self.tip_diameter:.2f} mm + {self.wall_clearance:.2f} mm "
+            f"clearance per side > Hole ⌀{hole_radius*2:.2f} mm"
             if not fit_ok else ""
         )
  

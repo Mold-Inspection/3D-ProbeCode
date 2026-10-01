@@ -159,7 +159,7 @@ class ToolBar:
         self.mode_switch = ctk.CTkSegmentedButton(
             self.frame, values=["Light", "Dark"], height=26,
             font=ctk.CTkFont(size=12), command=app.set_appearance)
-        self.mode_switch.set(theme.DEFAULT_MODE)
+        self.mode_switch.set(getattr(app, 'appearance_mode', theme.DEFAULT_MODE))
         self.mode_switch.pack(side="right", padx=8)
 
     # ------------------------------------------------------------------
