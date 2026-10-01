@@ -50,6 +50,8 @@ import customtkinter as ctk
 from ui.settings_dialog_base import SettingsDialogBase
 from ui import theme
 from core.machine_profile import MachineProfile
+from core import user_settings
+from core.work_zero import WORK_ZERO_CHOICES, label_of, mode_of_label, zero_hint_text
 
 
 class HardwareSettingDialog:
@@ -58,10 +60,12 @@ class HardwareSettingDialog:
         self.dialog = SettingsDialogBase(app.root, title="Hardware Setting")
         self.dialog.add_category("probe",   "Probe Stylus",         self._build_probe_fields)
         self.dialog.add_category("machine", "Machine Working Area", self._build_machine_fields)
+        self.dialog.add_category("work_zero", "Work Zero",            self._build_work_zero_fields)
 
         self._probe_holder_entry = None   # v02 — Stylus Holder Height
         self._probe_length_entry = None
         self._probe_tip_entry    = None
+        self._probe_clear_entry  = None   # ระยะว่างหัวโพรบ-ผนังขั้นต่ำ
         self._lbl_probe_summary  = None
 
         self._machine_x_entry     = None
@@ -73,6 +77,39 @@ class HardwareSettingDialog:
     # ------------------------------------------------------------------
     def show(self):
         self.dialog.show()
+
+    # ==================================================================
+    # Work Zero category — จุด X0 Y0 Z0 ของ G-code (core/work_zero.py)
+    # มีผลทันทีที่เลือก (ไม่มีปุ่ม Apply) + จำข้ามการเปิดโปรแกรม
+    # ==================================================================
+    def _build_work_zero_fields(self, parent):
+        ctk.CTkLabel(parent, text="Work zero (X0 Y0 Z0):", font=ctk.CTkFont(size=13),
+                     text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+        menu = ctk.CTkOptionMenu(
+            parent, values=[text for _key, text in WORK_ZERO_CHOICES], width=230, height=30,
+            font=ctk.CTkFont(size=13), command=self._on_work_zero_change)
+        menu.set(label_of(getattr(self.app, 'work_zero', None)))
+        menu.pack(anchor="w", pady=(4, 6))
+        self._lbl_zero_hint = ctk.CTkLabel(
+            parent, text=zero_hint_text(self.app), anchor="w", justify="left", wraplength=360,
+            font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED)
+        self._lbl_zero_hint.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360, font=ctk.CTkFont(size=10),
+            text_color=theme.TEXT_MUTED,
+            text=("Left / right / upper / lower are as seen on screen in the current view "
+                  "and rotation. Z0 is the top surface for every choice except the centroid. "
+                  "After changing it, press \u21bb Suggest for Safe Z in G-code Export.")
+        ).pack(fill="x", pady=(8, 0))
+
+    def _on_work_zero_change(self, label: str):
+        self.app.work_zero = mode_of_label(label)
+        user_settings.save_section("work_zero", self.app.work_zero)
+        self.app.refresh_work_zero_marker()
+        try:
+            self._lbl_zero_hint.configure(text=zero_hint_text(self.app))
+        except Exception:
+            pass
 
     # ==================================================================
     # Probe Stylus category (moved from ui/main_window.py::
@@ -122,6 +159,19 @@ class HardwareSettingDialog:
         ctk.CTkLabel(tip_entry_row, text="mm", font=ctk.CTkFont(size=11),
                     text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
+        clear_row = ctk.CTkFrame(parent, fg_color="transparent")
+        clear_row.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(clear_row, text="Min. Wall Clearance (mm):", font=ctk.CTkFont(size=13),
+                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+        clear_entry_row = ctk.CTkFrame(clear_row, fg_color="transparent")
+        clear_entry_row.pack(fill="x", pady=(4, 0))
+        self._probe_clear_entry = ctk.CTkEntry(clear_entry_row, width=110, height=30,
+                                               placeholder_text="0.5", font=ctk.CTkFont(size=13))
+        self._probe_clear_entry.insert(0, str(app.probe_profile.wall_clearance))
+        self._probe_clear_entry.pack(side="left")
+        ctk.CTkLabel(clear_entry_row, text="mm  free space between tip and wall",
+                     font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
+
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -142,7 +192,8 @@ class HardwareSettingDialog:
         p = self.app.probe_profile
         return (f"Holder : {p.stylus_holder_height:.1f} mm\n"   # v02
                 f"Length : {p.stylus_length:.1f} mm\n"
-                f"Tip ⌀  : {p.tip_diameter:.1f} mm  (r = {p.tip_radius:.2f} mm)")
+                f"Tip ⌀  : {p.tip_diameter:.1f} mm  (r = {p.tip_radius:.2f} mm)\n"
+                f"Clearance : {p.wall_clearance:.2f} mm")
 
     def _apply_probe_profile(self):
         app = self.app
@@ -153,6 +204,8 @@ class HardwareSettingDialog:
             if new_length <= 0: raise ValueError("ความยาวต้องมากกว่า 0")
             new_tip_d = float(self._probe_tip_entry.get().strip())
             if new_tip_d <= 0: raise ValueError("เส้นผ่าศูนย์กลางต้องมากกว่า 0")
+            new_clear = float(self._probe_clear_entry.get().strip())
+            if new_clear < 0: raise ValueError("ระยะว่างต้องไม่ติดลบ")
         except ValueError as e:
             self.dialog.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
             return
@@ -160,16 +213,35 @@ class HardwareSettingDialog:
         app.probe_profile.stylus_holder_height = new_holder   # v02
         app.probe_profile.stylus_length = new_length
         app.probe_profile.tip_diameter  = new_tip_d
+        app.probe_profile.wall_clearance = new_clear
         if self._lbl_probe_summary is not None:
             self._lbl_probe_summary.configure(text=self._probe_summary_text())
         if app.holes_detected and app.current_holes:
             app.update_treeview(app.current_holes)
+        self._save_probe()
+
+    def _save_probe(self):
+        p = self.app.probe_profile
+        user_settings.save_section("probe", {
+            "stylus_holder_height": p.stylus_holder_height,
+            "stylus_length": p.stylus_length, "tip_diameter": p.tip_diameter,
+            "wall_clearance": p.wall_clearance})
+
+    def _save_machine(self):
+        m = self.app.machine_profile
+        user_settings.save_section("machine", {
+            "x_travel": m.x_travel, "y_travel": m.y_travel,
+            "z_travel": m.z_travel, "z_height": m.z_height})
 
     def _reset_probe_profile(self):
         app = self.app
         app.probe_profile.stylus_holder_height = app.probe_profile.DEFAULT_HOLDER_HEIGHT   # v02
         app.probe_profile.stylus_length = app.probe_profile.DEFAULT_LENGTH
         app.probe_profile.tip_diameter  = app.probe_profile.DEFAULT_TIP_D
+        app.probe_profile.wall_clearance = app.probe_profile.DEFAULT_CLEARANCE
+        if self._probe_clear_entry is not None:
+            self._probe_clear_entry.delete(0, "end")
+            self._probe_clear_entry.insert(0, str(app.probe_profile.wall_clearance))
         if self._probe_holder_entry is not None:   # v02
             self._probe_holder_entry.delete(0, "end")
             self._probe_holder_entry.insert(0, str(app.probe_profile.stylus_holder_height))
@@ -183,6 +255,7 @@ class HardwareSettingDialog:
             self._lbl_probe_summary.configure(text=self._probe_summary_text())
         if app.holes_detected and app.current_holes:
             app.update_treeview(app.current_holes)
+        self._save_probe()
 
     # ==================================================================
     # Machine Working Area category (wires up core/machine_profile.py)
@@ -241,10 +314,10 @@ class HardwareSettingDialog:
         # core/gcode_generator.py::suggest_padding_height(), so it is no
         # longer accurate to call the whole category "reference only".
         ctk.CTkLabel(
-            parent, text="X/Y/Z Travel are reference only for now — not yet\n"
-                         "used to block or warn about out-of-range probe moves.\n"
-                         "Machine Z Height IS used — see G-code Export's\n"
-                         "Padding Height suggestion.",
+            parent, text="X/Y/Z Travel are checked when you export G-code:\n"
+                         "you are warned if the program moves farther than the\n"
+                         "machine can travel. Machine Z Height and Z Travel also\n"
+                         "drive G-code Export's Padding Height suggestion.",
             font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED, justify="left"
         ).pack(anchor="w", pady=(10, 0))
 
@@ -274,6 +347,7 @@ class HardwareSettingDialog:
         app.machine_profile.z_height = new_zh   # v02
         if self._lbl_machine_summary is not None:
             self._lbl_machine_summary.configure(text=self._machine_summary_text())
+        self._save_machine()
 
     def _reset_machine_profile(self):
         app = self.app
@@ -291,3 +365,4 @@ class HardwareSettingDialog:
             self._machine_zh_entry.delete(0, "end"); self._machine_zh_entry.insert(0, str(app.machine_profile.z_height))
         if self._lbl_machine_summary is not None:
             self._lbl_machine_summary.configure(text=self._machine_summary_text())
+        self._save_machine()

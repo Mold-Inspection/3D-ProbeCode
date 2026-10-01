@@ -1,5 +1,11 @@
 # core/gcode_generator.py
-# VERSION: 08
+# VERSION: 09
+# CHANGE LOG (v08 -> v09):
+#   FEATURE: Work zero ที่เลือกได้ (core/work_zero.py) — generate_gcode() /
+#   build_point_map() / transform_hole_feature_for_machining() รับ `origin`
+#   (ตำแหน่งจุด zero ในพิกัดเครื่อง) แล้วลบออกจากทุก "ตำแหน่ง" (ไม่ใช่ทิศทาง)
+#   suggest_safe_z() รับ zero_z; generate_gcode() รับ zero_note สำหรับหัวไฟล์
+#   ค่าเริ่มต้น origin=None / zero_note=None = ผลลัพธ์เหมือน v08 ทุกตัวอักษร
 # CHANGE LOG (v07 -> v08):
 #   FIX: พิกัด X/Y ของ G-code และ expected points (Evaluation) ไม่ตามปุ่ม
 #   Rotate บนจอ และมุมมอง Left/Right หมุนต่างจากจอ 90° — apply_view_transform()
@@ -45,6 +51,7 @@
 #     "; NOTE: assumes workpiece is raised by 12.50 mm padding (riser plate)"
 #   This is comment-only — no change to any coordinate math, G38.2
 #   targets, or point_map output. build_point_map() is untouched.
+import re
 import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
 
@@ -63,7 +70,8 @@ class GCodeSettings:
         self.backoff         = float(backoff)
         self.padding_height  = float(padding_height)   # v06 — riser height assumed under the workpiece (mm), informational only
 
-def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top") -> float:
+def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top",
+                   zero_z: float = 0.0) -> float:
     """
     เสนอค่า Safe Z โดยคำนวณจากจุดที่สูงที่สุดของ Bounding Box 
     หลังจากจำลองการพลิกชิ้นงาน (Transform) ตามมุมมองปัจจุบันแล้ว
@@ -84,7 +92,8 @@ def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top") -> float:
     # หาค่า Z ที่สูงที่สุดจากด้านที่ถูกหงายขึ้นมา
     max_z = max(c[2] for c in transformed_corners)
     
-    return float(max_z) + margin
+    # v09: zero_z = ความสูงของจุด Work zero ในพิกัดเครื่อง (0 = mesh centroid เดิม)
+    return float(max_z) - float(zero_z) + margin
 
 # ---------------------------------------------------------------------
 # v06: เสนอค่า Padding Height ใต้ชิ้นงาน จากข้อมูล machine/probe profile
@@ -128,20 +137,24 @@ def apply_view_transform(pt, view_name, screen_rot: int = 0):
     from core.projector import view_rotation_matrix
     return view_rotation_matrix(view_name, screen_rot) @ np.asarray(pt, dtype=float)
 
-def transform_hole_feature_for_machining(hf_orig, view_name, screen_rot: int = 0):
-    """Deep copy รูและแปลงพิกัดทั้งหมดตามมุมมอง (+ การหมุนจอ) ก่อนส่งไปเขียน G-code"""
+def transform_hole_feature_for_machining(hf_orig, view_name, screen_rot: int = 0, origin=None):
+    """Deep copy รูและแปลงพิกัดทั้งหมดตามมุมมอง (+ การหมุนจอ) ก่อนส่งไปเขียน G-code
+    v09: origin = ตำแหน่งจุด Work zero ในพิกัดเครื่อง (core/work_zero.py) — ลบออก
+    จาก "ตำแหน่ง" ทุกจุด (open/deep) แต่ไม่ลบจาก "ทิศทาง" (axis, u_dir)"""
     hf = copy.deepcopy(hf_orig)
     if hf._step_hole:
         sh = hf._step_hole
-        tf = lambda p: apply_view_transform(p, view_name, screen_rot)
-        sh.open_3d = tf(sh.open_3d)
-        sh.deep_3d = tf(sh.deep_3d)
+        org = np.zeros(3) if origin is None else np.asarray(origin, dtype=float)
+        tf  = lambda p: apply_view_transform(p, view_name, screen_rot)   # ทิศทาง: หมุนอย่างเดียว
+        pos = lambda p: tf(p) - org                                       # ตำแหน่ง: หมุนแล้วเลื่อนตาม zero
+        sh.open_3d = pos(sh.open_3d)
+        sh.deep_3d = pos(sh.deep_3d)
         sh.axis    = tf(sh.axis)
         if getattr(sh, 'shape', 'circle') == 'rect':   # v07: ทิศด้านยาวของช่องสี่เหลี่ยม
             sh.u_dir = tf(sh.u_dir)
         for seg in getattr(sh, 'segments', []):
-            seg.open_3d = tf(seg.open_3d)
-            seg.deep_3d = tf(seg.deep_3d)
+            seg.open_3d = pos(seg.open_3d)
+            seg.deep_3d = pos(seg.deep_3d)
 
     return hf
 
@@ -239,7 +252,75 @@ def _layer_contacts(lyr) -> list:
 
 
 # ---------------------------------------------------------------------
-def build_point_map(holes, view_name: str, screen_rot: int = 0) -> list:
+# v10: ตรวจความปลอดภัยก่อน export (ใช้ค่าจาก Hardware Setting จริง)
+# ---------------------------------------------------------------------
+def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
+    """รูที่โปรแกรมนี้จะโพรบได้ไม่ปลอดภัยด้วยหัวโพรบปัจจุบัน — [(hole, [เหตุผล...]), ...]
+
+    คิดจาก layer ที่จะถูกโพรบจริง (_raw_layers_for_hole — segment ที่ไม่ได้เลือกไม่นับ):
+      - ก้านสั้นไป    : layer ที่ลึกที่สุดอยู่ลึกกว่า stylus_length จากปากรู
+      - หัวโพรบใหญ่ไป : ระยะจากจุดศูนย์กลาง layer ถึงผนัง (รัศมี หรือครึ่งด้านแคบของ
+                        ช่องสี่เหลี่ยม) ลบรัศมีหัวโพรบ น้อยกว่า wall_clearance
+      - Back-off ยาวไป : ถอยหลังหลังแตะผนัง (backoff) ไกลกว่าระยะที่หัวโพรบขยับได้
+                        ข้ามรู (2 x ระยะว่าง) → ชนผนังฝั่งตรงข้าม"""
+    report = []
+    tip_r     = float(probe_profile.tip_radius)
+    clearance = float(getattr(probe_profile, 'wall_clearance', 0.0))
+    stylus    = float(probe_profile.stylus_length)
+    for h in holes:
+        sh = getattr(h, '_step_hole', None)
+        if sh is None:
+            continue   # ไม่มีข้อมูล STEP — generate_gcode() ข้ามและรายงานแยกอยู่แล้ว
+        layers = _raw_layers_for_hole(h)
+        if not layers:
+            continue
+        mouth = np.array(sh.open_3d, dtype=float)
+        depth = max(float(np.linalg.norm(np.asarray(l['center']) - mouth)) for l in layers)
+        narrow = min((min(l['half_u'], l['half_v']) if l.get('shape') == 'rect' else float(l['radius']))
+                     for l in layers)
+        room = narrow - tip_r   # ระยะที่จุดศูนย์กลางหัวโพรบเดินได้จากกลาง layer ถึงจุดแตะผนัง
+        reasons = []
+        if depth > stylus:
+            reasons.append(f"deepest probe point is {depth:.1f} mm deep, stylus is only {stylus:.1f} mm")
+        if room < clearance:
+            reasons.append(f"tip \u2300{probe_profile.tip_diameter:.2f} mm leaves {max(room, 0.0):.2f} mm "
+                           f"to the wall (needs {clearance:.2f} mm)")
+        elif backoff > 2.0 * room:
+            reasons.append(f"back-off {backoff:.2f} mm is longer than the {2.0 * room:.2f} mm the tip can "
+                           f"move across the hole \u2014 it would hit the opposite wall")
+        if reasons:
+            report.append((h, reasons))
+    return report
+
+
+def gcode_extents(gcode_text: str) -> dict:
+    """ช่วงพิกัดที่โปรแกรมสั่งเดินจริงในแต่ละแกน {'X': (min, max), ...} — นับทุกคำสั่ง
+    เคลื่อนที่ (G0/G1/G38.2) ทั้งโหมด G90 และ G91 (ไล่ตำแหน่งต่อจากคำสั่งก่อนหน้า)
+    G38.2 นับถึงปลายทางที่สั่ง (รวม overtravel) จึงเผื่อมากกว่าการเดินจริงเล็กน้อย"""
+    pos, lo, hi = {}, {}, {}
+    absolute = True
+    for raw in gcode_text.splitlines():
+        line = raw.split(';', 1)[0].strip().upper()
+        if not line:
+            continue
+        if line.startswith('G90'):
+            absolute = True
+            continue
+        if line.startswith('G91'):
+            absolute = False
+            continue
+        if not re.match(r'^G(0|1|38\.2)(\s|$)', line):
+            continue
+        for ax, val in re.findall(r'([XYZ])\s*(-?\d+(?:\.\d+)?)', line):
+            v = float(val)
+            pos[ax] = v if (absolute or ax not in pos) else pos[ax] + v
+            lo[ax] = min(lo.get(ax, pos[ax]), pos[ax])
+            hi[ax] = max(hi.get(ax, pos[ax]), pos[ax])
+    return {ax: (lo[ax], hi[ax]) for ax in lo}
+
+
+# ---------------------------------------------------------------------
+def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None) -> list:
     """คำนวณรายการจุดที่ "คาดหวังว่าจะถูกโพรบสัมผัส" (expected probe touch
     points) แบบเรียงลำดับเดียวกับที่ generate_gcode() จะยิงคำสั่ง G38.2
     ออกมาเป๊ะ ๆ (รู nearest-neighbor -> segment -> layer -> มุมจุดในชั้น)
@@ -272,7 +353,7 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0) -> list:
       point_idx : ลำดับจุดภายใน layer (0-based)
       x, y, z   : พิกัดจุดสัมผัสผนังรูที่คาดหวัง (mm)
     """
-    transformed_holes = [transform_hole_feature_for_machining(h, view_name, screen_rot) for h in holes]
+    transformed_holes = [transform_hole_feature_for_machining(h, view_name, screen_rot, origin) for h in holes]
     valid, _skipped = split_step_ready(transformed_holes)
     ordered = order_holes_nearest_neighbor(valid)
 
@@ -296,12 +377,12 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0) -> list:
 # ---------------------------------------------------------------------
 # เพิ่มอาร์กิวเมนต์ view_name เข้ามาในฟังก์ชันหลัก
 def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str = "Top",
-                   screen_rot: int = 0):
+                   screen_rot: int = 0, origin=None, zero_note: str = None):
     """
     Build a GRBL probe program from `holes`.
     """
     # 1. จำลองการพลิกชิ้นงานก่อนทำงานเสมอ
-    transformed_holes = [transform_hole_feature_for_machining(h, view_name, screen_rot) for h in holes]
+    transformed_holes = [transform_hole_feature_for_machining(h, view_name, screen_rot, origin) for h in holes]
     
     valid, skipped = split_step_ready(transformed_holes)
     ordered = order_holes_nearest_neighbor(valid)
@@ -312,7 +393,7 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     # order as the G-code emission loop below (see build_point_map()'s
     # docstring for why that's safe). The .gcode TEXT emitted below is
     # completely unchanged from v04.
-    point_map = build_point_map(holes, view_name, screen_rot)
+    point_map = build_point_map(holes, view_name, screen_rot, origin)
 
     lines = []
 
@@ -320,7 +401,11 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     lines.append(f"; 3D ProbeCode - GRBL Probe Program (View: {view_name})")
     lines.append(f"; Holes: {len(ordered)}  Safe Z: {settings.safe_z:.2f} mm  "
                  f"Probe Feed: {settings.probe_feedrate:.0f} mm/min")
-    lines.append("; NOTE: work zero = mesh centroid (no G54 offset applied)")
+    if zero_note:   # v09: Work zero ที่ผู้ใช้เลือก (core/work_zero.py)
+        lines.append(f"; WORK ZERO: X0 Y0 Z0 = {zero_note}")
+        lines.append("; BEFORE RUNNING: touch off that point and Set Zero X/Y/Z there.")
+    else:
+        lines.append("; NOTE: work zero = mesh centroid (no G54 offset applied)")
     # v06: report the padding height assumed under the workpiece for this
     # export — comment-only, does not affect any coordinate below.
     lines.append(f"; NOTE: assumes workpiece is raised by {settings.padding_height:.2f} mm padding (riser plate)")

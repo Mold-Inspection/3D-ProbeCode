@@ -459,8 +459,11 @@ class EvaluationLeftPanel:
             expected_points = app.loaded_expected_points
         else:
             try:
-                expected_points = build_point_map(selected, view_name,
-                                                  getattr(app, 'screen_rotation', 0))
+                from core.work_zero import work_zero_origin
+                rot = getattr(app, 'screen_rotation', 0)
+                origin = work_zero_origin(app.geo.mesh, view_name, rot,
+                                          getattr(app, 'work_zero', 'centroid'))
+                expected_points = build_point_map(selected, view_name, rot, origin)
             except Exception as e:
                 _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
                 return False

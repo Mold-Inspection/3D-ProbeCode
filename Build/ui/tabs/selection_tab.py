@@ -19,6 +19,11 @@ import numpy as np
 
 from ui import theme
 
+# สีเครื่องหมาย Work zero — X แดง / Y เขียว / Z น้ำเงิน ตามธรรมเนียม CAD/CNC
+_ZERO_X_COLOR = '#e5484d'
+_ZERO_Y_COLOR = '#30a46c'
+_ZERO_Z_COLOR = '#3e8ef7'
+
 
 class SelectionTab:
     def __init__(self, app):
@@ -37,6 +42,7 @@ class SelectionTab:
         self._bg_stale   = True   # True = มี draw เต็มรออยู่ ห้าม blit ทับภาพเก่า
         self._tri_cache  = None   # ค่าคงที่ต่อสามเหลี่ยมสำหรับ _get_depth_surface()
         self._hole_proj_cache = None   # ตำแหน่งปากรูบนจอของ STEP holes ในมุมมองปัจจุบัน
+        self._zero_artists = []   # เครื่องหมาย Work zero (X0 Y0) + ลูกศรแกน
 
     def setup_events(self):
         # FIX: เดิม mpl_connect ซ้ำทุกครั้งที่กลับมาแท็บ Selection โดยไม่เคยถอดของเก่า
@@ -413,6 +419,57 @@ class SelectionTab:
         return holes
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Work zero marker
+    # ------------------------------------------------------------------
+    def _draw_zero_marker(self):
+        """เครื่องหมายจุด Work zero (X0 Y0) + ลูกศรทิศ X+ / Y+ ของ G-code — คิดตาม
+        มุมมองและการหมุนจอปัจจุบัน (core/work_zero.py::zero_in_view)"""
+        app = self.app
+        for artist in self._zero_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._zero_artists = []
+        if app.geo.mesh is None or getattr(app, 'current_x', None) is None:
+            return
+        from core.work_zero import zero_in_view
+        mode = getattr(app, 'work_zero', 'centroid')
+        zx, zy, _depth = zero_in_view(app.geo.mesh, app.current_view, app.screen_rotation, mode)
+        span = max(float(np.ptp(app.current_x)), float(np.ptp(app.current_y)), 1.0)
+        arrow = span * 0.06   # สั้นกว่าระยะขอบรอบชิ้นงาน (7.5%) — มุมที่ขอบจึงยังเห็นลูกศรครบ
+        ax = app.ax
+        arts = []
+        for (dx, dy), color, name in (((arrow, 0.0), _ZERO_X_COLOR, "X+"), ((0.0, arrow), _ZERO_Y_COLOR, "Y+")):
+            arts.append(ax.annotate("", xy=(zx + dx, zy + dy), xytext=(zx, zy), zorder=9,
+                                    annotation_clip=False,   # ยังวาดแม้ปลายลูกศรเลยกรอบตอนซูม
+                                    arrowprops=dict(arrowstyle="-|>", color=color, lw=2.2,
+                                                    shrinkA=0, shrinkB=0, mutation_scale=14)))
+            arts.append(ax.annotate(name, xy=(zx + dx, zy + dy), xytext=(4, 0) if dx else (0, 3),
+                                    textcoords="offset points", annotation_clip=False,
+                                    color=color, fontsize=9, fontweight='bold',
+                                    ha='left' if dx else 'center', va='center' if dx else 'bottom',
+                                    zorder=9))
+        arts += ax.plot(zx, zy, marker='o', markersize=10, markerfacecolor='white',
+                        markeredgecolor='#1c2630', markeredgewidth=2, zorder=10)
+        arts += ax.plot(zx, zy, marker='+', markersize=10, color='#1c2630',
+                        markeredgewidth=1.6, zorder=11)
+        label = "X0 Y0 Z0" if mode != 'centroid' else "X0 Y0 (centroid)"
+        arts.append(ax.annotate(label, xy=(zx, zy), xytext=(-8, -10), textcoords="offset points",
+                                ha='right', va='top', fontsize=8, fontweight='bold',
+                                color=theme.c(theme.TEXT), zorder=11,
+                                bbox=dict(boxstyle="round,pad=0.25", fc=theme.c(theme.BG_PANEL),
+                                          ec=theme.c(theme.BORDER_STRONG), alpha=0.9)))
+        self._zero_artists = arts
+
+    def refresh_zero_marker(self):
+        """จุด zero เปลี่ยน (G-code Export) — วาดเครื่องหมายใหม่แล้ว draw เต็ม"""
+        if self.app.current_tab != "Selection":
+            return
+        self._draw_zero_marker()
+        self.request_full_draw()
+
     def update_plot(self, x, y, z_vert, face_data, triangles, title, holes=None):
         app = self.app
         if app.current_tab != "Selection":
@@ -471,6 +528,9 @@ class SelectionTab:
         else:
             app.scatter_holes       = None
             app.current_holes_count = 0
+
+        self._zero_artists = []   # ax.clear() ลบของเก่าไปแล้ว
+        self._draw_zero_marker()
 
         lock_text = " [LOCKED]" if getattr(app, 'holes_detected', False) else ""
         rot_text  = f" (Rotated {app.screen_rotation}°)" if getattr(app, 'screen_rotation', 0) > 0 else ""
