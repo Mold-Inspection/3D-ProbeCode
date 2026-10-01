@@ -15,7 +15,14 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 17
+# VERSION: 19
+# CHANGE LOG (v18 -> v19):
+#   FIX: ขนาดชิ้นงาน (Width X / Length Y / Thickness Z) ตามการหมุนจอแล้ว —
+#   หมุน 90°/270° ค่ากว้าง/ยาวสลับกัน และบอกว่าตรงกับแกนไหนของโมเดล
+# CHANGE LOG (v17 -> v18):
+#   FEATURE: ช่องสี่เหลี่ยม (core/models.py::StepPocket) — Hole schedule
+#   คอลัมน์ "Dia" เปลี่ยนเป็น "Size" (รูกลม = เส้นผ่านศูนย์กลาง, ช่อง =
+#   ยาว×กว้าง) และการ์ด Properties แสดงชนิด/ขนาด/รัศมีมุมของช่อง
 # CHANGE LOG (v16 -> v17):
 #   FEATURE (user request — merge-into-one-click + rename to "Schema"):
 #   renamed the v16 state field to match ui/evaluation_left_panel.py v07 /
@@ -66,20 +73,27 @@ _RIGHT_WIDTH      = 330   # ความกว้างแผง Properties (ข
 _RIGHT_WIDTH_EVAL = 430   # ความกว้างแผงขวาตอนอยู่แท็บ Evaluation (ตารางจุดวัดกว้างกว่า)
 
 # คอลัมน์ของ Hole schedule — ใช้ฟอนต์ความกว้างคงที่ (theme.FONT_MONO) ให้ตรงแนวกัน
-_HOLE_COLS_HEADER = f"{'#':>3} {'Dia':>8} {'Depth':>8} {'X':>8} {'Y':>8}"
+_HOLE_COLS_HEADER = f"{'#':>3} {'Size':>11} {'Depth':>8} {'X':>8} {'Y':>8}"
 
 
 def _fmt_num(value) -> str:
     return f"{value:>8.2f}" if isinstance(value, (int, float)) else f"{'--':>8}"
 
 
+def _hole_size_cell(hole) -> str:
+    """คอลัมน์ Size (กว้าง 11): รูกลม = เส้นผ่านศูนย์กลาง, ช่องสี่เหลี่ยม = ยาว×กว้าง"""
+    sh = getattr(hole, '_step_hole', None)
+    if getattr(sh, 'shape', 'circle') == 'rect':
+        return f"{f'{sh.half_u * 2:.1f}x{sh.half_v * 2:.1f}':>11}"
+    radius = getattr(hole, 'radius', None)
+    return f"{'':>3}{_fmt_num(radius * 2 if isinstance(radius, (int, float)) else None)}"
+
+
 def _hole_row_text(hole) -> str:
     """ข้อความ 1 แถวของ Hole schedule (เรียงคอลัมน์ตาม _HOLE_COLS_HEADER)"""
     segs = getattr(hole, 'segments', None)
-    radius = getattr(hole, 'radius', None)
-    dia = radius * 2 if isinstance(radius, (int, float)) else None
     tail = f" x{len(segs)}" if segs else ""
-    return (f"{str(hole.display_id):>3} {_fmt_num(dia)} {_fmt_num(getattr(hole, 'depth', None))} "
+    return (f"{str(hole.display_id):>3} {_hole_size_cell(hole)} {_fmt_num(getattr(hole, 'depth', None))} "
             f"{_fmt_num(getattr(hole, 'x', None))} {_fmt_num(getattr(hole, 'y', None))}{tail}")
 
 
@@ -511,29 +525,20 @@ class UIManager:
         if self.geo.mesh is None:
             return
 
+        # v19: ขนาดตามแกนบนจอ/บนเครื่อง (X ขวา, Y ขึ้นบนจอ, Z หนา) รวมการหมุน
+        # จอด้วย — เดิมไม่สนใจปุ่ม Rotate ค่ากว้าง/ยาวจึงไม่สลับกันตอนหมุน 90°
+        # วงเล็บท้ายบอกว่าตรงกับแกนไหนของโมเดล
+        from core.projector import view_rotation_matrix
         extents = self.geo.get_physical_dimensions()
-        dx, dy, dz = extents[0], extents[1], extents[2]
-
-        if view_name in ['Top', 'Bottom']:
-            w_lbl, w_val = "X", dx
-            l_lbl, l_val = "Y", dy
-            t_lbl, t_val = "Z", dz
-        elif view_name in ['Front', 'Back']:
-            w_lbl, w_val = "X", dx
-            l_lbl, l_val = "Z", dz
-            t_lbl, t_val = "Y", dy
-        elif view_name in ['Left', 'Right']:
-            w_lbl, w_val = "Y", dy
-            l_lbl, l_val = "Z", dz
-            t_lbl, t_val = "X", dx
-        else:
-            w_lbl, w_val = "X", dx
-            l_lbl, l_val = "Y", dy
-            t_lbl, t_val = "Z", dz
-
-        self.lbl_width.configure(text=f"Width ({w_lbl}): {w_val:.2f} mm", text_color=theme.TEXT)
-        self.lbl_length.configure(text=f"Length ({l_lbl}): {l_val:.2f} mm", text_color=theme.TEXT)
-        self.lbl_thick.configure(text=f"Thickness ({t_lbl}): {t_val:.2f} mm", text_color=theme.TEXT)
+        m = view_rotation_matrix(view_name, self.screen_rotation)
+        model_axis = [int(np.argmax(np.abs(m[i]))) for i in range(3)]
+        names = "XYZ"
+        for lbl, title, i in ((self.lbl_width, "Width", 0), (self.lbl_length, "Length", 1),
+                              (self.lbl_thick, "Thickness", 2)):
+            src = model_axis[i]
+            tag = f"  (model {names[src]})" if src != i else ""
+            lbl.configure(text=f"{title} ({names[i]}): {extents[src]:.2f} mm{tag}",
+                          text_color=theme.TEXT)
 
     def show_view(self, view_name):
         if self.geo.mesh is None: return
@@ -878,7 +883,7 @@ class UIManager:
         ctk.CTkLabel(
             setting_frame, anchor="w", justify="left", text_color=theme.TEXT_MUTED,
             font=ctk.CTkFont(family=theme.FONT_MONO, size=12),
-            text=(f"Dia   {hole.radius * 2:.2f} mm\n"
+            text=(self._hole_size_lines(hole) +
                   f"Depth {hole.depth:.2f} mm\n"
                   f"X {hole.x:.2f}   Y {hole.y:.2f}")
         ).pack(fill="x", padx=10, pady=(2, 6))
@@ -941,6 +946,20 @@ class UIManager:
 
             if hole.zigzag_inspection:
                 df.pack(fill="x", padx=15, pady=(0, 8))
+
+    @staticmethod
+    def _hole_size_lines(hole) -> str:
+        """บรรทัดขนาดในการ์ด Properties (v18: แยกรูกลม / ช่องสี่เหลี่ยม)"""
+        sh = getattr(hole, '_step_hole', None)
+        if getattr(sh, 'shape', 'circle') != 'rect':
+            return f"Dia   {hole.radius * 2:.2f} mm\n"
+        if sh.is_slot:
+            return (f"Pocket {sh.kind_text}, R{sh.corner_radius:.2f} ends\n"
+                    f"Size  {sh.half_u * 2:.2f} x {sh.half_v * 2:.2f} mm\n")
+        corner = (f"R{sh.corner_radius:.2f} corners" if sh.corner_radius > 1e-6
+                  else "sharp corners")
+        return (f"Pocket {sh.kind_text}, {corner}\n"
+                f"Size  {sh.half_u * 2:.2f} x {sh.half_v * 2:.2f} mm\n")
 
     def _build_segment_block(self, parent, hole_idx, seg_idx, hole, cfg):
         block = ctk.CTkFrame(parent, fg_color=theme.BG_INPUT, corner_radius=6)

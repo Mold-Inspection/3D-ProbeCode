@@ -6,6 +6,9 @@
 #   - HoleSegmentSetting : ค่าตั้งค่าการตรวจสอบต่อ segment เดียว (รูหลายระดับเส้นผ่านศูนย์กลาง)
 #   - HoleFeature        : ข้อมูลรูที่ตรวจพบ ใช้แสดงผลฝั่ง UI
 #   - StepHole           : รูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
+#   - StepPocket         : ช่องสี่เหลี่ยม (จัตุรัส/ผืนผ้า มุมคมหรือมุมโค้ง) — v04
+#                          และช่องทรงแคปซูล/slot (corner_radius == half_v) — v05
+#   - rect_wall_contacts(): กระจายจุดสัมผัสผนังของช่องสี่เหลี่ยม — v04
 #   - validate_segment_reachability() : ตรวจสอบว่า segment ที่ลึกกว่าจะถูก
 #     probe เข้าไปถึงได้จริงหรือไม่ เทียบกับคอขวดของ segment ที่ตื้นกว่า
 #
@@ -23,8 +26,25 @@
 # index 0 = segment ที่ลึกที่สุด และ index สุดท้าย = segment ที่ตื้นที่สุด
 # (ปากรู) — validate_segment_reachability() ด้านล่างถูกปรับให้ตรงกับ
 # ลำดับนี้แล้ว
+#
+# NOTE (v04): เพิ่มรูปทรง "ช่องสี่เหลี่ยม" (StepPocket, shape == 'rect') ที่
+# ใช้ร่วมกับ pipeline เดิมทั้งหมด (view → path → G-code → evaluation) ได้
+# เพราะสืบทอดจาก StepHole — radius ของ pocket = ครึ่งหนึ่งของด้านแคบ (วงกลม
+# ที่ใหญ่ที่สุดที่ใส่ในช่องได้) จึงใช้กับการตรวจ probe fit เดิมได้ตรง ๆ
+#
+# NOTE (v05): ช่องทรงแคปซูล (slot) = StepPocket ที่ corner_radius == half_v
+# ผนังปลายทั้งสองด้านจึงไม่มีช่วงตรง — rect_wall_contacts() วางจุดของผนัง
+# ปลายบนส่วนโค้งครึ่งวงกลมแทน (กระจายตามมุม ±RECT_CONTACT_SPAN × 90°)
+#
+# ตัวแปรที่ปรับจูนได้ (v04):
+#   RECT_CONTACT_SPAN = สัดส่วนช่วงความยาวด้านตรงที่วางจุดสัมผัสได้ (0..1)
+#                       — กันหัวโพรบไม่ให้ไปโดนผนังข้างเคียงใกล้มุม
 # ==============================================================================
+import math
+
 import numpy as np
+
+RECT_CONTACT_SPAN = 0.7   # วางจุดภายใน ±70% ของครึ่งความยาวช่วงตรงของแต่ละด้าน — ปรับได้
 
 
 class HoleSegment:
@@ -138,6 +158,161 @@ class StepHole:
             HoleSegment(self.open_3d, self.deep_3d, self.radius_open, self.radius_deep)
         ]
 
+    shape = 'circle'
+
     def radius_at(self, t: float) -> float:
         """รัศมี ณ ตำแหน่งความลึก t สัดส่วนระหว่าง 0.0 (ปากรู) ถึง 1.0 (ก้นรู)"""
         return self.radius_open + t * (self.radius_deep - self.radius_open)
+
+    @property
+    def outer_radius(self) -> float:
+        """รัศมีของวงกลมที่ครอบรูทั้งรู (ใช้กำหนดขอบเขตแสดงผล/hit-test)"""
+        radii = [self.radius_open, self.radius_deep]
+        for seg in self.segments:
+            radii += [seg.radius_open, seg.radius_deep]
+        return max(radii)
+
+    def size_text(self) -> str:
+        return f"⌀{self.radius_open * 2:.2f}"
+
+    def outlines_3d(self, steps: int = 48) -> list:
+        """เส้นขอบสำหรับวาดบนมุมมอง 2D: วงกลม 1 วงต่อ 1 ขนาดเส้นผ่านศูนย์กลาง
+        (รู counterbore/เรียว จึงเห็นหลายวงซ้อนกัน) วาดที่ระนาบปากรู"""
+        o = np.array(self.open_3d, dtype=float)
+        axis = np.array(self.deep_3d, dtype=float) - o
+        axis /= max(np.linalg.norm(axis), 1e-12)
+        ref = np.array([0.0, 0.0, 1.0]) if abs(axis[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        u = np.cross(axis, ref); u /= np.linalg.norm(u)
+        v = np.cross(axis, u)
+
+        radii = {round(r, 3) for seg in self.segments
+                 for r in (seg.radius_open, seg.radius_deep) if r > 1e-3}
+        ang = np.linspace(0.0, 2 * np.pi, steps + 1)
+        return [o + r * (np.outer(np.cos(ang), u) + np.outer(np.sin(ang), v))
+                for r in sorted(radii, reverse=True)]
+
+
+class StepPocket(StepHole):
+    """ช่องสี่เหลี่ยม (pocket) ที่สกัดจาก B-Rep — จัตุรัสหรือผืนผ้า มุมคม
+    (corner_radius == 0) หรือมุมโค้ง ผนังตั้งฉากกับระนาบปากช่อง (prismatic)
+
+    half_u / half_v : ครึ่งความยาวด้านตามแกน u_dir / v (half_u >= half_v เสมอ)
+    u_dir           : เวกเตอร์หน่วยตามด้านยาว ตั้งฉากกับ axis
+    radius          : = half_v (ครึ่งด้านแคบ) ให้ระบบเดิม (probe fit, hole list)
+                      ใช้ได้ตรง ๆ"""
+    shape = 'rect'
+
+    def __init__(self, open_3d, deep_3d, axis_vec, u_dir, half_u, half_v, corner_radius):
+        r_in = min(half_u, half_v)
+        super().__init__(open_3d, deep_3d, r_in, r_in, axis_vec)
+        self.u_dir         = tuple(float(c) for c in u_dir)
+        self.half_u        = float(half_u)
+        self.half_v        = float(half_v)
+        self.corner_radius = float(corner_radius)
+
+    @property
+    def outer_radius(self) -> float:
+        if self.is_slot:
+            return self.half_u
+        return math.hypot(self.half_u, self.half_v)
+
+    @property
+    def is_slot(self) -> bool:
+        """ช่องทรงแคปซูล: รัศมีมุมเท่าครึ่งความกว้าง (ปลายเป็นครึ่งวงกลม)"""
+        return self.corner_radius >= self.half_v - 1e-3
+
+    @property
+    def kind_text(self) -> str:
+        if self.is_slot:
+            return "Slot (capsule)"
+        return "Square" if abs(self.half_u - self.half_v) < 1e-3 else "Rectangle"
+
+    def outline_3d(self, arc_steps: int = 6) -> np.ndarray:
+        """จุดขอบปากช่อง (3D, วนปิด) สำหรับวาดเส้นขอบ — มุมโค้งแบ่ง arc_steps ช่วง"""
+        o = np.array(self.open_3d, dtype=float)
+        axis = np.array(self.deep_3d, dtype=float) - o
+        axis /= max(np.linalg.norm(axis), 1e-12)
+        u = np.array(self.u_dir, dtype=float)
+        u = u - float(np.dot(u, axis)) * axis
+        u /= np.linalg.norm(u)
+        v = np.cross(axis, u)
+
+        r = self.corner_radius
+        cu, cv = self.half_u - r, self.half_v - r
+        steps = arc_steps if r > 1e-6 else 0
+        pts = []
+        for k, (su, sv) in enumerate(((1, 1), (-1, 1), (-1, -1), (1, -1))):
+            a0 = k * np.pi / 2
+            for a in np.linspace(a0, a0 + np.pi / 2, steps + 1):
+                pts.append(o + (su * cu + r * np.cos(a)) * u + (sv * cv + r * np.sin(a)) * v)
+        pts.append(pts[0])
+        return np.array(pts)
+
+    def outlines_3d(self, steps: int = 48) -> list:
+        return [self.outline_3d()]
+
+    def size_text(self) -> str:
+        txt = f"{self.half_u * 2:.2f}×{self.half_v * 2:.2f}"
+        if self.is_slot:
+            return "slot " + txt
+        return txt + (f" R{self.corner_radius:.1f}" if self.corner_radius > 1e-6 else "")
+
+
+def rect_wall_contacts(half_u: float, half_v: float, corner_radius: float,
+                       n_points: int, phase: float = 0.0) -> list:
+    """กระจายจุดสัมผัสผนัง n_points จุดรอบช่องสี่เหลี่ยม (พิกัดในระนาบ u/v
+    เทียบกับจุดศูนย์กลางช่อง)
+
+    ทุกด้านได้อย่างน้อย 1 จุด จุดที่เหลือแจกเป็นคู่ (ด้านตรงข้ามกันได้เท่ากัน)
+    ตามสัดส่วนความยาวด้าน วางจุดเฉพาะบน "ช่วงตรง" ของด้าน (ไม่ลงบนมุมโค้ง)
+    และอยู่ภายใน ±RECT_CONTACT_SPAN ของช่วงนั้น เพื่อไม่ให้หัวโพรบไปโดนผนัง
+    ข้างเคียงใกล้มุม
+
+    phase (0..1) : เลื่อนตำแหน่งจุดตามแนวด้าน = สัดส่วนของระยะห่างระหว่างจุด
+                   (ใช้แทน "การหมุนมุม" ของโหมด zigzag ในรูกลม)
+
+    Returns list ของ (start_u, start_v, normal_u, normal_v, wall_dist):
+      start  = จุดเริ่มเดิน probe (อยู่บนเส้นกึ่งกลางช่อง จึงอยู่ในช่องเสมอ)
+      normal = ทิศพุ่งเข้าหาผนัง, wall_dist = ระยะจาก start ถึงผนัง
+    เรียงทวนเข็มนาฬิกาเริ่มที่ผนัง +u (เหมือนมุม 0° ของรูกลม)"""
+    n_points = max(4, int(n_points))
+    extra_pairs, odd = divmod(n_points - 4, 2)
+
+    # ด้านขนาน v (ผนัง ±u) ยาว 2*half_v ; ด้านขนาน u (ผนัง ±v) ยาว 2*half_u
+    len_u_walls, len_v_walls = 2.0 * half_v, 2.0 * half_u
+    share = extra_pairs * len_u_walls / (len_u_walls + len_v_walls)
+    pairs_u = int(math.floor(share + 0.5 - 1e-9))   # ปัดครึ่งลง: เสมอกันให้ด้านยาว (ผนัง ±v)
+    pairs_v = extra_pairs - pairs_u
+    k_u = 1 + pairs_u   # จุดต่อผนัง +u / -u
+    k_v = 1 + pairs_v   # จุดต่อผนัง +v / -v
+
+    straight_u = max(0.0, half_u - corner_radius)   # ครึ่งช่วงตรงของผนัง ±v
+    straight_v = max(0.0, half_v - corner_radius)   # ครึ่งช่วงตรงของผนัง ±u
+
+    def offsets(k, straight_half):
+        span = straight_half * RECT_CONTACT_SPAN
+        return [-span + 2.0 * span * (((i + 0.5 + phase) % k) / k) for i in range(k)]
+
+    # (normal_u, normal_v, จำนวนจุด, ครึ่งช่วงตรง, ระยะถึงผนัง)
+    walls = [(1.0, 0.0, k_u, straight_v, half_u),
+             (0.0, 1.0, k_v + odd, straight_u, half_v),   # จุดคี่ (ถ้ามี) ไปที่ผนังยาว
+             (-1.0, 0.0, k_u, straight_v, half_u),
+             (0.0, -1.0, k_v, straight_u, half_v)]
+
+    contacts = []
+    for nu, nv, k, straight_half, dist in walls:
+        if straight_half < 1e-6 and corner_radius > 1e-6:
+            # v05: ผนังนี้ไม่มีช่วงตรง (ปลายครึ่งวงกลมของ slot) — กระจายจุดบน
+            # ส่วนโค้งตามมุมแทน โพรบเริ่มที่จุดศูนย์กลางส่วนโค้ง เดินออกตามรัศมี
+            off = dist - corner_radius
+            for f in offsets(k, 1.0):
+                phi = f * math.pi / 2
+                c, s_ = math.cos(phi), math.sin(phi)
+                contacts.append((nu * off, nv * off,
+                                 c * nu - s_ * nv, c * nv + s_ * nu, corner_radius))
+            continue
+        for s in offsets(k, straight_half):
+            # จุดเริ่มเลื่อนตามแนวผนัง (ตั้งฉากกับ normal) — ทิศทวนเข็มฯ
+            su, sv = -nv * s, nu * s
+            contacts.append((su, sv, nu, nv, dist))
+    return contacts

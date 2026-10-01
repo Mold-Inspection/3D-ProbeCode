@@ -1,5 +1,9 @@
 # core/expected_points_io.py
-# VERSION: 04
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   export_schema_json() รับ screen_rot (การหมุนจอ) ส่งต่อให้ build_point_map()
+#   และบันทึก "screen_rotation" ลงไฟล์ — ไม่เปลี่ยน schema_version (key ใหม่
+#   เป็น optional ไฟล์เดิมยังโหลดได้)
 # CHANGE LOG (v03 -> v04):
 #   FEATURE (user request — "after exporting G-code, the schema should
 #   be auto-loaded as the active one, without the user picking it by
@@ -66,7 +70,8 @@ _SCHEMA_VERSION = 3
 def export_schema_json(holes: list, view_name: str, filepath: str,
                         settings_snapshot: dict,
                         source_step_filename: str = None,
-                        tolerance_mm_at_export: float = None) -> dict:
+                        tolerance_mm_at_export: float = None,
+                        screen_rot: int = 0) -> dict:
     """คำนวณ expected points ผ่าน build_point_map() แล้วเขียนรวมกับ
     settings_snapshot (มาจาก core/evaluation_engine.py::
     build_settings_snapshot() เสมอ — ผู้เรียกเป็นคนสร้างแล้วส่งเข้ามา ไม่
@@ -108,12 +113,13 @@ def export_schema_json(holes: list, view_name: str, filepath: str,
            ในแอปต่อได้ทันที โดยไม่ต้องเปิดไฟล์กลับมาอ่านหรือคำนวณ
            build_point_map() ซ้ำ
     """
-    points = build_point_map(holes, view_name)
+    points = build_point_map(holes, view_name, screen_rot)
 
     payload = {
         "schema_version":         _SCHEMA_VERSION,
         "generated_at":           datetime.datetime.now().isoformat(timespec="seconds"),
         "view_name":              view_name,
+        "screen_rotation":        int(screen_rot),   # v05 — การหมุนจอตอน export
         "source_step_filename":   source_step_filename,
         "tolerance_mm_at_export": tolerance_mm_at_export,
         "settings_snapshot":      settings_snapshot,

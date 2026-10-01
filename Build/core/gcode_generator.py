@@ -1,5 +1,22 @@
 # core/gcode_generator.py
-# VERSION: 06
+# VERSION: 08
+# CHANGE LOG (v07 -> v08):
+#   FIX: พิกัด X/Y ของ G-code และ expected points (Evaluation) ไม่ตามปุ่ม
+#   Rotate บนจอ และมุมมอง Left/Right หมุนต่างจากจอ 90° — apply_view_transform()
+#   ใช้เมทริกซ์เดียวกับจอแล้ว (core/projector.py::view_rotation_matrix) และ
+#   build_point_map()/generate_gcode() รับ screen_rot เพิ่ม (ค่าเริ่มต้น 0 —
+#   Top/Bottom/Front/Back ที่ไม่หมุนจอให้ผลเหมือน v07 ทุกตัวอักษร)
+# CHANGE LOG (v06 -> v07):
+#   FEATURE: ช่องสี่เหลี่ยม (StepPocket, shape == 'rect') — จุดสัมผัสผนังของ
+#   แต่ละ layer ถูกคำนวณผ่าน _layer_contacts() ที่เดียว ใช้ร่วมกันทั้ง
+#   build_point_map() และ generate_gcode() (ลำดับจุดตรงกันเป๊ะเหมือนเดิม)
+#     - รูกลม: เหมือน v06 ทุกประการ (เริ่มที่จุดศูนย์กลาง เดินออกตามรัศมี) —
+#       ข้อความ G-code ของรูกลมไม่เปลี่ยนแม้แต่บรรทัดเดียว
+#     - ช่องสี่เหลี่ยม: จุดกระจายบนผนังตรงทั้ง 4 ด้าน (core/models.py::
+#       rect_wall_contacts()) — เดินไปจุดเริ่มบนเส้นกึ่งกลางช่องก่อน
+#       ("; approach") แล้ว G38.2 ตั้งฉากเข้าหาผนัง; zigzag = เลื่อน
+#       ตำแหน่งจุดตามแนวผนัง (degree/360 ของระยะห่างระหว่างจุดต่อ layer)
+#   transform_hole_feature_for_machining() แปลง u_dir ของช่องด้วย
 # CHANGE LOG (v05 -> v06):
 #   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 4):
 #   new function suggest_padding_height(machine_profile, probe_profile) —
@@ -32,6 +49,7 @@ import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
 
 from core.hole_ordering import order_holes_nearest_neighbor, split_step_ready
+from core.models import rect_wall_contacts
 
 class GCodeSettings:
     """Plain settings container consumed by generate_gcode()."""
@@ -102,38 +120,29 @@ def suggest_padding_height(machine_profile, probe_profile) -> float:
 # ---------------------------------------------------------------------
 # ระบบแปลงพิกัด 3D เพื่อจำลองการ "พลิกชิ้นงาน" ตามมุมมอง
 # ---------------------------------------------------------------------
-def apply_view_transform(pt, view_name):
-    """แปลงพิกัด 3D เพื่อตั้งชิ้นงานให้ด้านที่ต้องการหงายขึ้นด้านบน (เข้าหาโพรบ Z+)"""
-    x, y, z = pt
-    view = str(view_name).lower()
-    if view == "bottom":
-        # พลิกชิ้นงาน 180 องศา รอบแกน X (สลับบน-ล่าง)
-        return np.array([x, -y, -z], dtype=float)
-    elif view == "front":
-        # พลิก 90 องศา เอาด้านหน้าหงายขึ้น
-        return np.array([x, z, -y], dtype=float)
-    elif view == "back":
-        return np.array([-x, z, y], dtype=float)
-    elif view == "left":
-        return np.array([-z, y, x], dtype=float)
-    elif view == "right":
-        return np.array([z, y, -x], dtype=float)
-    
-    # Default: Top (ไม่มีการหมุน)
-    return np.array([x, y, z], dtype=float)
+def apply_view_transform(pt, view_name, screen_rot: int = 0):
+    """แปลงพิกัด 3D เพื่อตั้งชิ้นงานให้ด้านที่ต้องการหงายขึ้นด้านบน (เข้าหาโพรบ Z+)
+    v08: ใช้เมทริกซ์เดียวกับจอ (core/projector.py::view_rotation_matrix) และรวม
+    การหมุนจอ (screen_rot) — X/Y ของ G-code จึงตรงกับที่เห็นบนจอเสมอ (เดิม
+    Left/Right หมุนต่างจากจอ 90° และไม่สนใจปุ่ม Rotate เลย)"""
+    from core.projector import view_rotation_matrix
+    return view_rotation_matrix(view_name, screen_rot) @ np.asarray(pt, dtype=float)
 
-def transform_hole_feature_for_machining(hf_orig, view_name):
-    """Deep copy รูและแปลงพิกัดทั้งหมดตามมุมมองปัจจุบัน ก่อนส่งไปเขียน G-code"""
+def transform_hole_feature_for_machining(hf_orig, view_name, screen_rot: int = 0):
+    """Deep copy รูและแปลงพิกัดทั้งหมดตามมุมมอง (+ การหมุนจอ) ก่อนส่งไปเขียน G-code"""
     hf = copy.deepcopy(hf_orig)
     if hf._step_hole:
         sh = hf._step_hole
-        sh.open_3d = apply_view_transform(sh.open_3d, view_name)
-        sh.deep_3d = apply_view_transform(sh.deep_3d, view_name)
-        sh.axis    = apply_view_transform(sh.axis, view_name) 
+        tf = lambda p: apply_view_transform(p, view_name, screen_rot)
+        sh.open_3d = tf(sh.open_3d)
+        sh.deep_3d = tf(sh.deep_3d)
+        sh.axis    = tf(sh.axis)
+        if getattr(sh, 'shape', 'circle') == 'rect':   # v07: ทิศด้านยาวของช่องสี่เหลี่ยม
+            sh.u_dir = tf(sh.u_dir)
         for seg in getattr(sh, 'segments', []):
-            seg.open_3d = apply_view_transform(seg.open_3d, view_name)
-            seg.deep_3d = apply_view_transform(seg.deep_3d, view_name)
-            
+            seg.open_3d = tf(seg.open_3d)
+            seg.deep_3d = tf(seg.deep_3d)
+
     return hf
 
 # ---------------------------------------------------------------------
@@ -177,6 +186,12 @@ def _raw_layers_for_hole(hole_feature):
                     points_n=cfg.points_per_layer))
     else:
         axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
+        if getattr(sh, 'shape', 'circle') == 'rect':
+            # v07: ฐาน u/v ของช่องสี่เหลี่ยมต้องตรงกับแนวผนังจริง
+            u = np.array(sh.u_dir, dtype=float)
+            u = u - float(np.dot(u, axis)) * axis
+            u /= np.linalg.norm(u)
+            v = np.cross(axis, u)
         o = np.array(sh.open_3d)
         d = np.array(sh.deep_3d)
         n_layers = hole_feature.layers
@@ -187,10 +202,14 @@ def _raw_layers_for_hole(hole_feature):
             center = o + t * (d - o)
             r      = sh.radius_at(t)
             offset = np.radians(idx * deg) if use_zz else 0.0
-            layers.append(dict(
+            lyr = dict(
                 seg_idx=0, center=center, radius=r,
                 axis=axis, u=u, v=v, angle_offset=offset,
-                points_n=hole_feature.points_per_layer))
+                points_n=hole_feature.points_per_layer)
+            if getattr(sh, 'shape', 'circle') == 'rect':
+                lyr.update(shape='rect', half_u=sh.half_u, half_v=sh.half_v,
+                           corner_radius=sh.corner_radius)
+            layers.append(lyr)
 
     # จัดเรียงลำดับชั้นจาก "บนลงล่าง" (Top to Bottom) เสมอ
     top_pt = np.array(sh.open_3d)
@@ -201,8 +220,26 @@ def _raw_layers_for_hole(hole_feature):
 
     return layers
 
+def _layer_contacts(lyr) -> list:
+    """v07: จุดสัมผัสผนังของ layer เดียว เรียงตามลำดับที่จะถูกโพรบ —
+    list ของ (start, normal, wall_dist): โพรบเริ่มที่ start แล้วเดินตาม
+    normal (เวกเตอร์หน่วย) ระยะ wall_dist จึงถึงผนังจริง
+    รูกลม: start = จุดศูนย์กลาง layer, normal = แนวรัศมี (เหมือน v06)"""
+    c, u, v = lyr['center'], lyr['u'], lyr['v']
+    offset, n = lyr['angle_offset'], lyr['points_n']
+
+    if lyr.get('shape') == 'rect':
+        phase = (offset / (2 * np.pi)) % 1.0
+        return [(c + su * u + sv * v, nu * u + nv * v, dist)
+                for su, sv, nu, nv, dist in rect_wall_contacts(
+                    lyr['half_u'], lyr['half_v'], lyr['corner_radius'], n, phase)]
+
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
+    return [(c, np.cos(a) * u + np.sin(a) * v, lyr['radius']) for a in angles]
+
+
 # ---------------------------------------------------------------------
-def build_point_map(holes, view_name: str) -> list:
+def build_point_map(holes, view_name: str, screen_rot: int = 0) -> list:
     """คำนวณรายการจุดที่ "คาดหวังว่าจะถูกโพรบสัมผัส" (expected probe touch
     points) แบบเรียงลำดับเดียวกับที่ generate_gcode() จะยิงคำสั่ง G38.2
     ออกมาเป๊ะ ๆ (รู nearest-neighbor -> segment -> layer -> มุมจุดในชั้น)
@@ -235,22 +272,17 @@ def build_point_map(holes, view_name: str) -> list:
       point_idx : ลำดับจุดภายใน layer (0-based)
       x, y, z   : พิกัดจุดสัมผัสผนังรูที่คาดหวัง (mm)
     """
-    transformed_holes = [transform_hole_feature_for_machining(h, view_name) for h in holes]
+    transformed_holes = [transform_hole_feature_for_machining(h, view_name, screen_rot) for h in holes]
     valid, _skipped = split_step_ready(transformed_holes)
     ordered = order_holes_nearest_neighbor(valid)
 
     point_map = []
     for hole in ordered:
         for lyr in _raw_layers_for_hole(hole):
-            c, r      = lyr['center'], lyr['radius']
-            u, v      = lyr['u'], lyr['v']
-            offset, n = lyr['angle_offset'], lyr['points_n']
-            seg_idx   = lyr.get('seg_idx', 0)
+            seg_idx = lyr.get('seg_idx', 0)
 
-            angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
-            for pt_i, a in enumerate(angles):
-                radial = np.cos(a) * u + np.sin(a) * v
-                pt     = c + r * radial   # จุดสัมผัสผนังจริง — ไม่รวม overtravel
+            for pt_i, (start, normal, dist) in enumerate(_layer_contacts(lyr)):
+                pt = start + dist * normal   # จุดสัมผัสผนังจริง — ไม่รวม overtravel
                 point_map.append({
                     'hole_id':   getattr(hole, 'display_id', '?'),
                     'seg_idx':   int(seg_idx),
@@ -263,12 +295,13 @@ def build_point_map(holes, view_name: str) -> list:
 
 # ---------------------------------------------------------------------
 # เพิ่มอาร์กิวเมนต์ view_name เข้ามาในฟังก์ชันหลัก
-def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str = "Top"):
+def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str = "Top",
+                   screen_rot: int = 0):
     """
     Build a GRBL probe program from `holes`.
     """
     # 1. จำลองการพลิกชิ้นงานก่อนทำงานเสมอ
-    transformed_holes = [transform_hole_feature_for_machining(h, view_name) for h in holes]
+    transformed_holes = [transform_hole_feature_for_machining(h, view_name, screen_rot) for h in holes]
     
     valid, skipped = split_step_ready(transformed_holes)
     ordered = order_holes_nearest_neighbor(valid)
@@ -279,7 +312,7 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     # order as the G-code emission loop below (see build_point_map()'s
     # docstring for why that's safe). The .gcode TEXT emitted below is
     # completely unchanged from v04.
-    point_map = build_point_map(holes, view_name)
+    point_map = build_point_map(holes, view_name, screen_rot)
 
     lines = []
 
@@ -293,6 +326,8 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     lines.append(f"; NOTE: assumes workpiece is raised by {settings.padding_height:.2f} mm padding (riser plate)")
     if str(view_name).lower() != "top":
         lines.append(f"; NOTE: Coordinate system transformed for {view_name} view machining")
+    if screen_rot:
+        lines.append(f"; NOTE: X/Y rotated {screen_rot} deg to match the on-screen orientation")
     if skipped:
         names = ", ".join(str(getattr(h, 'display_id', '?')) for h in skipped)
         lines.append(f"; WARNING: {len(skipped)} hole(s) skipped (no STEP geometry): {names}")
@@ -323,19 +358,23 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
         lines.append(f"G0 X{entry_pt[0]:.3f} Y{entry_pt[1]:.3f} Z{entry_pt[2]:.3f}")
 
         for lyr in _raw_layers_for_hole(hole):
-            c, r          = lyr['center'], lyr['radius']
-            u, v          = lyr['u'], lyr['v']
-            offset, n     = lyr['angle_offset'], lyr['points_n']
+            c             = lyr['center']
             seg_tag       = f" seg {lyr['seg_idx'] + 1}" if 'seg_idx' in lyr else ""
 
             lines.append(f"G0 X{c[0]:.3f} Y{c[1]:.3f} Z{c[2]:.3f} "
                          f"; layer {lyr['layer_idx'] + 1}{seg_tag} — center")
 
-            angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
-            for pt_i, a in enumerate(angles):
-                radial = np.cos(a) * u + np.sin(a) * v
-                target = c + (r + settings.overtravel) * radial
-                back   = -radial * settings.backoff
+            contacts = _layer_contacts(lyr)
+            n        = len(contacts)
+            for pt_i, (start, normal, dist) in enumerate(contacts):
+                target = start + (dist + settings.overtravel) * normal
+                back   = -normal * settings.backoff
+
+                # v07: ช่องสี่เหลี่ยม — ไปจุดเริ่มบนเส้นกึ่งกลางช่องก่อน (ช่องนูน
+                # จึงเดินตรงจากจุดศูนย์กลางได้โดยไม่ชนผนัง)
+                if not np.allclose(start, c):
+                    lines.append(f"G0 X{start[0]:.3f} Y{start[1]:.3f} Z{start[2]:.3f} "
+                                 f"; point {pt_i + 1}/{n} — approach")
 
                 lines.append(f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} "
                              f"Z{target[2]:.3f} F{settings.probe_feedrate:.0f} "

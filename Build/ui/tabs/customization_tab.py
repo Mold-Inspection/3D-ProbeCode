@@ -12,7 +12,20 @@
 #   elev / azim (view_init)= มุมกล้อง 3D เริ่มต้นของกราฟ (องศา)
 #   half_zoom factor      = สัดส่วนการซูมเข้าเมื่อแสดงรูที่เลือก (มากขึ้น = ซูมออกกว้างขึ้น)
 # ==============================================================================
-# VERSION: 04
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   FIX: mesh ของรูที่เลือก ("Selected Hole Mesh") มีเส้นยาวพาดทั้งชิ้นงาน —
+#   เดิมเลือกสามเหลี่ยมจาก "จุดกึ่งกลาง" อย่างเดียว สามเหลี่ยมยาวของผิวเรียบ
+#   (ผิวบน/ล่างของแผ่นที่ลากจากปากรูไปถึงขอบชิ้นงานหรือรูอื่น) ที่จุดกึ่งกลาง
+#   บังเอิญอยู่ใกล้รูจึงถูกวาดด้วย ตอนนี้ต้องอยู่ในพื้นที่รูครบทั้ง 3 มุม
+#   (_hole_vertex_mask()) และช่องสี่เหลี่ยม/slot ใช้กรอบจริงของช่องแทนวงกลม
+#   ครอบมุม
+# CHANGE LOG (v04 -> v05):
+#   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — จุดสัมผัสผนังมาจาก
+#   lyr['contacts_display'] (core/path_planner.py v03 — คำนวณด้วยฟังก์ชัน
+#   เดียวกับ G-code) แทนการวางจุดบนวงกลม; Tool Path แสดงการเดินไปจุดเริ่ม
+#   บนเส้นกึ่งกลางช่องก่อนโพรบเข้าผนัง; ขอบเขตซูม/ไฮไลต์ mesh ใช้รัศมีที่
+#   ครอบมุมช่อง; หัวกราฟแสดงขนาด ยาว×กว้าง แทน R=
 # CHANGE LOG (v03 -> v04):
 #   FIX: show_bottom_star while isolating a segment used to always be
 #   True — meant expanding/isolating ANY segment card (even a shallow
@@ -103,11 +116,34 @@ def _hole_max_radius(h) -> float:
     sh = getattr(h, '_step_hole', None)
     if sh is None:
         return h.radius
+    if getattr(sh, 'shape', 'circle') == 'rect':
+        return sh.outer_radius
     candidates = [sh.radius_open, sh.radius_deep]
     for seg in (getattr(sh, 'segments', None) or []):
         candidates.append(seg.radius_open)
         candidates.append(seg.radius_deep)
     return max(candidates) if candidates else h.radius
+
+
+def _hole_vertex_mask(app, h, x3, y3, radius, scale, isolate_seg, screen_rot):
+    """v06: vertex ไหนอยู่ในพื้นที่ของรู h (พิกัดจอ) — รูกลม: วงกลมรัศมี
+    radius*scale; ช่องสี่เหลี่ยม/slot: กรอบสี่เหลี่ยมจริงของช่อง + ระยะขอบ
+    (ไม่ใช้วงกลมครอบมุม ซึ่งจะกินพื้นที่รูข้างเคียงด้วย)"""
+    sh = getattr(h, '_step_hole', None)
+    if isolate_seg is None and getattr(sh, 'shape', 'circle') == 'rect':
+        proj = app.geo.projector.project_point_to_view
+        o  = np.array(proj(*sh.open_3d, app.current_view, screen_rot)[:2])
+        ud = np.array(proj(*(np.array(sh.open_3d) + np.array(sh.u_dir)),
+                            app.current_view, screen_rot)[:2]) - o
+        if np.linalg.norm(ud) > 0.5:   # ช่องหันหน้าเข้าหากล้อง (ไม่ใช่มองจากด้านข้าง)
+            ud /= np.linalg.norm(ud)
+            vd = np.array([-ud[1], ud[0]])
+            lu = (x3 - h.x) * ud[0] + (y3 - h.y) * ud[1]
+            lv = (x3 - h.x) * vd[0] + (y3 - h.y) * vd[1]
+            m  = (scale - 1.0) * sh.half_v + 0.5
+            return (np.abs(lu) <= sh.half_u + m) & (np.abs(lv) <= sh.half_v + m)
+        radius = sh.outer_radius
+    return np.hypot(x3 - h.x, y3 - h.y) <= radius * scale
 
 
 class CustomizationTab:
@@ -229,8 +265,6 @@ class CustomizationTab:
             if has_hole and not is_sel:
                 continue
 
-            dist_h = np.hypot(tri_cx - h.x, tri_cy - h.y)
-
             if is_sel and isolate_raw_seg is not None:
                 d_open   = app.geo.projector.project_point_to_view(*isolate_raw_seg.open_3d, app.current_view, screen_rot)
                 d_deep   = app.geo.projector.project_point_to_view(*isolate_raw_seg.deep_3d, app.current_view, screen_rot)
@@ -242,9 +276,14 @@ class CustomizationTab:
                 z_hi_h   = max(h.bottom_z, r_z) + 0.5
                 radius_h = _hole_max_radius(h)
 
-            # สัดส่วนรัศมี/ระยะขอบที่ใช้ตัดเลือกสามเหลี่ยมผนังรู (wall) และขอบปากรู (rim) — ปรับได้
-            mask_wall = ((dist_h <= radius_h * 1.2) & (tri_cz >= z_lo_h - 0.3) & (tri_cz <= z_hi_h))
-            mask_rim  = ((dist_h <= radius_h * 1.3) & (tri_cz >= -0.5) & (tri_cz < z_lo_h + 0.3))
+            # v06: สามเหลี่ยมต้องอยู่ในพื้นที่รู "ครบทั้ง 3 มุม" (เดิมดูแค่จุดกึ่งกลาง
+            # สามเหลี่ยม — สามเหลี่ยมยาวของผิวเรียบด้านบน/ล่างที่ลากจากรูไปถึงขอบ
+            # ชิ้นงาน/รูอื่น จึงถูกวาดเป็นเส้นยาวพาดทั้งชิ้นงาน)
+            # สัดส่วนระยะขอบที่ใช้ตัดเลือกสามเหลี่ยมผนังรู (wall) และขอบปากรู (rim) — ปรับได้
+            in_wall = _hole_vertex_mask(app, h, x3, y3, radius_h, 1.2, isolate_raw_seg, screen_rot)[tris].all(axis=1)
+            in_rim  = _hole_vertex_mask(app, h, x3, y3, radius_h, 1.3, isolate_raw_seg, screen_rot)[tris].all(axis=1)
+            mask_wall = (in_wall & (tri_cz >= z_lo_h - 0.3) & (tri_cz <= z_hi_h))
+            mask_rim  = (in_rim  & (tri_cz >= -0.5) & (tri_cz < z_lo_h + 0.3))
             htris = tris[mask_wall | mask_rim]
 
             if len(htris) > 0 and is_sel:
@@ -364,11 +403,13 @@ class CustomizationTab:
                         sh, layers, app.current_view,
                         screen_rot=screen_rot,
                         zigzag_inspection=use_zigzag,
-                        zigzag_degree=step_deg)
+                        zigzag_degree=step_deg,
+                        points_per_layer=points)
 
                 px_list, py_list, pz_list = [hole.x], [hole.y], [z_start]
                 wall_pts     = []
                 layer_centers = {}
+                spoke_ends    = {}   # v05: ปลายเส้นบอกมุมเริ่ม (zigzag) ของช่องสี่เหลี่ยม
 
                 for lyr in step_layers:
                     z_disp     = lyr['z_display']
@@ -381,6 +422,18 @@ class CustomizationTab:
 
                     layer_centers[lidx] = (cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z)
                     px_list.append(cx_lyr); py_list.append(cy_lyr); pz_list.append(z_disp)
+
+                    if 'contacts_display' in lyr:
+                        # v05: ช่องสี่เหลี่ยม — เดินไปจุดเริ่มก่อน แล้วโพรบตั้งฉากเข้าผนัง
+                        for start, wall in lyr['contacts_display']:
+                            s_arr, w_arr = np.array(start), np.array(wall)
+                            ppx, ppy, ppz = s_arr + 0.92 * (w_arr - s_arr)   # หดเข้าเล็กน้อยเหมือนรูกลม
+                            wall_pts.append((ppx, ppy, ppz, lidx))
+                            spoke_ends.setdefault(lidx, (ppx, ppy))
+                            px_list += [start[0], ppx, start[0], cx_lyr]
+                            py_list += [start[1], ppy, start[1], cy_lyr]
+                            pz_list += [start[2], ppz, start[2], z_disp]
+                        continue
 
                     for ang in np.linspace(0, 2 * np.pi, pts_this_layer, endpoint=False):
                         a   = ang + ang_offset
@@ -432,6 +485,7 @@ class CustomizationTab:
                 px_list, py_list, pz_list = [hole.x], [hole.y], [z_start]
                 wall_pts      = []
                 layer_centers = {}
+                spoke_ends    = {}
 
                 for layer_idx, z_disp in enumerate(z_levels_path):
                     r_at_z     = mesh_radius_at_z(z_disp) * 0.92
@@ -468,8 +522,9 @@ class CustomizationTab:
 
                         if lidx in layer_centers:
                             cx_lyr, cy_lyr, z_disp, ang_offset, r_at_z = layer_centers[lidx]
-                            spoke_x = cx_lyr + r_at_z * np.cos(ang_offset)
-                            spoke_y = cy_lyr + r_at_z * np.sin(ang_offset)
+                            spoke_x, spoke_y = spoke_ends.get(
+                                lidx, (cx_lyr + r_at_z * np.cos(ang_offset),
+                                       cy_lyr + r_at_z * np.sin(ang_offset)))
                             ax3d.plot([cx_lyr, spoke_x], [cy_lyr, spoke_y], [z_disp, z_disp], color=color_l, linewidth=2.4, alpha=0.95, zorder=12, solid_capstyle='round')
                 else:
                     wx_a, wy_a, wz_a = zip(*[(wp[0], wp[1], wp[2]) for wp in wall_pts])
@@ -506,13 +561,17 @@ class CustomizationTab:
                 layer_info  = f"{layers}L × {points}P = {layers*points} pts"
                 zigzag_tag  = f' ↕Zigzag({step_deg}°/layer)' if use_zigzag else ''
 
-            title_str  = (f"Customization — Hole {hole.display_id}  |  R={hole.radius:.1f} mm  Depth={hole.depth:.2f} mm  |  "
+            sh_title   = getattr(hole, '_step_hole', None)
+            size_tag   = (f"Pocket {sh_title.size_text()} mm"
+                          if getattr(sh_title, 'shape', 'circle') == 'rect'
+                          else f"R={hole.radius:.1f} mm")
+            title_str  = (f"Customization — Hole {hole.display_id}  |  {size_tag}  Depth={hole.depth:.2f} mm  |  "
                           f"{layer_info}" + (' [STEP]' if has_step_hole else ' [Mesh]') + rot_tag + zigzag_tag + probe_tag + isolate_tag)
             # มุมกล้อง 3D เริ่มต้น (elevation, azimuth) หน่วยองศา — ปรับเพื่อเปลี่ยนมุมมองเริ่มต้น
             ax3d.view_init(elev=-130, azim=67.5)
 
             hole_z_mid = (z_start + star_z) / 2.0
-            half_zoom  = max(hole.radius * 1.6, abs(star_z - z_start)) * 0.55   # สัดส่วนซูมเข้าเมื่อโฟกัสรูที่เลือก — ปรับได้
+            half_zoom  = max(_hole_max_radius(hole) * 1.6, abs(star_z - z_start)) * 0.55   # สัดส่วนซูมเข้าเมื่อโฟกัสรูที่เลือก — ปรับได้
             half_zoom  = max(half_zoom, half * 0.05)
 
             ax3d.set_xlim([hole.x - half_zoom, hole.x + half_zoom])

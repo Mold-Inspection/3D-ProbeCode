@@ -60,12 +60,14 @@ class MoldGeometry:
     def get_probe_path_layers(self, hole, n_layers: int, view_name: str,
                                screen_rot: int = 0,
                                zigzag_inspection: bool = False,
-                               zigzag_degree: float = 45.0):
+                               zigzag_degree: float = 45.0,
+                               points_per_layer: int = 4):
         return self.planner.get_probe_path_layers(
             hole, n_layers, self.projector, view_name,
             screen_rot=screen_rot,
             zigzag_inspection=zigzag_inspection,
-            zigzag_degree=zigzag_degree)
+            zigzag_degree=zigzag_degree,
+            points_per_layer=points_per_layer)
 
     def get_probe_path_layers_multi(self, hole, segment_settings: list,
                                      view_name: str, screen_rot: int = 0):
