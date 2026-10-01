@@ -2,7 +2,10 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 08
+# VERSION: 09
+# CHANGE LOG (v08 -> v09):
+#   FIX: expected points (live) และ settings snapshot ใช้การหมุนจอ
+#   (app.screen_rotation) เหมือนตอน export G-code — ดู gcode_generator.py v08
 # CHANGE LOG (v07 -> v08):
 #   FIX (user report): app.evaluation_result was only ever (re)computed
 #   from inside "📥 Load OpenBuilds .log" — so after loading a schema
@@ -456,7 +459,8 @@ class EvaluationLeftPanel:
             expected_points = app.loaded_expected_points
         else:
             try:
-                expected_points = build_point_map(selected, view_name)
+                expected_points = build_point_map(selected, view_name,
+                                                  getattr(app, 'screen_rotation', 0))
             except Exception as e:
                 _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
                 return False
@@ -487,7 +491,8 @@ class EvaluationLeftPanel:
         # settings_snapshot when using one, or the in-memory
         # last_export_snapshot from a live G-code export otherwise.
         try:
-            current_snapshot = build_settings_snapshot(app.current_holes, view_name)   # ALL holes
+            current_snapshot = build_settings_snapshot(app.current_holes, view_name,
+                                                       getattr(app, 'screen_rotation', 0))   # ALL holes
         except Exception:
             current_snapshot = None
 

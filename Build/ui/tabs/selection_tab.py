@@ -239,10 +239,13 @@ class SelectionTab:
                     *sh.open_3d, view_name, screen_rot)
                 dx, dy, dd = projector.project_point_to_view(
                     *sh.deep_3d, view_name, screen_rot)
+                # ช่องสี่เหลี่ยมใช้รัศมีวงกลมที่ครอบมุม ไม่ใช่ครึ่งด้านแคบ
+                r_hit = (sh.outer_radius if getattr(sh, 'shape', 'circle') == 'rect'
+                         else sh.radius_open)
                 if od <= dd:
-                    projected.append((ox, oy, od, dd, sh.radius_open))
+                    projected.append((ox, oy, od, dd, r_hit))
                 else:
-                    projected.append((dx, dy, dd, od, sh.radius_open))
+                    projected.append((dx, dy, dd, od, r_hit))
             self._hole_proj_cache = (cache_key, projected)
 
         for open_x, open_y, open_d, deep_d, r in self._hole_proj_cache[1]:
@@ -458,6 +461,7 @@ class SelectionTab:
                 edgecolors="#3694ED", marker='o', s=150,
                 linewidths=2, zorder=5, clip_on=True, animated=True)
             self._overlay.append(app.scatter_holes)
+            self._draw_hole_outlines(holes)
             for i, h in enumerate(holes):
                 self._overlay.append(app.ax.text(
                     h.x, h.y, f"{h.display_id}",
@@ -505,6 +509,27 @@ class SelectionTab:
             fontsize=8, color=theme.c(theme.TEXT_MUTED), va='bottom', ha='left', zorder=15)
 
         app.canvas.draw()
+
+    def _draw_hole_outlines(self, holes):
+        """วาดขอบจริงของทุกรูบนมุมมอง 2D — รูกลม (วงกลมทุกขนาดของรู counterbore)
+        และช่องสี่เหลี่ยม/slot — เป็นส่วนของพื้นหลัง (ไม่ animated) จึงไม่ต้อง
+        วาดใหม่ตอน hover"""
+        app = self.app
+        projector = app.geo.projector
+        for h in holes:
+            sh = getattr(h, '_step_hole', None)
+            if sh is None:
+                # รูจาก mesh (ไม่มี STEP) — มีแค่จุดศูนย์กลาง/รัศมีบนจอ วาดวงกลมตรง ๆ
+                if getattr(h, 'radius', None):
+                    ang = np.linspace(0.0, 2 * np.pi, 49)
+                    app.ax.plot(h.x + h.radius * np.cos(ang), h.y + h.radius * np.sin(ang),
+                                color="#3694ED", linewidth=1.6, zorder=4, clip_on=True)
+                continue
+            for outline in sh.outlines_3d():
+                xy = [projector.project_point_to_view(*p, app.current_view, app.screen_rotation)[:2]
+                      for p in outline]
+                ox, oy = zip(*xy)
+                app.ax.plot(ox, oy, color="#3694ED", linewidth=1.6, zorder=4, clip_on=True)
 
     # ------------------------------------------------------------------
     def on_press(self, event):

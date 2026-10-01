@@ -1,5 +1,16 @@
 # core/gcode_export_panel.py
-# VERSION: 10
+# VERSION: 12
+# CHANGE LOG (v11 -> v12):
+#   FIX: ส่งการหมุนจอ (app.screen_rotation) เข้า generate_gcode() /
+#   export_schema_json() / build_settings_snapshot() — X/Y ของ G-code และ
+#   Schema ตรงกับที่เห็นบนจอหลังกด Rotate (ดู gcode_generator.py v08)
+# CHANGE LOG (v10 -> v11):
+#   FEATURE: หมวด "Axis Test (X/Y)" ในหน้าต่าง G-code Export — สร้างไฟล์
+#   G-code ทดสอบแกนจาก core/axis_test.py: เข็มเริ่มที่มุมซ้ายบนของชิ้นงาน
+#   (Set Zero ไว้แล้ว) เดินไปครบ 4 มุมแล้วกลับจุด zero ไว้เช็คทิศ/ระยะแกน
+#   X/Y ใน OpenBuilds Control ก่อนรันโปรแกรมโพรบจริง — ขนาดชิ้นงานดึงจาก
+#   โมเดลในมุมมองปัจจุบันบนจอ (แก้เองได้) ไม่ต้องมีรูที่เลือกไว้
+#
 # CHANGE LOG (v09 -> v10):
 #   FEATURE (user request — "after exporting G-code, auto-set the Schema
 #   as the active one, without the user picking it by hand"): both
@@ -59,6 +70,8 @@ import customtkinter as ctk
 
 from core.gcode_generator import GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height
 from core.expected_points_io import export_schema_json
+from core.axis_test import (AxisTestSettings, generate_axis_test_gcode,
+                            hole_centers_from_view, generate_hole_center_test_gcode)
 from ui.settings_dialog_base import SettingsDialogBase
 from ui import theme
 
@@ -68,7 +81,9 @@ class GCodeExportPanel:
         self.app = app
         self.dialog = SettingsDialogBase(app.root, title="G-code Export (GRBL)")
         self.dialog.add_category("export", "Export Settings", self._build_fields)
+        self.dialog.add_category("axis_test", "Axis Test (X/Y)", self._build_axis_test_fields)
         self._entries = {}
+        self._axis_entries = {}
 
     # ------------------------------------------------------------------
     def show(self):
@@ -136,6 +151,158 @@ class GCodeExportPanel:
                          "exporting a G-code file.",
             font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED, justify="left"
         ).pack(anchor="w", pady=(8, 0))
+
+    # ------------------------------------------------------------------
+    # v11: Axis Test — corner trace G-code
+    # ------------------------------------------------------------------
+    def _build_axis_test_fields(self, parent):
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360,
+            font=ctk.CTkFont(size=12), text_color=theme.TEXT_SECONDARY,
+            text=("Checks that the X/Y axes move the right way and the right "
+                  "distance. Put the needle on the UPPER-LEFT corner of the "
+                  "object (as it looks on screen) and Set Zero X/Y/Z there in "
+                  "OpenBuilds. The program visits every corner, pauses at each "
+                  "one, then returns to the zero point.")
+        ).pack(fill="x", pady=(0, 12))
+
+        fields = [
+            ("width_x",  "Object width — X (mm):",  ""),
+            ("length_y", "Object length — Y (mm):", ""),
+            ("z_lift",   "Z Lift while moving (mm, 0 = none):", "5.0"),
+            ("feedrate", "Feedrate (mm/min):",       "500.0"),
+            ("dwell_s",  "Pause at each corner (s):", "2.0"),
+        ]
+        for key, label, default in fields:
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(row, text=label, font=ctk.CTkFont(size=13),
+                        text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+            entry_row = ctk.CTkFrame(row, fg_color="transparent")
+            entry_row.pack(fill="x", pady=(4, 0))
+            entry = ctk.CTkEntry(entry_row, width=120, height=30,
+                                 placeholder_text=default or "e.g. 300.0",
+                                 font=ctk.CTkFont(size=13))
+            if default:
+                entry.insert(0, default)
+            entry.pack(side="left")
+            self._axis_entries[key] = entry
+            if key == "width_x":
+                ctk.CTkButton(entry_row, text="↻ From model", width=110, height=30,
+                             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                             font=ctk.CTkFont(size=11),
+                             command=self._fill_axis_test_size).pack(side="left", padx=(8, 0))
+
+        self._fill_axis_test_size(quiet=True)
+
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
+        ctk.CTkButton(
+            parent, text="🖨 Export Axis Test G-code", fg_color=theme.ACCENT,
+            hover_color=theme.ACCENT_HOVER, font=ctk.CTkFont(size=13, weight="bold"),
+            height=34, command=self._on_export_axis_test).pack(fill="x")
+
+        ctk.CTkButton(
+            parent, text="🎯 Export Hole-Center Test G-code",
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+            font=ctk.CTkFont(size=12), height=30,
+            command=self._on_export_hole_center_test).pack(fill="x", pady=(8, 0))
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360,
+            font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED,
+            text=("Hole-Center Test: same zero (upper-left corner) and same "
+                  "settings, but visits the center of every hole/pocket that is "
+                  "selected for inspection, pausing over each one, then returns "
+                  "to the zero point.")
+        ).pack(anchor="w", pady=(4, 0))
+
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360,
+            font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED,
+            text=("Path: upper-left → upper-right → lower-right → lower-left → "
+                  "upper-left. Assumes X+ = right and Y+ = toward the back of "
+                  "the machine (up on screen), so the lower corners are at "
+                  "negative Y. If the needle goes the other way, that axis "
+                  "direction is inverted on the machine. Lay the part on the "
+                  "machine the same way it is shown on screen (use Rotate if "
+                  "needed). Run with a hand on the stop button the first time.")
+        ).pack(anchor="w", pady=(8, 0))
+
+    def _fill_axis_test_size(self, quiet: bool = False):
+        """ขนาดชิ้นงานตามแกน X/Y ของมุมมองบนจอปัจจุบัน (รวมการหมุนจอ)"""
+        app = self.app
+        xs, ys = getattr(app, 'current_x', None), getattr(app, 'current_y', None)
+        if app.geo.mesh is None or xs is None or ys is None or len(xs) == 0:
+            if not quiet:
+                self.dialog.showwarning("No Model", "กรุณาโหลดโมเดลก่อน หรือกรอกขนาดเอง")
+            return
+        for key, vals in (("width_x", xs), ("length_y", ys)):
+            entry = self._axis_entries[key]
+            entry.delete(0, "end")
+            entry.insert(0, f"{float(max(vals) - min(vals)):.3f}")
+
+    def _read_axis_test_settings(self):
+        try:
+            settings = AxisTestSettings(**{k: float(e.get().strip())
+                                           for k, e in self._axis_entries.items()})
+        except ValueError:
+            self.dialog.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
+            return None
+        err = settings.validate()
+        if err:
+            self.dialog.showerror("Invalid Input", err)
+            return None
+        return settings
+
+    def _save_test_gcode(self, gcode_text, suffix, title, summary):
+        base = os.path.splitext(getattr(self.app, 'loaded_step_filename', None) or "object")[0]
+        filepath = self.dialog.run_native(
+            ctk.filedialog.asksaveasfilename,
+            title=title, defaultextension=".gcode",
+            initialfile=f"{base}_{suffix}.gcode",
+            filetypes=[("G-code Files", "*.gcode *.nc *.txt")])
+        if not filepath:
+            return
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(gcode_text)
+        except Exception as e:
+            self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
+            return
+        self.dialog.showinfo(
+            "Export complete",
+            f"บันทึก {title.replace('Save ', '')} แล้ว:\n{filepath}\n\n{summary}\n"
+            "ตั้งเข็มที่มุมซ้ายบนของชิ้นงาน แล้ว Set Zero ก่อนรัน")
+
+    def _on_export_axis_test(self):
+        settings = self._read_axis_test_settings()
+        if settings is None:
+            return
+        gcode_text = generate_axis_test_gcode(
+            settings, self._resolve_view_name(), getattr(self.app, 'loaded_step_filename', None))
+        self._save_test_gcode(
+            gcode_text, "axis_test", "Save Axis Test G-code",
+            f"ขนาด X {settings.width_x:.2f} × Y {settings.length_y:.2f} mm")
+
+    def _on_export_hole_center_test(self):
+        """v11: เดินไปจุดศูนย์กลางของทุกรูที่เลือกไว้ตรวจ — zero เดียวกับ corner trace"""
+        app = self.app
+        if app.geo.mesh is None or getattr(app, 'current_x', None) is None:
+            self.dialog.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
+            return
+        centers = hole_centers_from_view(app.current_holes, app.current_x, app.current_y)
+        if not centers:
+            self.dialog.showwarning("No Holes Selected",
+                                    "ไม่มีรูที่เลือกไว้สำหรับ inspection — กด Generate Holes แล้วเลือกรูก่อน")
+            return
+        settings = self._read_axis_test_settings()
+        if settings is None:
+            return
+        gcode_text = generate_hole_center_test_gcode(
+            settings, centers, self._resolve_view_name(),
+            getattr(app, 'loaded_step_filename', None))
+        self._save_test_gcode(
+            gcode_text, "hole_center_test", "Save Hole-Center Test G-code",
+            f"{len(centers)} รู — เดินไปจุดศูนย์กลางทีละรูแล้วกลับจุด zero")
 
     # ------------------------------------------------------------------
     def _suggest_safe_z(self):
@@ -240,7 +407,8 @@ class GCodeExportPanel:
         view_name = self._resolve_view_name()
 
         try:
-            gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name)
+            gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name,
+                                                            screen_rot=getattr(self.app, 'screen_rotation', 0))
         except Exception as e:
             self.dialog.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
             return
@@ -310,7 +478,8 @@ class GCodeExportPanel:
                 selected, view_name, filepath,
                 settings_snapshot=settings_snapshot or {'view_name': view_name, 'holes': {}},
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
-                tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
+                tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
+                screen_rot=getattr(self.app, 'screen_rotation', 0))
         except Exception as e:
             self.dialog.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
@@ -343,7 +512,7 @@ class GCodeExportPanel:
                   f"core/evaluation_engine.py not available yet ({e!r})")
             return None
         try:
-            return build_settings_snapshot(holes_to_snapshot, view_name)
+            return build_settings_snapshot(holes_to_snapshot, view_name, getattr(self.app, 'screen_rotation', 0))
         except Exception as e:
             print(f"[gcode_export_panel] settings_snapshot build failed (non-blocking): {e!r}")
             return None
@@ -373,7 +542,8 @@ class GCodeExportPanel:
                 selected_holes, view_name, sidecar_path,
                 settings_snapshot=snapshot or {'view_name': view_name, 'holes': {}},
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
-                tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None))
+                tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
+                screen_rot=getattr(self.app, 'screen_rotation', 0))
             print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")

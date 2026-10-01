@@ -1,7 +1,16 @@
 # ==============================================================================
 # core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE: ช่องสี่เหลี่ยม (จัตุรัส/ผืนผ้า มุมคมและมุมโค้ง) — extract()
+#   เรียก core/pocket_extractor.py::extract_rect_pockets() ก่อน แล้ว:
+#     - ข้ามผิวทรงกระบอกที่เป็นมุมโค้งของช่อง (เดิมช่องมุมโค้ง 1 ช่องถูก
+#       ตรวจเป็น "รูกลม" ปลอม 4 รู)
+#     - เติม StepPocket ต่อท้ายรายการรู "หลัง" _merge_half_faces /
+#       _merge_counterbores เพื่อไม่ให้ช่องถูก merge เข้ากับรูกลม
+# ==============================================================================
+# VERSION: 02 (superseded by v03 above — kept for history)
 # CHANGE LOG (v01 -> v02):
 #   FIX (PLAN_segment-diameter-direction-fix.md): new helper
 #   _orient_each_segment_to_hole_mouth(h) — forces EVERY individual
@@ -51,6 +60,7 @@ import copy
 import os
 import datetime
 from core.models import StepHole, HoleSegment
+from core.pocket_extractor import extract_rect_pockets
 
 DEBUG = True
 
@@ -389,11 +399,22 @@ class StepExtractor:
         total_faces       = 0
         skipped_convex    = 0   # ผิวโค้งด้านนอก (มุมโค้ง, boss) ที่ไม่ใช่ผนังรู
 
+        # v03: ช่องสี่เหลี่ยม — มุมโค้งของช่อง (corner_faces) ไม่ใช่รูกลม ต้องข้าม
+        try:
+            pockets, corner_faces = extract_rect_pockets(step_data, mesh_centroid, log=_dbg)
+        except Exception as e:
+            _dbg(f"rectangular pocket extraction failed: {e!r}")
+            pockets, corner_faces = [], []
+
         for face in step_data.faces().vals():
             total_faces += 1
             geom_type = face.geomType()
 
             if geom_type not in ('CYLINDER', 'CONE', 'TORUS', 'SPHERE'):
+                continue
+
+            if geom_type == 'CYLINDER' and any(face.isSame(cf) for cf in corner_faces):
+                _dbg(f"SKIP face#{total_faces} (CYLINDER): rounded corner of a rectangular pocket")
                 continue
 
             if _is_hole_wall(face, geom_type) is False:
@@ -698,6 +719,7 @@ class StepExtractor:
 
         holes = _merge_half_faces(holes)
         holes = _merge_counterbores(holes)
+        holes += pockets   # v03: ต่อท้ายหลัง merge — ช่องสี่เหลี่ยมไม่ merge กับรูกลม
         for h in holes:
             _orient_segments_by_mesh(h, mesh)
             _order_segments_deepest_first(h)          # v01: always run — mesh-independent, keeps segments[0] = deepest
@@ -705,7 +727,8 @@ class StepExtractor:
 
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)} "
-              f"({skipped_convex} convex outer surface(s) ignored)")
+              f"(incl. {len(pockets)} rectangular pocket(s); "
+              f"{skipped_convex} convex outer surface(s) ignored)")
         return holes
 
     def _raycast_surface_depth(self, mesh, point_3d, dir_to_viewer, projector, view_name, screen_rot):

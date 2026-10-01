@@ -17,11 +17,13 @@ A desktop tool that reads a CAD model (STEP/STP), automatically detects holes th
 
 **3. Detect holes automatically**
 - If the STEP file has real geometry (cylinders, cones, torus, sphere caps), holes are extracted analytically — accurate radius, depth, and axis, including multi-diameter holes (counterbores).
+- Rectangular pockets are detected too — square or rectangle, with sharp or rounded corners, blind or through — as are capsule-shaped slots (two straight sides with half-round ends). Size, corner radius, and depth come straight from the B-Rep; a pocket's rounded corners or a slot's round ends are no longer mistaken for round holes.
 - If only a mesh is available (no STEP B-Rep), holes are found by clustering points on the surface.
 - Detected holes are numbered, shown on the 2D view, and listed in the sidebar (selected vs. unselected, with reasons like "too shallow" or "occluded").
 
 **4. Customize the probing plan per hole**
 - Set number of layers (depths) and points per layer.
+- Rectangular pockets: points are spread over the 4 straight walls (never on a corner), and each probe moves straight in toward its wall. Slots: points go on the two flat sides and on each round end. In zigzag mode the points slide along the walls from layer to layer instead of rotating.
 - Optional zigzag mode (rotates probe angle per layer to reduce repeated contact points).
 - Multi-diameter holes get separate settings per segment.
 - A 3D preview (Customization tab) shows the actual tool path and wall-contact points, and warns if your probe (stylus length / tip diameter) can't physically reach or fit the hole.
@@ -35,6 +37,12 @@ A desktop tool that reads a CAD model (STEP/STP), automatically detects holes th
 - Orders holes with a simple nearest-neighbor path.
 - Holes with no STEP geometry (mesh-only) are skipped and reported.
 
+**7. Axis test (X/Y check)**
+- In the G-code Export window, the **Axis Test (X/Y)** page exports a short program for checking that the X/Y axes move the right way and the right distance — with an analog probe, a needle, or any pointer.
+- Put the needle on the object's upper-left corner (as shown on screen) and Set Zero there in OpenBuilds. The program lifts Z, visits the upper-right, lower-right and lower-left corners (pausing at each), then returns to the zero point.
+- The object size is filled in from the model in the current view (editable). Assumes X+ = right and Y+ = toward the back of the machine.
+- **Hole-Center Test** (same page, same zero and settings): visits the center of every hole/pocket selected for inspection, pausing over each, then returns to the zero point — checks that hole positions line up with the real part.
+
 ---
 
 ## Project structure
@@ -47,6 +55,7 @@ Build/
 │   ├── cad_loader.py            # loads STEP/STP, builds mesh
 │   ├── projector.py             # 3D → 2D view projection
 │   ├── step_extractor.py        # extracts holes from STEP B-Rep
+│   ├── pocket_extractor.py      # extracts rectangular pockets from STEP B-Rep
 │   ├── path_planner.py          # builds probe path layers (screen-space, for preview)
 │   ├── gcode_generator.py       # builds G-code (raw 3D space, for the real machine)
 │   ├── gcode_export_panel.py    # UI panel for G-code export

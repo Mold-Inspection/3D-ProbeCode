@@ -12,7 +12,13 @@
 #   zigzag_inspection / cfg.zigzag_inspection = เปิด/ปิดการหมุนมุมโพรบต่อชั้น
 #   zigzag_degree / cfg.zigzag_degree = องศาสะสมที่หมุนต่อ 1 ชั้น
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — get_probe_path_layers() เติม key
+#   'contacts_display' ให้แต่ละ layer: list ของ (start_xyz, wall_xyz) ใน
+#   พิกัดจอ (project แล้ว) คำนวณจาก core/gcode_generator.py::
+#   _layer_contacts() ตัวเดียวกับ G-code — จุดที่เห็นใน Customization tab จึง
+#   ตรงกับจุดที่เครื่องจะโพรบจริง รูกลมไม่มี key นี้ (พฤติกรรมเดิม)
 # CHANGE LOG (v01 -> v02):
 #   FIX: get_probe_path_layers_multi() now SKIPS any segment whose
 #   cfg.selected_for_inspection is False (see core/models.py
@@ -32,7 +38,8 @@ class PathPlanner:
     def get_probe_path_layers(self, hole, n_layers: int, projector, view_name: str,
                                screen_rot: int = 0,
                                zigzag_inspection: bool = False,
-                               zigzag_degree: float = 45.0) -> list:
+                               zigzag_degree: float = 45.0,
+                               points_per_layer: int = 4) -> list:
         """คืนรายการ dict ของแต่ละ layer สำหรับวาดเส้นทางโพรบ
 
         โหมด Zigzag: layer 0 → offset มุม 0°, layer N → offset = N × zigzag_degree
@@ -44,6 +51,7 @@ class PathPlanner:
         t_vals = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
         o = np.array(hole.open_3d)
         d = np.array(hole.deep_3d)
+        is_rect = getattr(hole, 'shape', 'circle') == 'rect'
 
         layers = []
         for layer_idx, t in enumerate(t_vals):
@@ -54,15 +62,41 @@ class PathPlanner:
             angle_offset    = (np.radians(layer_idx * zigzag_degree)
                                if zigzag_inspection else 0.0)
 
-            layers.append({
+            layer = {
                 'z_display':    depth,
                 'x_display':    dx,
                 'y_display':    dy,
                 'radius':       r_layer,
                 'angle_offset': angle_offset,
                 'layer_idx':    layer_idx,
-            })
+            }
+            if is_rect:
+                layer['contacts_display'] = self._rect_contacts_display(
+                    hole, pt, angle_offset, points_per_layer, projector,
+                    view_name, screen_rot)
+            layers.append(layer)
         return layers
+
+    @staticmethod
+    def _rect_contacts_display(hole, center, angle_offset, n_points,
+                               projector, view_name, screen_rot) -> list:
+        """v03: จุดเริ่ม/จุดสัมผัสผนังของช่องสี่เหลี่ยม 1 layer ในพิกัดจอ"""
+        from core.gcode_generator import _layer_contacts, _orthonormal_basis
+
+        axis, _, _ = _orthonormal_basis(np.array(hole.deep_3d) - np.array(hole.open_3d))
+        u = np.array(hole.u_dir, dtype=float)
+        u = u - float(np.dot(u, axis)) * axis
+        u /= np.linalg.norm(u)
+        lyr = dict(shape='rect', center=np.array(center), u=u, v=np.cross(axis, u),
+                   angle_offset=angle_offset, points_n=n_points,
+                   half_u=hole.half_u, half_v=hole.half_v,
+                   corner_radius=hole.corner_radius)
+
+        def proj(p):
+            return projector.project_point_to_view(*p, view_name, screen_rot)
+
+        return [(proj(start), proj(start + dist * normal))
+                for start, normal, dist in _layer_contacts(lyr)]
 
     # ------------------------------------------------------------------
     def get_probe_path_layers_multi(self, hole, segment_settings: list,

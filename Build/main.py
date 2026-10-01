@@ -13,8 +13,8 @@ from core.geometry_engine import MoldGeometry
 from ui.main_window import UIManager
 
 
-def main():
-    print("Starting 3D ProbeCode...")
+def main(): 
+    print("Starting 3D ProbeCode...")       
 
     geo = MoldGeometry()
     ui = UIManager(geo)

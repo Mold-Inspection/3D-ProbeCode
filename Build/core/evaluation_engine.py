@@ -4,7 +4,16 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 04
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   build_settings_snapshot() บันทึก 'screen_rot' (การหมุนจอ) และ
+#   diff_snapshots() ถือว่าการหมุนจอที่เปลี่ยนไปตั้งแต่ export = view เปลี่ยน
+#   (พิกัด X/Y ของ G-code ตามการหมุนจอแล้ว — ดู gcode_generator.py v08)
+# CHANGE LOG (v04 -> v05):
+#   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — _hole_fingerprint() ต่อท้ายขนาด
+#   ช่อง (กว้าง×ยาว×รัศมีมุม) สำหรับรูทรง 'rect' เท่านั้น fingerprint ของรู
+#   กลมเหมือน v04 ทุกตัวอักษร (schema เดิมยังจับคู่ได้) — evaluate_points()
+#   ไม่ต้องแก้ เพราะเทียบจุดต่อจุดตาม point map ที่รองรับช่องแล้ว
 # CHANGE LOG (v03 -> v04):
 #   FIX (bug report — screenshot showed only 1/4 holes matched after
 #   "Restore"): build_settings_snapshot()/apply_settings_snapshot() never
@@ -211,10 +220,13 @@ def _hole_fingerprint(hole) -> str:
         oz = getattr(hole, 'surface_z', 0.0) or 0.0
     radius = getattr(hole, 'radius', 0.0) or 0.0
     depth  = getattr(hole, 'depth', 0.0) or 0.0
-    return f"{round(float(ox), 2)}_{round(float(oy), 2)}_{round(float(oz), 2)}_{round(float(radius), 3)}_{round(float(depth), 2)}"
+    fp = f"{round(float(ox), 2)}_{round(float(oy), 2)}_{round(float(oz), 2)}_{round(float(radius), 3)}_{round(float(depth), 2)}"
+    if getattr(sh, 'shape', 'circle') == 'rect':   # v05
+        fp += f"_rect{round(sh.half_u * 2, 3)}x{round(sh.half_v * 2, 3)}r{round(sh.corner_radius, 3)}"
+    return fp
 
 
-def build_settings_snapshot(holes: list, view_name: str) -> dict:
+def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) -> dict:
     """จับภาพค่าตั้งค่าการตรวจสอบ "ทั้งหมด" ของทุกรูที่ส่งเข้ามา — v04:
     ผู้เรียกควรส่ง ALL current holes เข้ามา (ไม่ใช่แค่รูที่ selected_for_
     inspection == True) เพื่อให้ snapshot เป็นภาพสมบูรณ์ของการตั้งค่า ณ
@@ -244,7 +256,7 @@ def build_settings_snapshot(holes: list, view_name: str) -> dict:
       }
     }
     """
-    snapshot = {'view_name': view_name, 'holes': {}}
+    snapshot = {'view_name': view_name, 'screen_rot': int(screen_rot), 'holes': {}}
 
     for hole in holes:
         fp = _hole_fingerprint(hole)
@@ -323,7 +335,8 @@ def diff_snapshots(old_snapshot: dict, new_snapshot: dict) -> list:
 
     old_holes = old_snapshot.get('holes', {})
     new_holes = new_snapshot.get('holes', {})
-    view_changed = old_snapshot.get('view_name') != new_snapshot.get('view_name')
+    view_changed = (old_snapshot.get('view_name') != new_snapshot.get('view_name') or
+                    old_snapshot.get('screen_rot', 0) != new_snapshot.get('screen_rot', 0))   # v06
 
     mismatched = []
     for fp, new_cfg in new_holes.items():

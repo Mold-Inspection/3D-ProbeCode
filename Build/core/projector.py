@@ -33,6 +33,21 @@ _VIEW_ROTATIONS = {
 }
 
 
+def view_rotation_matrix(view_name: str, screen_rot: int = 0) -> np.ndarray:
+    """เมทริกซ์หมุน 3x3 จากพิกัดโมเดล → พิกัด "บนจอ/บนเครื่อง" (X ขวา, Y ขึ้น
+    บนจอ, Z ชี้ออกหาผู้มอง) = หมุนตามมุมมอง แล้วหมุนจอ screen_rot องศา (ทวนเข็ม
+    รอบแกน Z) — ตรงกับ Projector ทุกประการ ใช้ร่วมกับ G-code
+    (core/gcode_generator.py::apply_view_transform) ให้ X/Y ของ G-code ตรงกับ
+    ที่เห็นบนจอเสมอ — ทุกมุมเป็นพหุคูณของ 90° จึงปัดเป็นจำนวนเต็ม (ค่าเป๊ะ)"""
+    key = str(view_name).capitalize()
+    rx, ry, rz = _VIEW_ROTATIONS.get(key, (0, 0, 0))
+    m = _tf().euler_matrix(*np.radians([rx, ry, rz]))[:3, :3]
+    if screen_rot:
+        c, s = np.cos(np.radians(screen_rot)), np.sin(np.radians(screen_rot))
+        m = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]) @ m
+    return np.round(m)
+
+
 class Projector:
     """จัดการการแปลงพิกัด 3D → 2D สำหรับแต่ละมุมมอง
 
