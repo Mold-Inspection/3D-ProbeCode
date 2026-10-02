@@ -87,6 +87,8 @@ def _hole_size_cell(hole) -> str:
     sh = getattr(hole, '_step_hole', None)
     if getattr(sh, 'shape', 'circle') == 'rect':
         return f"{f'{sh.half_u * 2:.1f}x{sh.half_v * 2:.1f}':>11}"
+    if getattr(sh, 'shape', 'circle') == 'channel':
+        return f"{f'{sh.half_len * 2:.1f}x{sh.half_v * 2:.1f}':>11}"
     radius = getattr(hole, 'radius', None)
     return f"{'':>3}{_fmt_num(radius * 2 if isinstance(radius, (int, float)) else None)}"
 
@@ -636,7 +638,8 @@ class UIManager:
                     h.zigzag_inspection       = False
                     h.zigzag_degree           = 45.0
                     h.layers                  = 3
-                    h.points_per_layer        = 4
+                    # ร่องเปิด: จุดผนังข้าง 6 จุด = 3 สถานี (หัว-กลาง-ท้าย); รูทั่วไป 4 จุด
+                    h.points_per_layer        = 6 if getattr(getattr(h, '_step_hole', None), 'shape', '') == 'channel' else 4
 
             self.inspection_selected_holes = [i for i, h in enumerate(self.current_holes) if h.selected_for_inspection]
         else:
@@ -948,7 +951,9 @@ class UIManager:
 
             row2 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row2.pack(fill="x", padx=10, pady=(5,0))
-            ctk.CTkLabel(row2, text="Points/Layer:", text_color=theme.TEXT_SECONDARY).pack(side="left")
+            is_channel = getattr(getattr(hole, '_step_hole', None), 'shape', 'circle') == 'channel'
+            ctk.CTkLabel(row2, text=("Wall points/Layer:" if is_channel else "Points/Layer:"),
+                         text_color=theme.TEXT_SECONDARY).pack(side="left")
             opt_points = ctk.CTkOptionMenu(row2, values=["4","6","8","12"], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_points.set(str(hole.points_per_layer))
@@ -958,7 +963,8 @@ class UIManager:
             zig_var = ctk.BooleanVar(value=hole.zigzag_inspection)
             chk_zig = ctk.CTkCheckBox(setting_frame, text="↕ Zigzag Inspection", text_color=theme.TEXT_SECONDARY, variable=zig_var,
                                       command=lambda: self._on_zigzag_toggle(idx, zig_var))
-            chk_zig.pack(anchor="w", padx=10, pady=(10,5))
+            if not is_channel:   # ร่องเปิด: จุดเรียงตามความยาวร่อง ไม่มีมุม zigzag
+                chk_zig.pack(anchor="w", padx=10, pady=(10,5))
             widgets['chk_zigzag'] = chk_zig
 
             df = ctk.CTkFrame(setting_frame, fg_color="transparent")
@@ -977,8 +983,15 @@ class UIManager:
     def _hole_size_lines(hole) -> str:
         """บรรทัดขนาดในการ์ด Properties (v18: แยกรูกลม / ช่องสี่เหลี่ยม)"""
         sh = getattr(hole, '_step_hole', None)
+        if getattr(sh, 'shape', 'circle') == 'channel':
+            ends = {0: "both ends open", 1: "one closed end"}.get(len(sh.closed_ends), "both ends closed")
+            return (f"{sh.kind_text}\n"
+                    f"Length {sh.half_len * 2:.2f} mm, width {sh.half_v * 2:.2f} mm at top\n"
+                    f"Probed: side walls at stations along the length, {ends}\n")
         if getattr(sh, 'shape', 'circle') != 'rect':
-            return f"Dia   {hole.radius * 2:.2f} mm\n"
+            note = ("  (probe points skip the channel openings)\n"
+                    if getattr(sh, 'blocked_dirs', None) else "")
+            return f"Dia   {hole.radius * 2:.2f} mm\n" + note
         if sh.is_slot:
             return (f"Pocket {sh.kind_text}, R{sh.corner_radius:.2f} ends\n"
                     f"Size  {sh.half_u * 2:.2f} x {sh.half_v * 2:.2f} mm\n")

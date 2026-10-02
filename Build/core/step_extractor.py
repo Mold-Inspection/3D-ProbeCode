@@ -59,8 +59,9 @@ import math
 import copy
 import os
 import datetime
-from core.models import StepHole, HoleSegment
+from core.models import StepHole, HoleSegment, flip_radius_profile
 from core.pocket_extractor import extract_rect_pockets
+from core.channel_extractor import extract_channels
 
 DEBUG = True
 
@@ -385,6 +386,111 @@ def _is_hole_wall(face, geom_type):
         return None
 
 
+_PROFILE_SAMPLES = 25   # จำนวนระดับความลึกที่วัดรัศมีจริงต่อรู/segment — ปรับได้
+_PROFILE_DIRS    = 12   # จำนวนทิศรอบแกนที่ยิงเส้นต่อระดับ (ใช้ค่ามัธยฐาน) — ปรับได้
+
+
+def _measure_radius_profiles(holes, step_data, mesh_centroid):
+    """วัด "รัศมีจริง" ของรูกลมจาก B-Rep ทุกระดับความลึก แทนสูตรเส้นตรงระหว่างปาก-ก้น
+
+    เดิม radius_at(t) ลากเส้นตรงจากรัศมีปากถึงรัศมีก้น — ถูกเฉพาะผนังตรง/กรวย ส่วนที่
+    เป็นมุมโค้ง (torus fillet), ก้นกลม (sphere) หรือผิวอิสระ จุดโพรบที่คาดหวังจะเพี้ยน
+    จากผิวจริง (เช่น ก้นมนของบ่อ runner ใน 1.stp เพี้ยน 0.4–0.6 mm)
+    ที่นี่ยิงเส้นจากแกนรูออกไปรอบทิศ _PROFILE_DIRS ทิศ ที่ _PROFILE_SAMPLES ระดับ
+    แล้วใช้ค่ามัธยฐาน (ทนต่อทิศที่ตรงกับปากร่อง/รูข้าง ซึ่งไม่มีผนัง) — ทำกับระดับรู
+    (รู 1 segment) หรือแยกทุก segment (รูหลายขั้น) ตามที่ path planning ใช้จริง"""
+    if not holes:
+        return
+    from core.channel_extractor import _Rays
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+    from core.gcode_generator import _orthonormal_basis
+
+    cen = np.asarray(mesh_centroid, dtype=float)
+    faces = [(f, f.BoundingBox()) for f in step_data.faces().vals()]
+
+    def local_rays(lo, hi):
+        """ตัวยิงเส้นเฉพาะผิวที่อยู่ใกล้รูนี้ — เร็วกว่ายิงใส่ทั้งชิ้นหลายสิบเท่า"""
+        comp, builder = TopoDS_Compound(), BRep_Builder()
+        builder.MakeCompound(comp)
+        n = 0
+        for f, bb in faces:
+            if (bb.xmax >= lo[0] and bb.xmin <= hi[0] and bb.ymax >= lo[1] and bb.ymin <= hi[1]
+                    and bb.zmax >= lo[2] and bb.zmin <= hi[2]):
+                builder.Add(comp, f.wrapped)
+                n += 1
+        return _Rays(comp) if n else None
+
+    def profile(rays, o, d, r_lin_open, r_lin_deep, r_max):
+        o = np.asarray(o, dtype=float) + cen
+        d = np.asarray(d, dtype=float) + cen
+        length = float(np.linalg.norm(d - o))
+        if length < 1e-6:
+            return None
+        axis, u, v = _orthonormal_basis(d - o)
+        eps = min(0.02 / length, 0.01)
+        angles = np.linspace(0.0, 2 * np.pi, _PROFILE_DIRS, endpoint=False)
+        ts = np.linspace(0.0, 1.0, _PROFILE_SAMPLES)
+        rs, measured = [], 0
+        for t in ts:
+            p = o + float(np.clip(t, eps, 1.0 - eps)) * (d - o)
+            hits = [rays.dist(p, np.cos(a) * u + np.sin(a) * v, max_d=2.0 * r_max + 5.0) for a in angles]
+            hits = [x for x in hits if x is not None]
+            if len(hits) >= _PROFILE_DIRS // 2:
+                rs.append(float(np.median(hits)))
+                measured += 1
+            else:   # วัดไม่ได้ที่ระดับนี้ (เช่นปากรูทะลุออกด้านข้าง) — ใช้สูตรเดิม
+                rs.append(r_lin_open + float(t) * (r_lin_deep - r_lin_open))
+        return (ts, np.array(rs)) if measured else None
+
+    for h in holes:
+        if getattr(h, 'shape', 'circle') != 'circle':
+            continue
+        try:
+            r_max = h.outer_radius
+            pts = np.array([h.open_3d, h.deep_3d], dtype=float) + cen
+            rays = local_rays(pts.min(axis=0) - r_max - 2.0, pts.max(axis=0) + r_max + 2.0)
+            if rays is None:
+                continue
+            if len(h.segments) <= 1:
+                h.radius_profile = profile(rays, h.open_3d, h.deep_3d, h.radius_open, h.radius_deep, r_max)
+            for seg in h.segments:
+                seg.radius_profile = profile(rays, seg.open_3d, seg.deep_3d,
+                                             seg.radius_open, seg.radius_deep, r_max)
+        except Exception as e:
+            _dbg(f"radius profile failed for hole at {h.open_3d}: {e!r}")
+
+
+def _mark_channel_openings(holes, openings):
+    """รูกลมที่มีร่องเปิดวิ่งเข้ามา (เช่น บ่อกลาง runner) — ตรงปากร่องไม่มีผนัง ถ้าวาง
+    จุดโพรบตรงนั้น โพรบจะเดินทะลุเข้าไปในร่องโดยไม่แตะอะไร จึงบันทึก "มุมที่ห้ามโพรบ"
+    ไว้ที่ h.blocked_dirs = [(ทิศจากแกนรูไปหาปากร่อง, ครึ่งมุมที่ห้าม rad), ...]
+    core/gcode_generator.py::_layer_contacts() เลื่อนจุดที่ตกในช่วงนี้ออกไปที่ขอบช่วง"""
+    for h in holes:
+        if getattr(h, 'shape', 'circle') != 'circle':
+            continue
+        o = np.array(h.open_3d, dtype=float)
+        a = np.array(h.deep_3d, dtype=float) - o
+        if np.linalg.norm(a) < 1e-9:
+            continue
+        a /= np.linalg.norm(a)
+        r_hole = h.outer_radius
+        blocked = []
+        for pt, _dir_into_channel, w in openings:
+            rel = np.array(pt, dtype=float) - o
+            along = float(np.dot(rel, a))
+            perp = rel - along * a
+            dist = float(np.linalg.norm(perp))
+            if dist < 1e-6 or dist > r_hole + w + 0.5 or not (-1.0 <= along <= h.depth + 1.0):
+                continue
+            half = math.asin(min(1.0, (w + 0.5) / max(dist, r_hole))) + math.radians(3.0)
+            blocked.append((tuple(perp / dist), half))
+        if blocked:
+            h.blocked_dirs = blocked
+            _dbg(f"hole at {tuple(round(c, 1) for c in o)}: {len(blocked)} channel opening(s) — "
+                 f"no probe points within ±{math.degrees(blocked[0][1]):.0f}° of them")
+
+
 class StepExtractor:
     def __init__(self):
         self._step_holes_cache = []
@@ -406,9 +512,21 @@ class StepExtractor:
             _dbg(f"rectangular pocket extraction failed: {e!r}")
             pockets, corner_faces = [], []
 
+        # ร่องเปิด (runner) — ผิวโค้งของร่องไม่ใช่รูกลม ต้องข้าม (core/channel_extractor.py)
+        try:
+            channels, channel_faces, channel_openings = extract_channels(
+                step_data, mesh_centroid, log=_dbg, exclude_faces=corner_faces)
+        except Exception as e:
+            _dbg(f"channel extraction failed: {e!r}")
+            channels, channel_faces, channel_openings = [], [], []
+
         for face in step_data.faces().vals():
             total_faces += 1
             geom_type = face.geomType()
+
+            if any(face.isSame(cf) for cf in channel_faces):
+                _dbg(f"SKIP face#{total_faces} ({geom_type}): part of an open channel (runner)")
+                continue
 
             if geom_type not in ('CYLINDER', 'CONE', 'TORUS', 'SPHERE'):
                 continue
@@ -543,6 +661,43 @@ class StepExtractor:
                          f"r_open={r_a:.2f} r_deep={r_b:.2f}")
                 except Exception as e:
                     _dbg(f"Torus analytical extraction failed face#{total_faces}: {e!r}")
+
+            elif geom_type == 'CONE':
+                # ผิวกรวย (countersink / ผนัง draft) — เดิมไม่มีวิธีวิเคราะห์ตรง ตกไปใช้
+                # วิธีขอบวงกลมซึ่งพังเมื่อขอบของกรวยถูกตัด (เช่นมีร่องวิ่งเข้ามา) ได้ความลึกผิด
+                try:
+                    from OCP.BRepAdaptor import BRepAdaptor_Surface
+                    cone = BRepAdaptor_Surface(face.wrapped).Cone()
+                    ax1 = cone.Axis()
+                    loc, d = ax1.Location(), ax1.Direction()
+                    c0 = np.array([loc.X() - cx_off, loc.Y() - cy_off, loc.Z() - cz_off])
+                    axis_vec = np.array([d.X(), d.Y(), d.Z()])
+                    axis_vec = axis_vec / np.linalg.norm(axis_vec)
+                    tan_a = math.tan(cone.SemiAngle())
+                    r_ref = float(cone.RefRadius())
+                    projs = []
+                    for f_edge in face.Edges():
+                        for t in (0.0, 0.25, 0.5, 0.75, 1.0):
+                            try:
+                                pt = f_edge.positionAt(t)
+                                vec = np.array([pt.x - cx_off, pt.y - cy_off, pt.z - cz_off]) - c0
+                                projs.append(float(np.dot(vec, axis_vec)))
+                            except Exception:
+                                pass
+                    if not projs:
+                        raise ValueError("No edge samples found on cone face")
+                    min_p, max_p = min(projs), max(projs)
+                    face_depth = max_p - min_p
+                    end_a = tuple(c0 + min_p * axis_vec)
+                    end_b = tuple(c0 + max_p * axis_vec)
+                    r_a = r_ref + min_p * tan_a   # รัศมีกรวยที่ระยะตามแกน h = RefRadius + h·tan(semi-angle)
+                    r_b = r_ref + max_p * tan_a
+                    ax, ay, az = axis_vec
+                    analytical_success = True
+                    _dbg(f"CONE ANALYTICAL SUCCESS face#{total_faces}: depth={face_depth:.2f} "
+                         f"r_a={r_a:.2f} r_b={r_b:.2f} semi-angle={math.degrees(cone.SemiAngle()):.1f}")
+                except Exception as e:
+                    _dbg(f"Cone analytical extraction failed face#{total_faces}: {e!r}")
 
             elif geom_type == 'SPHERE':
                 try:
@@ -719,15 +874,20 @@ class StepExtractor:
 
         holes = _merge_half_faces(holes)
         holes = _merge_counterbores(holes)
+        _mark_channel_openings(holes, channel_openings)
         holes += pockets   # v03: ต่อท้ายหลัง merge — ช่องสี่เหลี่ยมไม่ merge กับรูกลม
+        holes += channels  # ร่องเปิด (runner) — แยกเป็นรายการของตัวเอง
         for h in holes:
             _orient_segments_by_mesh(h, mesh)
             _order_segments_deepest_first(h)          # v01: always run — mesh-independent, keeps segments[0] = deepest
             _orient_each_segment_to_hole_mouth(h)      # v02: always run — keeps radius_open facing the hole's true mouth per segment
 
+        # รัศมีจริงทุกระดับความลึก — ต้องวัดหลังจัดทิศปาก/ก้นของรูและ segment เสร็จแล้ว
+        _measure_radius_profiles(holes, step_data, mesh_centroid)
+
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)} "
-              f"(incl. {len(pockets)} rectangular pocket(s); "
+              f"(incl. {len(pockets)} rectangular pocket(s), {len(channels)} open channel(s); "
               f"{skipped_convex} convex outer surface(s) ignored)")
         return holes
 
@@ -794,6 +954,8 @@ class StepExtractor:
                 open_depth, deep_depth, display_x, display_y = d_b, d_a, dx_b, dy_b
                 hc.open_3d, hc.deep_3d = hc.deep_3d, hc.open_3d
                 hc.radius_open, hc.radius_deep = hc.radius_deep, hc.radius_open
+                hc.radius = hc.radius_open   # FIX: ขนาดที่แสดง (hole list/Properties) ต้องเป็นปากรูฝั่งกล้อง
+                flip_radius_profile(hc)
                 
                 # 2. แก้ไขจุดที่เป็นบั๊ก: สลับ Segment ย่อยทั้งหมดให้ตรงกับปากรูใหม่
                 hc.segments.reverse() # สลับ Segment เดิมที่ลึกสุด ให้ขึ้นมาตื้นสุด
@@ -801,6 +963,7 @@ class StepExtractor:
                     # สลับ open/deep ของแต่ละ Segment ให้สอดคล้องกับทิศทางใหม่
                     seg.open_3d, seg.deep_3d = seg.deep_3d, seg.open_3d
                     seg.radius_open, seg.radius_deep = seg.radius_deep, seg.radius_open
+                    flip_radius_profile(seg)
 
             actual_depth = deep_depth - open_depth
 

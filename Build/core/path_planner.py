@@ -51,7 +51,10 @@ class PathPlanner:
         t_vals = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
         o = np.array(hole.open_3d)
         d = np.array(hole.deep_3d)
-        is_rect = getattr(hole, 'shape', 'circle') == 'rect'
+        # ช่องสี่เหลี่ยม / ร่องเปิด / รูที่มีร่องวิ่งเข้ามา: จุดไม่ได้เรียงเป็นวงกลมธรรมดา —
+        # คำนวณด้วย _layer_contacts() ตัวเดียวกับ G-code ให้ preview ตรงกับเครื่องจริง
+        is_rect = (getattr(hole, 'shape', 'circle') in ('rect', 'channel')
+                   or bool(getattr(hole, 'blocked_dirs', None)))
 
         layers = []
         for layer_idx, t in enumerate(t_vals):
@@ -73,24 +76,33 @@ class PathPlanner:
             if is_rect:
                 layer['contacts_display'] = self._rect_contacts_display(
                     hole, pt, angle_offset, points_per_layer, projector,
-                    view_name, screen_rot)
+                    view_name, screen_rot, t=t, radius=r_layer)
             layers.append(layer)
         return layers
 
     @staticmethod
     def _rect_contacts_display(hole, center, angle_offset, n_points,
-                               projector, view_name, screen_rot) -> list:
-        """v03: จุดเริ่ม/จุดสัมผัสผนังของช่องสี่เหลี่ยม 1 layer ในพิกัดจอ"""
-        from core.gcode_generator import _layer_contacts, _orthonormal_basis
+                               projector, view_name, screen_rot, t=0.5, radius=None) -> list:
+        """v03: จุดเริ่ม/จุดสัมผัสผนังของ 1 layer ในพิกัดจอ — ช่องสี่เหลี่ยม,
+        ร่องเปิด (channel) และรูกลมที่มีมุมห้ามโพรบ (ปากร่องที่วิ่งเข้ามา)"""
+        from core.gcode_generator import _layer_contacts, _orthonormal_basis, channel_layer_fields
 
-        axis, _, _ = _orthonormal_basis(np.array(hole.deep_3d) - np.array(hole.open_3d))
-        u = np.array(hole.u_dir, dtype=float)
-        u = u - float(np.dot(u, axis)) * axis
-        u /= np.linalg.norm(u)
-        lyr = dict(shape='rect', center=np.array(center), u=u, v=np.cross(axis, u),
+        axis, u, v = _orthonormal_basis(np.array(hole.deep_3d) - np.array(hole.open_3d))
+        shape = getattr(hole, 'shape', 'circle')
+        if shape in ('rect', 'channel'):
+            u = np.array(hole.u_dir, dtype=float)
+            u = u - float(np.dot(u, axis)) * axis
+            u /= np.linalg.norm(u)
+            v = np.cross(axis, u)
+        lyr = dict(center=np.array(center), u=u, v=v,
                    angle_offset=angle_offset, points_n=n_points,
-                   half_u=hole.half_u, half_v=hole.half_v,
-                   corner_radius=hole.corner_radius)
+                   radius=radius if radius is not None else hole.radius_at(t),
+                   blocked=getattr(hole, 'blocked_dirs', None))
+        if shape == 'rect':
+            lyr.update(shape='rect', half_u=hole.half_u, half_v=hole.half_v,
+                       corner_radius=hole.corner_radius)
+        elif shape == 'channel':
+            lyr.update(channel_layer_fields(hole, t))
 
         def proj(p):
             return projector.project_point_to_view(*p, view_name, screen_rot)
@@ -147,7 +159,7 @@ class PathPlanner:
                 angle_offset  = (np.radians(seg_local_idx * cfg.zigzag_degree)
                                  if cfg.zigzag_inspection else 0.0)
 
-                layers.append({
+                layer = {
                     'z_display':        depth,
                     'x_display':        dx,
                     'y_display':        dy,
@@ -157,7 +169,12 @@ class PathPlanner:
                     'seg_idx':          seg_idx,
                     'seg_local_idx':    seg_local_idx,
                     'points_per_layer': cfg.points_per_layer,
-                })
+                }
+                if getattr(hole, 'blocked_dirs', None):   # รูที่มีร่องวิ่งเข้ามา
+                    layer['contacts_display'] = self._rect_contacts_display(
+                        hole, pt, angle_offset, cfg.points_per_layer, projector,
+                        view_name, screen_rot, t=t, radius=r_layer)
+                layers.append(layer)
                 global_idx += 1
 
         return layers

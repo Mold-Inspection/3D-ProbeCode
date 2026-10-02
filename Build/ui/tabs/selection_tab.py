@@ -246,7 +246,7 @@ class SelectionTab:
                 dx, dy, dd = projector.project_point_to_view(
                     *sh.deep_3d, view_name, screen_rot)
                 # ช่องสี่เหลี่ยมใช้รัศมีวงกลมที่ครอบมุม ไม่ใช่ครึ่งด้านแคบ
-                r_hit = (sh.outer_radius if getattr(sh, 'shape', 'circle') == 'rect'
+                r_hit = (sh.outer_radius if getattr(sh, 'shape', 'circle') in ('rect', 'channel')
                          else sh.radius_open)
                 if od <= dd:
                     projected.append((ox, oy, od, dd, r_hit))
