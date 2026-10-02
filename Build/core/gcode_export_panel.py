@@ -69,7 +69,7 @@ import os
 import customtkinter as ctk
 
 from core.gcode_generator import (GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height,
-                                  probe_safety_report, gcode_extents)
+                                  probe_safety_report, gcode_extents, contact_plan_report)
 from core.expected_points_io import export_schema_json
 from core.axis_test import (AxisTestSettings, generate_axis_test_gcode,
                             hole_centers_from_view, generate_hole_center_test_gcode)
@@ -480,6 +480,28 @@ class GCodeExportPanel:
         return ([h for h in selected if id(h) not in bad],
                 [str(getattr(h, 'display_id', '?')) for h, _ in problems])
 
+    def _no_wall_ok(self, selected, view_name: str) -> bool:
+        """เตือนถ้ามีจุดโพรบที่ไม่มีผนังให้แตะ (ผนังมีช่วงเปิด) — จุดพวกนี้ถูกตัดออกจาก G-code"""
+        rot = getattr(self.app, 'screen_rotation', 0)
+        lines = []
+        for h in selected:
+            try:
+                rep = contact_plan_report(h, view_name, rot)
+            except Exception:
+                continue
+            if rep['skipped'] and rep['skipped'] >= rep['total']:
+                lines.append(f"\u2022 Hole {getattr(h, 'display_id', '?')}: no wall to touch at all (deselect it)")
+            elif rep['skipped']:
+                lines.append(f"\u2022 Hole {getattr(h, 'display_id', '?')}: {rep['skipped']} point(s), "
+                             f"layer {', '.join(map(str, rep['skipped_layers']))}")
+        if not lines:
+            return True
+        return self.dialog.askyesno(
+            "Some points have no wall to touch",
+            "These probe points fall in an opening of the wall even after rotating the pattern, "
+            "so they are left out of the G-code:\n\n" + "\n".join(lines[:12]) +
+            "\n\nChange Points/Layer or Zigzag in Properties to place them on a wall. Export anyway?")
+
     def _travel_ok(self, gcode_text: str) -> bool:
         """เตือนถ้าโปรแกรมสั่งเดินไกลกว่าระยะเดินของเครื่อง (Hardware Setting → Machine
         Working Area) — เทียบ "ความยาวช่วง" ต่อแกน เพราะไม่รู้ว่าจุด zero อยู่ตรงไหนของโต๊ะ"""
@@ -539,6 +561,8 @@ class GCodeExportPanel:
             return
 
         view_name = self._resolve_view_name()
+        if not self._no_wall_ok(selected, view_name):
+            return
 
         try:
             gcode_text, skipped, point_map = generate_gcode(selected, app.probe_profile, settings, view_name,

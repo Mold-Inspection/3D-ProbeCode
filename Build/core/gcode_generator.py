@@ -1,5 +1,11 @@
 # core/gcode_generator.py
-# VERSION: 09
+# VERSION: 10
+# CHANGE LOG (v09 -> v10):
+#   FEATURE: รูกลมที่ผนังมีช่วงเปิด (blocked_dirs: ปากร่อง, รูซ้อนกัน, รอยบาก — วัดจริง
+#   ใน core/step_extractor.py::_wall_gaps) — circle_layer_angles() หมุนชุดจุดทั้ง layer
+#   ไปมุมที่ห่างช่องเปิดที่สุด ถ้ายังไม่พ้นจึงเลื่อนทีละจุด และจุดที่ไม่มีผนังให้แตะจริง ๆ
+#   จะถูกตัดออก (G-code, Schema, preview ตรงกันเพราะใช้ _layer_contacts() ตัวเดียว)
+#   contact_plan_report() สรุปผลให้แผง Properties และหน้า Export แจ้งผู้ใช้
 # CHANGE LOG (v08 -> v09):
 #   FEATURE: Work zero ที่เลือกได้ (core/work_zero.py) — generate_gcode() /
 #   build_point_map() / transform_hole_feature_for_machining() รับ `origin`
@@ -283,6 +289,80 @@ def _avoid_blocked(angles, blocked, u, v) -> np.ndarray:
     return np.array(out)
 
 
+_ROT_STEP_DEG = 1.0    # ความละเอียดการค้นหามุมหมุนชุดจุด
+_ROT_GOOD_DEG = 15.0   # ห่างขอบช่องเปิดเท่านี้ถือว่าดีพอ — แล้วเลือกมุมที่หมุนน้อยที่สุด
+
+
+def _gap_margins(angles, centers) -> np.ndarray:
+    """ระยะเชิงมุม (rad) ของแต่ละจุดถึงขอบช่วงไม่มีผนังที่ใกล้ที่สุด: บวก = อยู่บนผนัง, ลบ = ตกในช่อง"""
+    angles = np.asarray(angles, dtype=float)
+    m = np.full(len(angles), np.inf)
+    for ca, half in centers:
+        if half >= np.pi - 1e-9:   # ไม่มีผนังรอบรูเลย
+            return np.full(len(angles), -np.inf)
+        diff = np.abs((angles - ca + np.pi) % (2 * np.pi) - np.pi)
+        m = np.minimum(m, diff - half)
+    return m
+
+
+def circle_layer_angles(lyr):
+    """มุมจุดโพรบของ layer รูกลม — คืน (angles, มุมที่หมุน rad, mask จุดที่ไม่มีผนังให้แตะ)
+    รูที่ผนังมีช่วงเปิด (lyr['blocked']):
+      1) ทุกจุดอยู่บนผนังอยู่แล้ว → ใช้ตามที่ตั้งไว้ (ไม่หมุน)
+      2) หมุนทั้งชุด (ระยะห่างเท่าเดิม) ไปมุมที่ห่างช่องเปิดที่สุด
+      3) หมุนแล้วยังไม่พ้น → เลื่อนจุดที่เหลือไปขอบผนัง (_avoid_blocked)
+      4) จุดที่ยังไม่มีผนัง หรือถูกเลื่อนไปทับจุดอื่น → ไม่โพรบ (mask = True)"""
+    n = int(lyr['points_n'])
+    base = np.linspace(0, 2 * np.pi, n, endpoint=False) + lyr['angle_offset']
+    blocked = lyr.get('blocked')
+    if not blocked or n <= 0:
+        return base, 0.0, np.zeros(len(base), dtype=bool)
+    u, v = lyr['u'], lyr['v']
+    centers = [(float(np.arctan2(np.dot(dv, v), np.dot(dv, u))), half)
+               for dv, half in ((np.asarray(d, dtype=float), h) for d, h in blocked)]
+    if _gap_margins(base, centers).min() >= 0:
+        return base, 0.0, np.zeros(n, dtype=bool)
+
+    period, good = 2 * np.pi / n, np.radians(_ROT_GOOD_DEG)
+    best_key, best = None, 0.0
+    for d in np.arange(-period / 2, period / 2, np.radians(_ROT_STEP_DEG)):
+        key = (min(float(_gap_margins(base + d, centers).min()), good), -abs(float(d)))
+        if best_key is None or key > best_key:
+            best_key, best = key, float(d)
+    angles = base + best
+    if _gap_margins(angles, centers).min() < 0:
+        angles = _avoid_blocked(angles, blocked, u, v)
+    bad = _gap_margins(angles, centers) < -1e-6
+    tol = np.radians(1.0)
+    for i in range(n):
+        if bad[i]:
+            continue
+        for j in range(i):
+            if not bad[j] and abs((angles[i] - angles[j] + np.pi) % (2 * np.pi) - np.pi) < tol:
+                bad[i] = True
+                break
+    return angles, best, bad
+
+
+def contact_plan_report(hole_feature, view_name: str = "Top", screen_rot: int = 0) -> dict:
+    """สรุปการหลบช่องเปิดในผนังของรูนี้ (ตามค่าที่ตั้งอยู่ตอนนี้) สำหรับแผง Properties และหน้า Export
+    {'rotated_deg': มุมที่หมุนมากสุด, 'skipped': จำนวนจุดที่ไม่มีผนังให้แตะ,
+     'skipped_layers': ลำดับ layer (นับจาก 1) ที่มีจุดถูกตัด, 'total': จำนวนจุดทั้งหมดก่อนตัด}"""
+    rep = {'rotated_deg': 0.0, 'skipped': 0, 'skipped_layers': [], 'total': 0}
+    sh = getattr(hole_feature, '_step_hole', None)
+    if sh is None or not getattr(sh, 'blocked_dirs', None) or getattr(sh, 'shape', 'circle') != 'circle':
+        return rep
+    hf = transform_hole_feature_for_machining(hole_feature, view_name, screen_rot)
+    for lyr in _raw_layers_for_hole(hf):
+        _a, rot, bad = circle_layer_angles(lyr)
+        rep['rotated_deg'] = max(rep['rotated_deg'], abs(float(np.degrees(rot))))
+        rep['total'] += len(bad)
+        if bad.any():
+            rep['skipped'] += int(bad.sum())
+            rep['skipped_layers'].append(lyr['layer_idx'] + 1)
+    return rep
+
+
 def _layer_contacts(lyr) -> list:
     """v07: จุดสัมผัสผนังของ layer เดียว เรียงตามลำดับที่จะถูกโพรบ —
     list ของ (start, normal, wall_dist): โพรบเริ่มที่ start แล้วเดินตาม
@@ -300,10 +380,10 @@ def _layer_contacts(lyr) -> list:
     if lyr.get('shape') == 'channel':
         return _channel_contacts(lyr)
 
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
-    if lyr.get('blocked'):   # รูที่มีร่องวิ่งเข้ามา — ไม่วางจุดตรงปากร่อง
-        angles = _avoid_blocked(angles, lyr['blocked'], u, v)
-    return [(c, np.cos(a) * u + np.sin(a) * v, lyr['radius']) for a in angles]
+    # v10: รูที่ผนังมีช่วงเปิด — หมุน/เลื่อนจุดให้อยู่บนผนัง จุดที่ไม่มีผนังให้แตะถูกตัดออก
+    angles, _rot, bad = circle_layer_angles(lyr)
+    return [(c, np.cos(a) * u + np.sin(a) * v, lyr['radius'])
+            for a, skip in zip(angles, bad) if not skip]
 
 
 # ---------------------------------------------------------------------
