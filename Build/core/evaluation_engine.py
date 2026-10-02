@@ -223,6 +223,8 @@ def _hole_fingerprint(hole) -> str:
     fp = f"{round(float(ox), 2)}_{round(float(oy), 2)}_{round(float(oz), 2)}_{round(float(radius), 3)}_{round(float(depth), 2)}"
     if getattr(sh, 'shape', 'circle') == 'rect':   # v05
         fp += f"_rect{round(sh.half_u * 2, 3)}x{round(sh.half_v * 2, 3)}r{round(sh.corner_radius, 3)}"
+    elif getattr(sh, 'shape', 'circle') == 'channel':
+        fp += f"_chan{round(sh.half_len * 2, 3)}x{round(sh.half_v * 2, 3)}"
     return fp
 
 

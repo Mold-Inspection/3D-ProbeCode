@@ -47,6 +47,25 @@ import numpy as np
 RECT_CONTACT_SPAN = 0.7   # วางจุดภายใน ±70% ของครึ่งความยาวช่วงตรงของแต่ละด้าน — ปรับได้
 
 
+def profile_radius(obj, t: float):
+    """รัศมีจริงจากโมเดล ณ ความลึก t (0 = ปาก, 1 = ก้น) — วัดจาก B-Rep ด้วยการยิงเส้น
+    (core/step_extractor.py::_measure_radius_profiles) เก็บไว้ที่ obj.radius_profile
+    = (t_samples, radii) — คืน None ถ้ายังไม่ได้วัด (ใช้สูตรเส้นตรงเดิมแทน)"""
+    prof = getattr(obj, 'radius_profile', None)
+    if prof is None:
+        return None
+    ts, rs = prof
+    return float(np.interp(float(t), ts, rs))
+
+
+def flip_radius_profile(obj) -> None:
+    """เรียกทุกครั้งที่สลับ open/deep ของรูหรือ segment — profile ต้องกลับด้านตาม"""
+    prof = getattr(obj, 'radius_profile', None)
+    if prof is not None:
+        ts, rs = prof
+        obj.radius_profile = (1.0 - np.asarray(ts)[::-1], np.asarray(rs)[::-1])
+
+
 class HoleSegment:
     """เรขาคณิตดิบของรู 1 ช่วง (segment) ก่อนถูก merge ใน step_extractor.py
     ใช้เป็นข้อมูลอ้างอิงสำหรับ path planning แบบแยกตามขั้น (แต่ละ segment มี
@@ -59,7 +78,11 @@ class HoleSegment:
         self.depth       = float(np.linalg.norm(np.array(deep_3d) - np.array(open_3d)))
 
     def radius_at(self, t: float) -> float:
-        """รัศมี ณ ตำแหน่ง t (0.0=ปาก segment นี้ .. 1.0=ก้น segment นี้)"""
+        """รัศมี ณ ตำแหน่ง t (0.0=ปาก segment นี้ .. 1.0=ก้น segment นี้) — ใช้รัศมีจริงที่วัด
+        จากโมเดล (มุมโค้ง/ก้นมน/กรวย ตามรูปทรงจริง) ถ้ามี ไม่งั้นใช้เส้นตรงระหว่างปาก-ก้น"""
+        r = profile_radius(self, t)
+        if r is not None:
+            return r
         return self.radius_open + t * (self.radius_deep - self.radius_open)
 
 
@@ -161,7 +184,11 @@ class StepHole:
     shape = 'circle'
 
     def radius_at(self, t: float) -> float:
-        """รัศมี ณ ตำแหน่งความลึก t สัดส่วนระหว่าง 0.0 (ปากรู) ถึง 1.0 (ก้นรู)"""
+        """รัศมี ณ ตำแหน่งความลึก t สัดส่วนระหว่าง 0.0 (ปากรู) ถึง 1.0 (ก้นรู) — รัศมีจริง
+        จากโมเดลถ้าวัดไว้ (ดู profile_radius) ไม่งั้นใช้เส้นตรงระหว่างปาก-ก้น"""
+        r = profile_radius(self, t)
+        if r is not None:
+            return r
         return self.radius_open + t * (self.radius_deep - self.radius_open)
 
     @property
@@ -256,6 +283,99 @@ class StepPocket(StepHole):
         if self.is_slot:
             return "slot " + txt
         return txt + (f" R{self.corner_radius:.1f}" if self.corner_radius > 1e-6 else "")
+
+
+class StepChannel(StepHole):
+    """ร่องเปิด (open channel) เช่น runner ของแม่พิมพ์ — ร่องยาวตรง หน้าตัดคงที่
+    เปิดด้านบน (ด้านที่หันหาโพรบ) ปลายแต่ละด้าน "ปิด" (มีผนังปลาย เช่นปลายกลม)
+    หรือ "เปิด" (ร่องวิ่งเข้าไปรวมกับช่อง/รูอื่น ไม่มีผนังให้โพรบ)
+
+    พิกัดทั้งหมดเป็นพิกัดโมเดลที่ย้ายจุดศูนย์กลางมวลไป 0 แล้ว (เหมือน StepHole):
+      open_3d  : จุดบนแนวกึ่งกลางร่อง ที่ระดับผิวบน ตรงกลางความยาว
+      deep_3d  : จุดก้นร่อง ใต้ open_3d
+      u_dir    : ทิศตามความยาวร่อง (หน่วย)
+      half_len : ครึ่งความยาวแนวแกนร่อง (ปลายร่อง = ±half_len ตาม u_dir)
+      station_lo / station_hi : ช่วงตำแหน่ง (ตาม u_dir เทียบกลางร่อง) ที่วางจุดโพรบ
+                 ผนังข้างได้ — เว้นระยะจากปลายเปิด (รอยต่อกับช่องอื่น) และปลายปิด
+      profile_depth / profile_w_plus / profile_w_minus :
+                 ระยะจากแนวกึ่งกลางถึงผนังข้าง (+v / −v) ที่ความลึกต่าง ๆ จากผิวบน
+                 วัดจาก B-Rep จริง (core/channel_extractor.py) — ใช้กับหน้าตัดทุกแบบ
+      closed_ends : {+1 หรือ -1: profile ระยะผนังปลาย} — มีเฉพาะปลายที่ปิด
+                 ระยะวัดจากจุดปลายแกน (±half_len) ออกไปตาม ±u_dir
+    radius     : ครึ่งความกว้างที่ผิวบน (ให้ระบบเดิม: probe fit, hole list ใช้ได้)
+    half_u / half_v : กรอบครอบร่อง (ใช้ร่วมกับโค้ดของช่องสี่เหลี่ยม: mask, hit-test)"""
+    shape = 'channel'
+
+    def __init__(self, open_3d, deep_3d, u_dir, half_len, station_lo, station_hi,
+                 profile_depth, profile_w_plus, profile_w_minus, closed_ends):
+        self.profile_depth   = np.asarray(profile_depth, dtype=float)
+        self.profile_w_plus  = np.asarray(profile_w_plus, dtype=float)
+        self.profile_w_minus = np.asarray(profile_w_minus, dtype=float)
+        w_top = float(max(self.profile_w_plus[0], self.profile_w_minus[0]))
+        w_bot = float(min(self.profile_w_plus[-1], self.profile_w_minus[-1]))
+        axis = np.array(deep_3d, dtype=float) - np.array(open_3d, dtype=float)
+        axis /= max(np.linalg.norm(axis), 1e-12)
+        super().__init__(open_3d, deep_3d, w_top, w_bot, tuple(axis))
+        self.u_dir       = tuple(float(c) for c in u_dir)
+        self.half_len    = float(half_len)
+        self.station_lo  = float(station_lo)
+        self.station_hi  = float(station_hi)
+        self.closed_ends = {int(k): np.asarray(v, dtype=float) for k, v in closed_ends.items()}
+        self.half_u      = self.half_len + w_top
+        self.half_v      = w_top
+
+    # --- ความกว้าง ณ ความลึก t (0 = ผิวบน, 1 = ก้นร่อง) ----------------------
+    def _interp(self, values, t: float) -> float:
+        d = float(np.clip(t, 0.0, 1.0)) * self.depth
+        return float(np.interp(d, self.profile_depth, values))
+
+    def wall_dist(self, t: float, side: int) -> float:
+        """ระยะจากแนวกึ่งกลางถึงผนังข้าง (+1 = ฝั่ง +v, -1 = ฝั่ง -v)"""
+        return self._interp(self.profile_w_plus if side > 0 else self.profile_w_minus, t)
+
+    def end_dist(self, t: float, end: int):
+        """ระยะจากจุดปลายแกนถึงผนังปลาย (None = ปลายเปิด)"""
+        prof = self.closed_ends.get(int(end))
+        return None if prof is None else self._interp(prof, t)
+
+    def radius_at(self, t: float) -> float:
+        return min(self.wall_dist(t, +1), self.wall_dist(t, -1))
+
+    @property
+    def outer_radius(self) -> float:
+        return self.half_u
+
+    @property
+    def kind_text(self) -> str:
+        n_closed = len(self.closed_ends)
+        return {0: "Channel (both ends open)", 1: "Channel (one end open)"}.get(n_closed, "Channel")
+
+    def size_text(self) -> str:
+        return f"channel {self.half_len * 2:.1f}×{self.half_v * 2:.2f}"
+
+    def outlines_3d(self, steps: int = 24) -> list:
+        """ขอบปากร่องที่ระดับผิวบน — ผนังข้าง 2 ด้าน + ปลายปิดเป็นครึ่งวงกลม,
+        ปลายเปิดเป็นเส้นตรง"""
+        o = np.array(self.open_3d, dtype=float)
+        axis = np.array(self.deep_3d, dtype=float) - o
+        axis /= max(np.linalg.norm(axis), 1e-12)
+        u = np.array(self.u_dir, dtype=float)
+        u = u - float(np.dot(u, axis)) * axis
+        u /= np.linalg.norm(u)
+        v = np.cross(axis, u)
+        wp, wm, L = self.wall_dist(0.0, +1), self.wall_dist(0.0, -1), self.half_len
+        pts = [o - L * u + wp * v, o + L * u + wp * v]
+        if +1 in self.closed_ends:
+            for a in np.linspace(np.pi / 2, -np.pi / 2, steps):
+                r = wp if a > 0 else wm
+                pts.append(o + L * u + r * (np.cos(a) * u + np.sin(a) * v))
+        pts += [o + L * u - wm * v, o - L * u - wm * v]
+        if -1 in self.closed_ends:
+            for a in np.linspace(-np.pi / 2, -3 * np.pi / 2, steps):
+                r = wm if np.sin(a) < 0 else wp
+                pts.append(o - L * u + r * (np.cos(a) * u + np.sin(a) * v))
+        pts.append(pts[0])
+        return [np.array(pts)]
 
 
 def rect_wall_contacts(half_u: float, half_v: float, corner_radius: float,

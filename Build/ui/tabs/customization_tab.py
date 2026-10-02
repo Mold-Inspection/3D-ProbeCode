@@ -116,7 +116,7 @@ def _hole_max_radius(h) -> float:
     sh = getattr(h, '_step_hole', None)
     if sh is None:
         return h.radius
-    if getattr(sh, 'shape', 'circle') == 'rect':
+    if getattr(sh, 'shape', 'circle') in ('rect', 'channel'):
         return sh.outer_radius
     candidates = [sh.radius_open, sh.radius_deep]
     for seg in (getattr(sh, 'segments', None) or []):
@@ -130,7 +130,7 @@ def _hole_vertex_mask(app, h, x3, y3, radius, scale, isolate_seg, screen_rot):
     radius*scale; ช่องสี่เหลี่ยม/slot: กรอบสี่เหลี่ยมจริงของช่อง + ระยะขอบ
     (ไม่ใช้วงกลมครอบมุม ซึ่งจะกินพื้นที่รูข้างเคียงด้วย)"""
     sh = getattr(h, '_step_hole', None)
-    if isolate_seg is None and getattr(sh, 'shape', 'circle') == 'rect':
+    if isolate_seg is None and getattr(sh, 'shape', 'circle') in ('rect', 'channel'):
         proj = app.geo.projector.project_point_to_view
         o  = np.array(proj(*sh.open_3d, app.current_view, screen_rot)[:2])
         ud = np.array(proj(*(np.array(sh.open_3d) + np.array(sh.u_dir)),
@@ -569,6 +569,8 @@ class CustomizationTab:
             sh_title   = getattr(hole, '_step_hole', None)
             size_tag   = (f"Pocket {sh_title.size_text()} mm"
                           if getattr(sh_title, 'shape', 'circle') == 'rect'
+                          else f"{sh_title.kind_text} {sh_title.half_len * 2:.1f}x{sh_title.half_v * 2:.2f} mm"
+                          if getattr(sh_title, 'shape', 'circle') == 'channel'
                           else f"R={hole.radius:.1f} mm")
             title_str  = (f"Customization — Hole {hole.display_id}  |  {size_tag}  Depth={hole.depth:.2f} mm  |  "
                           f"{layer_info}" + (' [STEP]' if has_step_hole else ' [Mesh]') + rot_tag + zigzag_tag + probe_tag + isolate_tag)

@@ -150,8 +150,10 @@ def transform_hole_feature_for_machining(hf_orig, view_name, screen_rot: int = 0
         sh.open_3d = pos(sh.open_3d)
         sh.deep_3d = pos(sh.deep_3d)
         sh.axis    = tf(sh.axis)
-        if getattr(sh, 'shape', 'circle') == 'rect':   # v07: ทิศด้านยาวของช่องสี่เหลี่ยม
+        if getattr(sh, 'shape', 'circle') in ('rect', 'channel'):   # ทิศด้านยาวของช่อง/ร่อง
             sh.u_dir = tf(sh.u_dir)
+        if getattr(sh, 'blocked_dirs', None):   # ทิศปากร่องที่วิ่งเข้ารูนี้ (ห้ามวางจุดโพรบ)
+            sh.blocked_dirs = [(tuple(tf(dv)), half) for dv, half in sh.blocked_dirs]
         for seg in getattr(sh, 'segments', []):
             seg.open_3d = pos(seg.open_3d)
             seg.deep_3d = pos(seg.deep_3d)
@@ -196,11 +198,12 @@ def _raw_layers_for_hole(hole_feature):
                 layers.append(dict(
                     seg_idx=seg_idx, center=center, radius=r,
                     axis=axis, u=u, v=v, angle_offset=offset,
-                    points_n=cfg.points_per_layer))
+                    points_n=cfg.points_per_layer,
+                    blocked=getattr(sh, 'blocked_dirs', None)))
     else:
         axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
-        if getattr(sh, 'shape', 'circle') == 'rect':
-            # v07: ฐาน u/v ของช่องสี่เหลี่ยมต้องตรงกับแนวผนังจริง
+        if getattr(sh, 'shape', 'circle') in ('rect', 'channel'):
+            # v07: ฐาน u/v ของช่องสี่เหลี่ยม/ร่องต้องตรงกับแนวผนังจริง
             u = np.array(sh.u_dir, dtype=float)
             u = u - float(np.dot(u, axis)) * axis
             u /= np.linalg.norm(u)
@@ -218,10 +221,13 @@ def _raw_layers_for_hole(hole_feature):
             lyr = dict(
                 seg_idx=0, center=center, radius=r,
                 axis=axis, u=u, v=v, angle_offset=offset,
-                points_n=hole_feature.points_per_layer)
+                points_n=hole_feature.points_per_layer,
+                blocked=getattr(sh, 'blocked_dirs', None))
             if getattr(sh, 'shape', 'circle') == 'rect':
                 lyr.update(shape='rect', half_u=sh.half_u, half_v=sh.half_v,
                            corner_radius=sh.corner_radius)
+            elif getattr(sh, 'shape', 'circle') == 'channel':
+                lyr.update(channel_layer_fields(sh, t))
             layers.append(lyr)
 
     # จัดเรียงลำดับชั้นจาก "บนลงล่าง" (Top to Bottom) เสมอ
@@ -232,6 +238,50 @@ def _raw_layers_for_hole(hole_feature):
         lyr['layer_idx'] = i
 
     return layers
+
+def channel_layer_fields(sh, t: float) -> dict:
+    """ค่าของ layer ร่องเปิด (StepChannel) ที่ความลึก t — ใช้ร่วมกับ preview
+    (core/path_planner.py) ให้จุดตรงกับ G-code เป๊ะ"""
+    return dict(shape='channel', half_len=sh.half_len,
+                station_lo=sh.station_lo, station_hi=sh.station_hi,
+                w_plus=sh.wall_dist(t, +1), w_minus=sh.wall_dist(t, -1),
+                end_pos=sh.end_dist(t, +1), end_neg=sh.end_dist(t, -1))
+
+
+def _channel_contacts(lyr) -> list:
+    """ร่องเปิด: จุดสถานี (station) เรียงตามความยาวร่อง แต่ละสถานีแตะผนังข้าง 2 ด้าน
+    (+v แล้ว −v) เริ่มจากแนวกึ่งกลางร่อง + แตะผนังปลายที่ปิดอีกด้านละ 1 จุด
+    จำนวนสถานี = points_per_layer // 2 (ขั้นต่ำ 1) — ปลายเปิดไม่มีจุดโพรบ
+    (โพรบจะวิ่งเข้าไปในช่องที่ร่องต่ออยู่โดยไม่แตะอะไร)"""
+    c, u, v = lyr['center'], lyr['u'], lyr['v']
+    n_st = max(1, int(lyr['points_n']) // 2)
+    lo, hi = lyr['station_lo'], lyr['station_hi']
+    stations = [0.5 * (lo + hi)] if (n_st == 1 or hi - lo < 1e-6) else np.linspace(lo, hi, n_st)
+    out = []
+    for s in stations:
+        start = c + float(s) * u
+        out.append((start, v, lyr['w_plus']))
+        out.append((start, -v, lyr['w_minus']))
+    for sign, key in ((+1, 'end_pos'), (-1, 'end_neg')):
+        e = lyr.get(key)
+        if e is not None:
+            out.append((c + sign * lyr['half_len'] * u, sign * u, e))
+    return out
+
+
+def _avoid_blocked(angles, blocked, u, v) -> np.ndarray:
+    """เลื่อนมุมจุดโพรบที่ตกในช่วงปากร่อง (ไม่มีผนัง) ออกไปที่ขอบช่วงที่ใกล้กว่า"""
+    centers = [(float(np.arctan2(np.dot(dv, v), np.dot(dv, u))), half)
+               for dv, half in ((np.asarray(d, dtype=float), h) for d, h in blocked)]
+    out = []
+    for a in angles:
+        for ca, half in centers:
+            diff = (a - ca + np.pi) % (2 * np.pi) - np.pi
+            if abs(diff) < half:
+                a = ca + (half if diff >= 0 else -half)
+        out.append(a)
+    return np.array(out)
+
 
 def _layer_contacts(lyr) -> list:
     """v07: จุดสัมผัสผนังของ layer เดียว เรียงตามลำดับที่จะถูกโพรบ —
@@ -247,7 +297,12 @@ def _layer_contacts(lyr) -> list:
                 for su, sv, nu, nv, dist in rect_wall_contacts(
                     lyr['half_u'], lyr['half_v'], lyr['corner_radius'], n, phase)]
 
+    if lyr.get('shape') == 'channel':
+        return _channel_contacts(lyr)
+
     angles = np.linspace(0, 2 * np.pi, n, endpoint=False) + offset
+    if lyr.get('blocked'):   # รูที่มีร่องวิ่งเข้ามา — ไม่วางจุดตรงปากร่อง
+        angles = _avoid_blocked(angles, lyr['blocked'], u, v)
     return [(c, np.cos(a) * u + np.sin(a) * v, lyr['radius']) for a in angles]
 
 
@@ -276,8 +331,14 @@ def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
             continue
         mouth = np.array(sh.open_3d, dtype=float)
         depth = max(float(np.linalg.norm(np.asarray(l['center']) - mouth)) for l in layers)
-        narrow = min((min(l['half_u'], l['half_v']) if l.get('shape') == 'rect' else float(l['radius']))
-                     for l in layers)
+        def _narrowest(l):
+            if l.get('shape') == 'rect':
+                return min(l['half_u'], l['half_v'])
+            if l.get('shape') == 'channel':   # ผนังข้าง 2 ด้าน + ผนังปลายที่ปิด
+                return min([l['w_plus'], l['w_minus']] +
+                           [e for e in (l.get('end_pos'), l.get('end_neg')) if e is not None])
+            return float(l['radius'])
+        narrow = min(_narrowest(l) for l in layers)
         room = narrow - tip_r   # ระยะที่จุดศูนย์กลางหัวโพรบเดินได้จากกลาง layer ถึงจุดแตะผนัง
         reasons = []
         if depth > stylus:
