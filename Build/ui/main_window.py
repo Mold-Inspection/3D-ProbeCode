@@ -916,7 +916,13 @@ class UIManager:
                   f"Depth {hole.depth:.2f} mm\n"
                   f"X {hole.x:.2f}   Y {hole.y:.2f}")
         ).pack(fill="x", padx=10, pady=(2, 6))
-        ctk.CTkFrame(setting_frame, height=1, fg_color=theme.BORDER, corner_radius=0).pack(fill="x", padx=10, pady=(0, 4))
+        sep = ctk.CTkFrame(setting_frame, height=1, fg_color=theme.BORDER, corner_radius=0)
+        sep.pack(fill="x", padx=10, pady=(0, 4))
+        # สถานะจุดโพรบที่หลบช่องเปิดในผนัง (หมุนอัตโนมัติ / จุดที่ไม่มีผนังให้แตะ)
+        widgets['contact_anchor'] = sep
+        widgets['lbl_contact'] = ctk.CTkLabel(setting_frame, text="", anchor="w", justify="left",
+                                              font=("", 11, "bold"), wraplength=_RIGHT_WIDTH - 70)
+        self._refresh_contact_status(idx)
 
         segs_for_warn = getattr(hole, 'segments', None) or []
         size_warnings = [seg.size_warning for seg in segs_for_warn if getattr(seg, 'size_warning', '')]
@@ -979,6 +985,39 @@ class UIManager:
             if hole.zigzag_inspection:
                 df.pack(fill="x", padx=15, pady=(0, 8))
 
+    def _refresh_contact_status(self, idx):
+        """แผง Properties: แจ้งเมื่อจุดโพรบถูกหมุนหลบช่องเปิดในผนังอัตโนมัติ (สีน้ำเงิน)
+        หรือมีจุดที่ไม่มีผนังให้แตะจึงถูกตัดออกจาก G-code (สีแดง) — เรียกทุกครั้งที่ค่าของรูเปลี่ยน"""
+        widgets = self.hole_widgets.get(idx) or {}
+        lbl = widgets.get('lbl_contact')
+        if lbl is None or idx >= len(self.current_holes):
+            return
+        try:
+            from core.gcode_generator import contact_plan_report
+            rep = contact_plan_report(self.current_holes[idx], self.current_view,
+                                      getattr(self, 'screen_rotation', 0))
+        except Exception:
+            lbl.pack_forget()
+            return
+        if rep['skipped'] and rep['skipped'] >= rep['total']:
+            text = ("\u26a0 No wall around this hole for the probe to touch \u2014 all of its points are "
+                    "left out of the G-code. Deselect this hole.")
+            color = theme.ERR_TEXT
+        elif rep['skipped']:
+            text = (f"\u26a0 {rep['skipped']} probe point(s) have no wall to touch "
+                    f"(layer {', '.join(map(str, rep['skipped_layers']))}) and are left out of the G-code. "
+                    f"Change Points/Layer or Zigzag to place them on a wall.")
+            color = theme.ERR_TEXT
+        elif rep['rotated_deg'] >= 0.5:
+            text = (f"\u21bb Probe points auto-rotated {rep['rotated_deg']:.0f}\u00b0 "
+                    f"so every point lands on a wall")
+            color = theme.ACCENT_TEXT
+        else:
+            lbl.pack_forget()
+            return
+        lbl.configure(text=text, text_color=color)
+        lbl.pack(anchor="w", padx=10, pady=(0, 4), after=widgets['contact_anchor'])
+
     @staticmethod
     def _hole_size_lines(hole) -> str:
         """บรรทัดขนาดในการ์ด Properties (v18: แยกรูกลม / ช่องสี่เหลี่ยม)"""
@@ -989,7 +1028,7 @@ class UIManager:
                     f"Length {sh.half_len * 2:.2f} mm, width {sh.half_v * 2:.2f} mm at top\n"
                     f"Probed: side walls at stations along the length, {ends}\n")
         if getattr(sh, 'shape', 'circle') != 'rect':
-            note = ("  (probe points skip the channel openings)\n"
+            note = ("  (wall has openings — probe points avoid them)\n"
                     if getattr(sh, 'blocked_dirs', None) else "")
             return f"Dia   {hole.radius * 2:.2f} mm\n" + note
         if sh.is_slot:
@@ -1110,6 +1149,7 @@ class UIManager:
         widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
         cfg.layers           = int(widgets['opt_layers'].get())
         cfg.points_per_layer = int(widgets['opt_points'].get())
+        self._refresh_contact_status(hole_idx)
         if self.current_tab == "Path Mapper":
             self.path_mapper_tab.draw_path_mapper()
         elif self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
@@ -1119,6 +1159,7 @@ class UIManager:
         if hole_idx >= len(self.current_holes): return
         cfg = self.current_holes[hole_idx].segments[seg_idx]
         cfg.selected_for_inspection = var.get()
+        self._refresh_contact_status(hole_idx)
 
         blk = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
         blk['btn'].configure(fg_color=theme.SELECT_BG if cfg.selected_for_inspection else theme.ERR_BG)
@@ -1132,6 +1173,7 @@ class UIManager:
         if hole_idx >= len(self.current_holes): return
         cfg = self.current_holes[hole_idx].segments[seg_idx]
         cfg.zigzag_inspection = var.get()
+        self._refresh_contact_status(hole_idx)
         widgets = self.hole_widgets[hole_idx]['segment_blocks'][seg_idx]
         df = widgets['degree_frame']
         if cfg.zigzag_inspection:
@@ -1151,6 +1193,7 @@ class UIManager:
         except ValueError:
             val = cfg.zigzag_degree
         cfg.zigzag_degree = val
+        self._refresh_contact_status(hole_idx)
         entry.delete(0, "end")
         entry.insert(0, str(int(val)) if val == int(val) else str(val))
         if self.current_tab == "Customization" and self.selected_hole_idx == hole_idx:
@@ -1247,6 +1290,7 @@ class UIManager:
         if idx >= len(self.current_holes): return
         hole = self.current_holes[idx]
         hole.zigzag_inspection = var.get()
+        self._refresh_contact_status(idx)
         if idx in self.hole_widgets and 'degree_frame' in self.hole_widgets[idx]:
             df = self.hole_widgets[idx]['degree_frame']
             sf = self.hole_widgets[idx]['settings_frame']
@@ -1267,6 +1311,7 @@ class UIManager:
         except ValueError:
             val = hole.zigzag_degree
         hole.zigzag_degree = val
+        self._refresh_contact_status(idx)
         entry.delete(0, "end")
         entry.insert(0, str(int(val)) if val == int(val) else str(val))
 
@@ -1330,6 +1375,7 @@ class UIManager:
         widgets = self.hole_widgets[idx]
         hole.layers           = int(widgets['opt_layers'].get())
         hole.points_per_layer = int(widgets['opt_points'].get())
+        self._refresh_contact_status(idx)
         if self.current_tab == "Path Mapper":
             self.path_mapper_tab.draw_path_mapper()
         elif self.current_tab == "Customization":

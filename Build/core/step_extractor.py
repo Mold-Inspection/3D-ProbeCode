@@ -388,6 +388,77 @@ def _is_hole_wall(face, geom_type):
 
 _PROFILE_SAMPLES = 25   # จำนวนระดับความลึกที่วัดรัศมีจริงต่อรู/segment — ปรับได้
 _PROFILE_DIRS    = 12   # จำนวนทิศรอบแกนที่ยิงเส้นต่อระดับ (ใช้ค่ามัธยฐาน) — ปรับได้
+_GAP_DIRS        = 120  # ทิศรอบแกนที่ยิงหาช่วง "ไม่มีผนัง" (ทุก 3°) — ปรับได้
+_GAP_DEPTHS      = 5    # จำนวนระดับความลึกต่อ segment ที่ตรวจช่วงไม่มีผนัง
+_GAP_MARGIN_DEG  = 2.0  # มุมกันชนเพิ่มจากขอบช่วงที่ไม่มีผนัง
+_GAP_MIN_WALL    = 3    # ผนังต่อเนื่องสั้นกว่านี้ (จำนวนทิศ = 9°) นับเป็นช่องเปิด
+
+
+def _wall_gaps(rays, h, cen):
+    """ช่วงมุมรอบรูที่ "ไม่มีผนังที่ระยะรัศมี" — รูสองรูซ้อนกัน (เช่น 2.stp), รอยบาก,
+    ร่องที่วิ่งเข้ามา: ยิงเส้นจากแกนรูทุก 3° ที่หลายระดับความลึกของทุก segment
+    ทิศที่ไม่ชนอะไร หรือชนห่างจากรัศมีที่คาดไว้เกิน tol คือทิศที่จุดโพรบจะไม่แตะผนัง
+    คืน [(ทิศ 3D จากแกนไปกลางช่วง, ครึ่งมุม rad), ...] รูปแบบเดียวกับ blocked_dirs"""
+    from core.gcode_generator import _orthonormal_basis
+
+    o = np.asarray(h.open_3d, dtype=float)
+    d = np.asarray(h.deep_3d, dtype=float)
+    if np.linalg.norm(d - o) < 1e-6:
+        return []
+    _axis, u, v = _orthonormal_basis(d - o)
+    step = 2.0 * np.pi / _GAP_DIRS
+    angles = np.arange(_GAP_DIRS) * step
+    dirs = [np.cos(a) * u + np.sin(a) * v for a in angles]
+    gap = np.zeros(_GAP_DIRS, dtype=bool)
+    parts = h.segments if len(h.segments) > 1 else [h]
+    for part in parts:
+        po = np.asarray(part.open_3d, dtype=float) + cen
+        pd = np.asarray(part.deep_3d, dtype=float) + cen
+        for t in np.linspace(0.1, 0.9, _GAP_DEPTHS):
+            r = float(part.radius_at(t))
+            tol = max(0.5, 0.03 * r)
+            p = po + t * (pd - po)
+            for k, dv in enumerate(dirs):
+                if gap[k]:
+                    continue
+                hit = rays.dist(p, dv, max_d=r + tol + 1.0)
+                if hit is None or abs(hit - r) > tol:
+                    gap[k] = True
+    if not gap.any():
+        return []
+    # ผนังชิ้นเล็กกว่า _GAP_MIN_WALL ทิศ (เช่น เศษขอบระหว่างช่องเปิดสองช่อง) ไม่น่าเชื่อถือพอ
+    # จะให้โพรบแตะ — นับเป็นช่องเปิดด้วย
+    if not gap.all():
+        start = int(np.argmax(gap))   # เริ่มจากทิศที่เป็นช่อง — ช่วงผนังที่คร่อม 0° จึงไม่ถูกตัด
+        run = []
+        for i in range(_GAP_DIRS + 1):
+            k = (start + i) % _GAP_DIRS
+            if i < _GAP_DIRS and not gap[k]:
+                run.append(k)
+            else:
+                if 0 < len(run) < _GAP_MIN_WALL:
+                    gap[run] = True
+                run = []
+    if gap.all():   # ไม่มีผนังที่แตะได้เลย — ทุกจุดถูกตัดและแจ้งผู้ใช้
+        return [(tuple(u), np.pi)]
+    start = int(np.argmin(gap))   # เริ่มนับจากทิศที่มีผนัง — ช่วงที่คร่อม 0° จึงไม่ถูกตัดครึ่ง
+    runs, cur = [], []
+    for i in range(_GAP_DIRS):
+        k = (start + i) % _GAP_DIRS
+        if gap[k]:
+            cur.append(k)
+        elif cur:
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    out = []
+    for run in runs:
+        mid = angles[run[0]] + (len(run) - 1) * step / 2.0
+        # ขอบจริงอยู่ระหว่างทิศที่ไม่มีผนังกับทิศถัดไปที่มีผนัง → เผื่ออีก 1 step
+        half = (len(run) + 1) * step / 2.0 + np.radians(_GAP_MARGIN_DEG)
+        out.append((tuple(np.cos(mid) * u + np.sin(mid) * v), float(half)))
+    return out
 
 
 def _measure_radius_profiles(holes, step_data, mesh_centroid):
@@ -449,7 +520,8 @@ def _measure_radius_profiles(holes, step_data, mesh_centroid):
         try:
             r_max = h.outer_radius
             pts = np.array([h.open_3d, h.deep_3d], dtype=float) + cen
-            rays = local_rays(pts.min(axis=0) - r_max - 2.0, pts.max(axis=0) + r_max + 2.0)
+            pad = r_max + max(0.5, 0.03 * r_max) + 3.0   # ครอบระยะยิงเส้นของ _wall_gaps ด้วย
+            rays = local_rays(pts.min(axis=0) - pad, pts.max(axis=0) + pad)
             if rays is None:
                 continue
             if len(h.segments) <= 1:
@@ -457,6 +529,11 @@ def _measure_radius_profiles(holes, step_data, mesh_centroid):
             for seg in h.segments:
                 seg.radius_profile = profile(rays, seg.open_3d, seg.deep_3d,
                                              seg.radius_open, seg.radius_deep, r_max)
+            gaps = _wall_gaps(rays, h, cen)   # ต้องวัดหลัง profile (ใช้รัศมีจริงเป็นระยะที่คาดไว้)
+            if gaps:
+                h.blocked_dirs = list(getattr(h, 'blocked_dirs', None) or []) + gaps
+                _dbg(f"hole at {tuple(round(c, 1) for c in h.open_3d)}: {len(gaps)} opening(s) in the wall "
+                     f"(±{', ±'.join(f'{np.degrees(hf):.0f}°' for _d, hf in gaps)}) — probe points avoid them")
         except Exception as e:
             _dbg(f"radius profile failed for hole at {h.open_3d}: {e!r}")
 
