@@ -4,7 +4,14 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 06
+# VERSION: 07
+# CHANGE LOG (v06 -> v07):
+#   FEATURE: ชดเชยรัศมีหัวโพรบ (Probe Radius Compensation) — เครื่องรายงานพิกัด
+#   "จุดศูนย์กลางลูกบอล" ซึ่งห่างผิวจริงเท่ารัศมีลูกบอลเสมอ evaluate_points() รับ
+#   tip_radius_mm แล้วเลื่อนจุดที่วัดได้เข้าหาผนังตามทิศที่โพรบเดิน (nx/ny/nz จาก
+#   build_point_map) ก่อนเทียบ — schema เก่าที่ไม่มีทิศจะได้ compensation='unavailable'
+#   FEATURE: Least-squares circle fit รายชั้นของรูกลม (core/circle_fit.py) — ได้
+#   เส้นผ่าศูนย์กลาง, ระยะเยื้องศูนย์ และความกลม เทียบกับค่าจาก CAD (layer['circle'])
 # CHANGE LOG (v05 -> v06):
 #   build_settings_snapshot() บันทึก 'screen_rot' (การหมุนจอ) และ
 #   diff_snapshots() ถือว่าการหมุนจอที่เปลี่ยนไปตั้งแต่ export = view เปลี่ยน
@@ -69,11 +76,55 @@
 # ==============================================================================
 import math
 
+import numpy as np
+
+from core.circle_fit import fit_circle_3d
+from core.models import clamp_layers
+
+
+def _probe_dir(point):
+    """ทิศที่โพรบเดินเข้าหาผนังของจุดที่คาดหวัง (None ถ้าเป็น schema รุ่นเก่า)"""
+    try:
+        return (float(point['nx']), float(point['ny']), float(point['nz']))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _layer_circle(points: list, tolerance_mm: float):
+    """fit วงกลมให้จุดคาดหวังและจุดที่วัดได้ (ชดเชยแล้ว) ของ 1 layer แล้วเทียบกัน
+    คืน None ถ้าไม่ใช่รูกลมหรือจุดไม่พอ — ใช้จุดดิบ (ศูนย์กลางลูกบอล) อีกชุดเพื่อให้
+    ผู้ใช้คำนวณขนาดหัวโพรบจริงจาก Ring Gauge ได้ (raw_center_diameter)"""
+    if len(points) < 3 or any(p.get('shape', 'circle') != 'circle' for p in points):
+        return None
+    nom = fit_circle_3d([p['expected'] for p in points])
+    mea = fit_circle_3d([p['actual'] for p in points])
+    raw = fit_circle_3d([p['actual_raw'] for p in points])
+    if nom is None or mea is None:
+        return None
+    axis = np.asarray(nom['normal'])
+    d = np.asarray(mea['center']) - np.asarray(nom['center'])
+    d = d - float(np.dot(d, axis)) * axis          # เยื้องศูนย์ในระนาบของชั้นเท่านั้น
+    d_err = mea['diameter'] - nom['diameter']
+    off = float(np.linalg.norm(d))
+    return {
+        'n':                   mea['n'],
+        'nominal_diameter':    nom['diameter'],
+        'measured_diameter':   mea['diameter'],
+        'diameter_error':      d_err,
+        'nominal_center':      nom['center'],
+        'measured_center':     mea['center'],
+        'center_offset':       off,
+        'roundness':           mea['roundness'],
+        'raw_center_diameter': raw['diameter'] if raw else None,
+        'passed':              abs(d_err) <= tolerance_mm and off <= tolerance_mm,
+    }
+
 
 # ==============================================================================
 # 1) evaluate_points()
 # ==============================================================================
-def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: float) -> dict:
+def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: float,
+                    tip_radius_mm: float = 0.0) -> dict:
     """จับคู่ EXPECTED[i] กับ ACTUAL[i] ด้วย sequence index แล้วประเมินผลผ่าน/
     ไม่ผ่านของแต่ละจุดเทียบกับ tolerance (mm, ระยะ 3D Euclidean) จากนั้น
     รวมผลขึ้นเป็นโครงสร้าง layer -> segment -> hole -> รายการจุดที่ไม่ผ่านแบบ
@@ -88,6 +139,8 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
     actual_points   : list ที่ได้จาก core/log_parser.py::parse_openbuilds_log()
                        — แต่ละอันมี x, y, z (เรียงตามลำดับที่เครื่องทำงานจริง)
     tolerance_mm    : ระยะเบี่ยงเบนสูงสุดที่ยังถือว่า "ผ่าน" (mm)
+    tip_radius_mm   : v07 — รัศมีหัวโพรบ (ใช้ค่าที่ calibrate แล้วถ้ามี) สำหรับชดเชย
+                       จุดที่วัดได้ (ศูนย์กลางลูกบอล) ให้เป็นจุดบนผิวชิ้นงาน — 0 = ไม่ชดเชย
 
     Returns
     -------
@@ -101,6 +154,13 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
     total_points = min(len(expected_points), len(actual_points))
     passed_points = 0
 
+    # v07: ชดเชยรัศมีหัวโพรบ — ทำได้เมื่อ schema มีทิศที่โพรบเดินครบทุกจุด
+    r_tip = max(0.0, float(tip_radius_mm or 0.0))
+    has_dirs = total_points > 0 and all(_probe_dir(expected_points[i]) is not None
+                                        for i in range(total_points))
+    comp_on = r_tip > 0.0 and has_dirs
+    compensation = 'on' if comp_on else ('unavailable' if r_tip > 0.0 else 'off')
+
     holes: dict = {}
 
     for i in range(total_points):
@@ -108,7 +168,12 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         act = actual_points[i]
 
         ex, ey, ez = float(exp['x']), float(exp['y']), float(exp['z'])
-        ax_, ay_, az_ = float(act['x']), float(act['y']), float(act['z'])
+        raw = (float(act['x']), float(act['y']), float(act['z']))
+        if comp_on:   # ศูนย์กลางลูกบอล + r × ทิศเข้าหาผนัง = จุดสัมผัสบนผิวงาน
+            n = _probe_dir(exp)
+            ax_, ay_, az_ = raw[0] + r_tip * n[0], raw[1] + r_tip * n[1], raw[2] + r_tip * n[2]
+        else:
+            ax_, ay_, az_ = raw
         dx, dy, dz = ax_ - ex, ay_ - ey, az_ - ez
         distance = math.sqrt(dx * dx + dy * dy + dz * dz)
         passed = distance <= tolerance_mm
@@ -142,7 +207,9 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         layer_entry['points'].append({
             'point_idx':   pt_idx,
             'expected':    (ex, ey, ez),
-            'actual':      (ax_, ay_, az_),
+            'actual':      (ax_, ay_, az_),      # v07: หลังชดเชยรัศมีหัวโพรบแล้ว
+            'actual_raw':  raw,                  # ค่าดิบจากเครื่อง (ศูนย์กลางลูกบอล)
+            'shape':       exp.get('shape', 'circle' if 'nx' in exp else None),
             'delta':       (dx, dy, dz),
             'distance_mm': distance,   # "Offset (mm)" in the UI
             'passed':      passed,
@@ -160,6 +227,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                 layer_entry = seg_entry['_layers'][lyr_idx]
                 layer_entry['points'].sort(key=lambda p: p['point_idx'])
                 layer_entry['passed'] = all(p['passed'] for p in layer_entry['points'])
+                layer_entry['circle'] = _layer_circle(layer_entry['points'], tolerance_mm)   # v07
                 for p in layer_entry['points']:
                     if not p['passed']:
                         failed_point_refs.append({
@@ -189,6 +257,8 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
 
     return {
         'tolerance_mm':       tolerance_mm,
+        'tip_radius_mm':      r_tip if comp_on else 0.0,   # v07
+        'compensation':       compensation,                # 'on' / 'off' / 'unavailable'
         'total_points':       total_points,
         'passed_points':      passed_points,
         'failed_points':      failed_points,
@@ -424,13 +494,13 @@ def apply_settings_snapshot(holes: list, snapshot: dict, full_replace: bool = Tr
                 if si is None or si >= len(segs):
                     continue   # geometry's segment count changed since export — skip that segment only
                 target = segs[si]
-                target.layers                  = seg_cfg.get('layers', target.layers)
+                target.layers                  = clamp_layers(seg_cfg.get('layers', target.layers))
                 target.points_per_layer        = seg_cfg.get('points_per_layer', target.points_per_layer)
                 target.zigzag_inspection       = seg_cfg.get('zigzag_inspection', target.zigzag_inspection)
                 target.zigzag_degree           = seg_cfg.get('zigzag_degree', target.zigzag_degree)
                 target.selected_for_inspection = seg_cfg.get('selected_for_inspection', target.selected_for_inspection)
         else:
-            hole.layers            = cfg.get('layers', hole.layers)
+            hole.layers            = clamp_layers(cfg.get('layers', hole.layers))
             hole.points_per_layer  = cfg.get('points_per_layer', hole.points_per_layer)
             hole.zigzag_inspection = cfg.get('zigzag_inspection', hole.zigzag_inspection)
             hole.zigzag_degree     = cfg.get('zigzag_degree', hole.zigzag_degree)

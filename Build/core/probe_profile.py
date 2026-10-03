@@ -40,16 +40,26 @@ class ProbeProfile:
     # ระยะว่างขั้นต่ำระหว่างหัวโพรบกับผนังรู (วัดจากจุดศูนย์กลาง layer) — หัวโพรบต้องมีที่
     # ให้เคลื่อนที่ก่อนแตะผนัง รูที่แคบกว่านี้จะถูกเตือน/ข้ามตอน export — ปรับได้
     wall_clearance: float = 0.5   # mm
+    # เส้นผ่าศูนย์กลางหัวโพรบ "ที่ใช้งานจริง" จากการ calibrate กับ Ring Gauge — เล็กกว่าขนาด
+    # ลูกบอลเล็กน้อยเพราะก้านโพรบโก่งก่อน trigger ใช้ชดเชยรัศมีตอนประเมินผล (0 = ใช้ tip_diameter)
+    effective_tip_diameter: float = 0.0   # mm
  
     DEFAULT_HOLDER_HEIGHT: float = field(default=20.0, init=False, repr=False)  # v02
     DEFAULT_LENGTH: float = field(default=50.0, init=False, repr=False)
     DEFAULT_TIP_D:  float = field(default=2.0,  init=False, repr=False)
     DEFAULT_CLEARANCE: float = field(default=0.5, init=False, repr=False)
+    DEFAULT_EFFECTIVE_TIP_D: float = field(default=0.0, init=False, repr=False)
  
     # ------------------------------------------------------------------
     @property
     def tip_radius(self) -> float:
         return self.tip_diameter / 2.0
+
+    @property
+    def effective_tip_radius(self) -> float:
+        """รัศมีที่ใช้ชดเชยจุดวัด — ค่าที่ calibrate แล้วถ้ามี ไม่งั้นใช้ขนาดหัวโพรบ"""
+        d = self.effective_tip_diameter if self.effective_tip_diameter > 0 else self.tip_diameter
+        return d / 2.0
  
     # ------------------------------------------------------------------
     def can_reach_depth(self, hole_depth: float) -> bool:

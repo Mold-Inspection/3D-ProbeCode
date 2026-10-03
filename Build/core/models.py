@@ -47,6 +47,19 @@ import numpy as np
 RECT_CONTACT_SPAN = 0.7   # วางจุดภายใน ±70% ของครึ่งความยาวช่วงตรงของแต่ละด้าน — ปรับได้
 
 
+MIN_LAYERS = 3   # จำนวนชั้นต่ำสุดต่อรู/segment — ขั้นต่ำตามมาตรฐานมาตรวิทยา (BS 7172) ตามขอบเขตโครงงาน
+MAX_LAYERS = 8   # จำนวนชั้นสูงสุดที่เลือกได้ใน Properties
+
+
+def clamp_layers(n) -> int:
+    """บังคับจำนวนชั้นให้อยู่ในช่วง MIN_LAYERS..MAX_LAYERS (รวมค่าจาก Schema / การตั้งค่าเก่า)"""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = MIN_LAYERS
+    return max(MIN_LAYERS, min(MAX_LAYERS, n))
+
+
 def profile_radius(obj, t: float):
     """รัศมีจริงจากโมเดล ณ ความลึก t (0 = ปาก, 1 = ก้น) — วัดจาก B-Rep ด้วยการยิงเส้น
     (core/step_extractor.py::_measure_radius_profiles) เก็บไว้ที่ obj.radius_profile

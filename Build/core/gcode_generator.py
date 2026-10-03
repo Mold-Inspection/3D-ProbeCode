@@ -1,5 +1,8 @@
 # core/gcode_generator.py
-# VERSION: 10
+# VERSION: 11
+# CHANGE LOG (v10 -> v11):
+#   build_point_map() เพิ่ม nx/ny/nz (ทิศที่โพรบเดินเข้าหาผนัง) และ shape ต่อจุด —
+#   core/evaluation_engine.py ใช้ชดเชยรัศมีหัวโพรบและ fit วงกลมรายชั้น (G-code ไม่เปลี่ยน)
 # CHANGE LOG (v09 -> v10):
 #   FEATURE: รูกลมที่ผนังมีช่วงเปิด (blocked_dirs: ปากร่อง, รูซ้อนกัน, รอยบาก — วัดจริง
 #   ใน core/step_extractor.py::_wall_gaps) — circle_layer_angles() หมุนชุดจุดทั้ง layer
@@ -511,6 +514,10 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None) -> 
                     'layer_idx': int(lyr['layer_idx']),
                     'point_idx': int(pt_i),
                     'x': float(pt[0]), 'y': float(pt[1]), 'z': float(pt[2]),
+                    # v11: ทิศที่โพรบเดินเข้าหาผนัง (เวกเตอร์หน่วย, พิกัดเครื่อง) — ใช้ชดเชย
+                    # รัศมีหัวโพรบตอนประเมินผล และชนิดรูปทรง (ใช้เลือก layer ที่จะ fit วงกลม)
+                    'nx': float(normal[0]), 'ny': float(normal[1]), 'nz': float(normal[2]),
+                    'shape': lyr.get('shape', 'circle'),
                 })
     return point_map
 
