@@ -260,6 +260,24 @@ class EvaluationSidebarPanel:
             command=lambda: self._toggle_layer(gi, seg_idx, layer_idx)
         ).pack(fill="x", padx=4, pady=4)
 
+        circ = layer.get('circle')   # least-squares circle fit ของชั้นนี้ (เฉพาะรูกลม)
+        if circ:
+            rnd = circ.get('roundness')
+            raw_d = circ.get('raw_center_diameter')
+            lines = [
+                f"⌀ {circ['measured_diameter']:.3f}  (CAD {circ['nominal_diameter']:.3f}, "
+                f"{circ['diameter_error']:+.3f})",
+                f"Centre offset {circ['center_offset']:.3f}   Roundness "
+                + (f"{rnd:.3f}" if rnd is not None else "n/a (needs ≥ 4 pts)"),
+            ]
+            if raw_d is not None:
+                lines.append(f"Ball-centre ⌀ {raw_d:.3f} (for tip calibration)")
+            ctk.CTkLabel(
+                row, text="\n".join(lines), anchor="w", justify="left",
+                text_color=theme.OK_TEXT if circ.get('passed') else theme.ERR_TEXT,
+                font=ctk.CTkFont(family=theme.FONT_MONO, size=10)
+            ).pack(fill="x", padx=12, pady=(0, 6))
+
         table_frame = ctk.CTkFrame(row, fg_color="transparent")
         state['table_frame'] = table_frame
         state['layer'] = layer
@@ -380,7 +398,8 @@ class EvaluationSidebarPanel:
             return
 
         try:
-            new_result = evaluate_points(expected_points, actual_points, tol)
+            new_result = evaluate_points(expected_points, actual_points, tol,
+                                         tip_radius_mm=app.probe_profile.effective_tip_radius)
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลใหม่ไม่สำเร็จ:\n{e!r}")
             return

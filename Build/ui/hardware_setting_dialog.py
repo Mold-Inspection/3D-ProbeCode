@@ -66,6 +66,7 @@ class HardwareSettingDialog:
         self._probe_length_entry = None
         self._probe_tip_entry    = None
         self._probe_clear_entry  = None   # ระยะว่างหัวโพรบ-ผนังขั้นต่ำ
+        self._probe_eff_entry    = None   # ขนาดหัวโพรบที่ calibrate แล้ว (ชดเชยรัศมี)
         self._lbl_probe_summary  = None
 
         self._machine_x_entry     = None
@@ -172,6 +173,21 @@ class HardwareSettingDialog:
         ctk.CTkLabel(clear_entry_row, text="mm  free space between tip and wall",
                      font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
+        eff_row = ctk.CTkFrame(parent, fg_color="transparent")
+        eff_row.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(eff_row, text="Effective Tip ⌀ — calibrated (mm):", font=ctk.CTkFont(size=13),
+                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+        eff_entry_row = ctk.CTkFrame(eff_row, fg_color="transparent")
+        eff_entry_row.pack(fill="x", pady=(4, 0))
+        self._probe_eff_entry = ctk.CTkEntry(eff_entry_row, width=110, height=30,
+                                             placeholder_text="0", font=ctk.CTkFont(size=13))
+        self._probe_eff_entry.insert(0, str(app.probe_profile.effective_tip_diameter))
+        self._probe_eff_entry.pack(side="left")
+        ctk.CTkLabel(eff_entry_row, text="mm  0 = use Tip ⌀ for compensation",
+                     font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(eff_row, text="From a ring gauge: Ring ⌀ − \"ball-centre ⌀\" shown in Evaluation",
+                     font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED).pack(anchor="w", pady=(2, 0))
+
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -193,7 +209,9 @@ class HardwareSettingDialog:
         return (f"Holder : {p.stylus_holder_height:.1f} mm\n"   # v02
                 f"Length : {p.stylus_length:.1f} mm\n"
                 f"Tip ⌀  : {p.tip_diameter:.1f} mm  (r = {p.tip_radius:.2f} mm)\n"
-                f"Clearance : {p.wall_clearance:.2f} mm")
+                f"Clearance : {p.wall_clearance:.2f} mm\n"
+                f"Compensation r : {p.effective_tip_radius:.3f} mm"
+                f"{'  (calibrated)' if p.effective_tip_diameter > 0 else '  (from Tip ⌀)'}")
 
     def _apply_probe_profile(self):
         app = self.app
@@ -206,6 +224,8 @@ class HardwareSettingDialog:
             if new_tip_d <= 0: raise ValueError("เส้นผ่าศูนย์กลางต้องมากกว่า 0")
             new_clear = float(self._probe_clear_entry.get().strip())
             if new_clear < 0: raise ValueError("ระยะว่างต้องไม่ติดลบ")
+            new_eff = float(self._probe_eff_entry.get().strip() or 0)
+            if new_eff < 0: raise ValueError("ขนาดหัวโพรบที่ calibrate ต้องไม่ติดลบ (0 = ไม่ใช้)")
         except ValueError as e:
             self.dialog.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
             return
@@ -214,6 +234,7 @@ class HardwareSettingDialog:
         app.probe_profile.stylus_length = new_length
         app.probe_profile.tip_diameter  = new_tip_d
         app.probe_profile.wall_clearance = new_clear
+        app.probe_profile.effective_tip_diameter = new_eff
         if self._lbl_probe_summary is not None:
             self._lbl_probe_summary.configure(text=self._probe_summary_text())
         if app.holes_detected and app.current_holes:
@@ -225,7 +246,8 @@ class HardwareSettingDialog:
         user_settings.save_section("probe", {
             "stylus_holder_height": p.stylus_holder_height,
             "stylus_length": p.stylus_length, "tip_diameter": p.tip_diameter,
-            "wall_clearance": p.wall_clearance})
+            "wall_clearance": p.wall_clearance,
+            "effective_tip_diameter": p.effective_tip_diameter})
 
     def _save_machine(self):
         m = self.app.machine_profile
@@ -239,6 +261,10 @@ class HardwareSettingDialog:
         app.probe_profile.stylus_length = app.probe_profile.DEFAULT_LENGTH
         app.probe_profile.tip_diameter  = app.probe_profile.DEFAULT_TIP_D
         app.probe_profile.wall_clearance = app.probe_profile.DEFAULT_CLEARANCE
+        app.probe_profile.effective_tip_diameter = app.probe_profile.DEFAULT_EFFECTIVE_TIP_D
+        if self._probe_eff_entry is not None:
+            self._probe_eff_entry.delete(0, "end")
+            self._probe_eff_entry.insert(0, str(app.probe_profile.effective_tip_diameter))
         if self._probe_clear_entry is not None:
             self._probe_clear_entry.delete(0, "end")
             self._probe_clear_entry.insert(0, str(app.probe_profile.wall_clearance))

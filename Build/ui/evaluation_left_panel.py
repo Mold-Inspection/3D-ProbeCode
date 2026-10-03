@@ -261,8 +261,16 @@ class EvaluationLeftPanel:
             holes_r = result.get('holes', {}) or {}
             n_holes = len(holes_r)
             n_pass  = sum(1 for hv in holes_r.values() if hv.get('passed'))
+            comp = result.get('compensation')
+            comp_text = {
+                'on': f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm",
+                'unavailable': "Tip compensation: unavailable (schema has no probe directions"
+                               " — re-export G-code + schema)",
+            }.get(comp, "Tip compensation: off")
             self.lbl_hole_rate.configure(
-                text=f"{n_pass} / {n_holes} holes fully passed" if n_holes else "")
+                text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text,
+                text_color=theme.WARN_TEXT if comp == 'unavailable' else theme.TEXT_MUTED,
+                justify="left", wraplength=260)
         else:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
@@ -471,7 +479,8 @@ class EvaluationLeftPanel:
         tolerance = getattr(app, 'evaluation_tolerance_mm', 0.5)
 
         try:
-            result = evaluate_points(expected_points, actual_points, tolerance)
+            result = evaluate_points(expected_points, actual_points, tolerance,
+                                     tip_radius_mm=app.probe_profile.effective_tip_radius)
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลไม่สำเร็จ:\n{e!r}")
             return False

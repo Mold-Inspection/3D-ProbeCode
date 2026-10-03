@@ -51,7 +51,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
-from core.models import HoleFeature, HoleSegmentSetting, validate_segment_reachability
+from core.models import (HoleFeature, HoleSegmentSetting, validate_segment_reachability,
+                         MIN_LAYERS, MAX_LAYERS, clamp_layers)
 from core.probe_profile import ProbeProfile
 from core.machine_profile import MachineProfile
 from ui.tabs.selection_tab import SelectionTab
@@ -139,8 +140,9 @@ class UIManager:
         # ค่าที่ผู้ใช้ตั้งไว้ครั้งก่อน (%APPDATA%\3D ProbeCode\settings.json — core/user_settings.py)
         _saved = user_settings.load()
         user_settings.apply_numbers(self.probe_profile, _saved.get('probe'),
-                                    ('stylus_holder_height', 'stylus_length', 'tip_diameter', 'wall_clearance'),
-                                    allow_zero=('wall_clearance',))
+                                    ('stylus_holder_height', 'stylus_length', 'tip_diameter', 'wall_clearance',
+                                     'effective_tip_diameter'),
+                                    allow_zero=('wall_clearance', 'effective_tip_diameter'))
         user_settings.apply_numbers(self.machine_profile, _saved.get('machine'),
                                     ('x_travel', 'y_travel', 'z_travel', 'z_height'))
         self.appearance_mode = (_saved.get('appearance')
@@ -628,7 +630,7 @@ class UIManager:
                     h.selected_for_inspection = state.get('selected', False)
                     h.zigzag_inspection       = state.get('zigzag', False)
                     h.zigzag_degree           = state.get('zigzag_deg', 45.0)
-                    h.layers                  = state.get('layers', 3)
+                    h.layers                  = clamp_layers(state.get('layers', MIN_LAYERS))
                     h.points_per_layer        = state.get('points', 4)
                     old_segments = state.get('segments') or []
                     if old_segments and len(old_segments) == len(getattr(h, 'segments', [])):
@@ -949,7 +951,8 @@ class UIManager:
             row1 = ctk.CTkFrame(setting_frame, fg_color="transparent")
             row1.pack(fill="x", padx=10, pady=(5,0))
             ctk.CTkLabel(row1, text="Z-Layers:", text_color=theme.TEXT_SECONDARY).pack(side="left")
-            opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60,
+            hole.layers = clamp_layers(hole.layers)
+            opt_layers = ctk.CTkOptionMenu(row1, values=[str(n) for n in range(MIN_LAYERS, MAX_LAYERS + 1)], width=60,
                                            command=lambda val: self.on_config_change_for_hole(idx))
             opt_layers.set(str(hole.layers))
             opt_layers.pack(side="right")
@@ -1075,7 +1078,8 @@ class UIManager:
         row1 = ctk.CTkFrame(seg_body, fg_color="transparent")
         row1.pack(fill="x", padx=8, pady=(6, 0))
         ctk.CTkLabel(row1, text="Z-Layers:", text_color=theme.TEXT_SECONDARY, font=("", 11)).pack(side="left")
-        opt_layers = ctk.CTkOptionMenu(row1, values=["1","2","3","4","5"], width=60,
+        cfg.layers = clamp_layers(cfg.layers)
+        opt_layers = ctk.CTkOptionMenu(row1, values=[str(n) for n in range(MIN_LAYERS, MAX_LAYERS + 1)], width=60,
                                        command=lambda val: self._on_segment_config_change(hole_idx, seg_idx))
         opt_layers.set(str(cfg.layers))
         opt_layers.pack(side="right")
