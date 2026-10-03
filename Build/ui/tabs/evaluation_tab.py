@@ -259,7 +259,9 @@ class EvaluationTab:
         # 'failed_points' field (Requirement 4).
         failed_pts = evaluation_result.get('failed_points')
         total_pts  = evaluation_result.get('total_points')
-        pts_tag    = f"  |  {failed_pts} / {total_pts} points failed" if total_pts else ""
+        passed_pts = evaluation_result.get('passed_points',
+                                           (total_pts or 0) - (failed_pts or 0))
+        pts_tag    = f"  |  {passed_pts} / {total_pts} points passed" if total_pts else ""
         ax.set_title(
             f"Evaluation — {pass_count} passed, {fail_count} failed, "
             f"{nodata_count} no data{pts_tag}",

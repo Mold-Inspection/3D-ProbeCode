@@ -253,7 +253,7 @@ class EvaluationLeftPanel:
             if total_pts:
                 color = _COLOR_GOOD if failed == 0 else _COLOR_BAD
                 self.lbl_failed.configure(
-                    text=f"{failed} / {total_pts} points failed",
+                    text=f"{result.get('passed_points', total_pts - failed)} / {total_pts} points passed",
                     text_color=color)
             else:
                 self.lbl_failed.configure(text="—", text_color=theme.TEXT)
