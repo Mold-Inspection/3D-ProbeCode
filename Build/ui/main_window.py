@@ -72,6 +72,7 @@ from ui import theme
 
 
 _LEFT_WIDTH       = 420   # ความกว้างแผง Hole schedule (ซ้าย) — ปรับได้
+_APP_ICON = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "app_icon.ico")
 _RIGHT_WIDTH      = 330   # ความกว้างแผง Properties (ขวา) — ปรับได้
 _RIGHT_WIDTH_EVAL = 430   # ความกว้างแผงขวาตอนอยู่แท็บ Evaluation (ตารางจุดวัดกว้างกว่า)
 
@@ -179,6 +180,10 @@ class UIManager:
         theme.apply(self.appearance_mode)   # ต้องมาก่อน ctk.CTk() — ตั้ง default สีของ widget ทุกตัว
         self.root = ctk.CTk()
         self.root.title("3D ProbeCode")
+        try:   # ไอคอนหน้าต่าง — ต้องตั้งเอง ไม่งั้น customtkinter ใส่ไอคอนของมันแทน
+            self.root.iconbitmap(_APP_ICON)
+        except Exception:
+            pass
         self.root.geometry("1400x800")   # ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล) — fallback ถ้าไม่ maximize
         # การ maximize ย้ายไปทำใน show() — ดูเหตุผลที่ _maximize()
 
