@@ -2,7 +2,12 @@
 # core/log_parser.py — อ่านไฟล์ .log จาก OpenBuilds Control -> รายการจุดที่
 # ถูกโพรบจริง (actual probe points) เรียงตามลำดับที่ไฟล์บันทึกไว้
 # ==============================================================================
-# VERSION: 01
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   FIX: [PRB:...] ของ GRBL เป็นพิกัดเครื่อง (MPos) ไม่ใช่พิกัดเทียบ Set Zero —
+#   ถ้าไฟล์มีบรรทัด "; WCO: x,y,z" (เขียนโดย core/openbuilds_link.py) จะลบ work
+#   offset ล่าสุดออกจากทุกจุดที่ตามมา: พิกัดงาน = PRB - WCO  ไฟล์ที่ไม่มี WCO
+#   (copy จาก console เอง) อ่านเหมือนเดิม แต่จุดมี 'wco': None ให้ UI เตือน
 # หน้าที่: แกะบรรทัด GRBL probe-report ("[PRB:x,y,z:s]") ออกจากไฟล์ .log ที่
 # OpenBuilds Control บันทึกไว้หลังรันโปรแกรม G-code จริงบนเครื่อง แปลงเป็น
 # รายการจุด (x, y, z) เรียงตามลำดับที่ปรากฏในไฟล์ — ลำดับนี้ตรงกับลำดับที่
@@ -36,6 +41,10 @@ import datetime
 # ยอมรับเครื่องหมายลบ/จุดทศนิยม และไม่สนใจ whitespace รอบ ๆ ตัวเลข — ปรับได้
 _PRB_PATTERN = re.compile(
     r"\[PRB:\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*:\s*(\d+)\s*\]"
+)
+# v02: work offset ที่ core/openbuilds_link.py บันทึกไว้ — "; WCO: x,y,z"
+_WCO_PATTERN = re.compile(
+    r"^\s*;\s*WCO:\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)"
 )
 
 # True = เก็บเฉพาะจุดที่ probe สัมผัสสำเร็จจริง (s==1) — ปรับได้
@@ -93,7 +102,9 @@ def parse_openbuilds_log(filepath: str) -> list:
     list ของ dict เรียงตามลำดับในไฟล์ แต่ละอันมี:
       seq_idx : ลำดับจุดนี้นับจาก 0 (ลำดับที่ใช้จับคู่กับ EXPECTED points
                 ใน core/evaluation_engine.py::evaluate_points())
-      x, y, z : พิกัดที่ probe รายงานว่าสัมผัส (mm)
+      x, y, z : พิกัดที่ probe รายงานว่าสัมผัส (mm) — v02: ลบ WCO แล้วถ้ามี
+      wco     : (x, y, z) work offset ที่ใช้ลบ หรือ None ถ้าไฟล์ไม่มีบรรทัด WCO
+                (= พิกัดเครื่องดิบ)
       status  : สถานะจาก GRBL ("1"=สัมผัสสำเร็จ, "0"=ไม่พบการสัมผัส)
       raw     : บรรทัดดิบต้นฉบับ (เก็บไว้เผื่อ debug/ตรวจสอบย้อนหลัง)
 
@@ -108,11 +119,17 @@ def parse_openbuilds_log(filepath: str) -> list:
     points   = []
     warnings = []
     matched  = 0
+    wco      = None   # v02: work offset ล่าสุดที่เจอในไฟล์
 
     for line_no, raw_line in enumerate(raw_lines, start=1):
         line = raw_line.rstrip("\n\r")
         if not line.strip():
             continue   # บรรทัดว่าง — ไม่ใช่ปัญหา ไม่ต้องบันทึกเป็น warning
+
+        w = _WCO_PATTERN.match(line)
+        if w is not None:
+            wco = (float(w.group(1)), float(w.group(2)), float(w.group(3)))
+            continue
 
         m = _PRB_PATTERN.search(line)
         if m is None:
@@ -131,9 +148,12 @@ def parse_openbuilds_log(filepath: str) -> list:
             warnings.append(LogParseWarning(line_no, line, f"probe not successful (status={status})"))
             continue
 
+        if wco is not None:   # v02: พิกัดเครื่อง → พิกัดเทียบ Set Zero
+            x, y, z = x - wco[0], y - wco[1], z - wco[2]
         points.append({
             'seq_idx': len(points),
             'x': x, 'y': y, 'z': z,
+            'wco': wco,
             'status': status,
             'raw': line,
         })

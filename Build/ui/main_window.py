@@ -15,7 +15,11 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 19
+# VERSION: 20
+# CHANGE LOG (v19 -> v20):
+#   FEATURE: self.openbuilds_logger (ui/openbuilds_logger.py) — บันทึก log ของทุก
+#   job ใน OpenBuilds Control อัตโนมัติ เริ่มทำงานทันทีที่เปิดหน้าต่างหลัก
+#   (ปิดได้ที่ checkbox ในแท็บ Evaluation — จำค่าไว้)
 # CHANGE LOG (v18 -> v19):
 #   FIX: ขนาดชิ้นงาน (Width X / Length Y / Thickness Z) ตามการหมุนจอแล้ว —
 #   หมุน 90°/270° ค่ากว้าง/ยาวสลับกัน และบอกว่าตรงกับแกนไหนของโมเดล
@@ -60,6 +64,7 @@ from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 from ui.tabs.evaluation_tab import EvaluationTab
 from ui.evaluation_left_panel import EvaluationLeftPanel
+from ui.openbuilds_logger import OpenBuildsLogger
 from ui.evaluation_sidebar_panel import EvaluationSidebarPanel
 from core.gcode_export_panel import GCodeExportPanel
 from ui.tool_bar import ToolBar
@@ -257,6 +262,7 @@ class UIManager:
         # so on_nav_change() can pack_forget() one pair and pack() the other.
         # Not packed here — _show_normal_sidebars() (called at startup below)
         # leaves the normal sidebars visible by default.
+        self.openbuilds_logger        = OpenBuildsLogger(self)   # v20: ต้องมีก่อน Evaluation panel
         self.evaluation_left_panel    = EvaluationLeftPanel(self)
         self.evaluation_sidebar_panel = EvaluationSidebarPanel(self)
 
@@ -482,6 +488,7 @@ class UIManager:
         # 1400x800 เอง — จึงต้องสั่ง maximize หลัง mainloop เริ่มทำงานแล้ว
         self.root.after(0, self._maximize)
         self.root.after(300, self._warm_up_heavy_imports)
+        self.root.after(500, self.openbuilds_logger.start_if_enabled)   # v20
         self.root.mainloop()
 
     def _warm_up_heavy_imports(self):

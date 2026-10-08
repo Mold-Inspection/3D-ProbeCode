@@ -1,5 +1,13 @@
 # core/gcode_export_panel.py
-# VERSION: 12
+# VERSION: 14
+# CHANGE LOG (v13 -> v14):
+#   ทุกครั้งที่บันทึก G-code จำชื่อไฟล์ไว้ที่ app.last_gcode_name — ใช้ตั้งชื่อ log
+#   ของ job ถัดไป (ui/openbuilds_logger.py) เพราะ OpenBuilds ไม่บอกชื่อไฟล์ที่รัน
+# CHANGE LOG (v12 -> v13):
+#   FEATURE: หมวด "Probe Test" — สร้าง G-code G38.2 ทีละทิศ (X+, X-, Y+, Y-, Z-)
+#   แยกไฟล์ละ 1 ทิศ จาก core/probe_test.py ไว้เช็คว่าเครื่องรับสัญญาณโพรบหรือไม่
+#   ระยะเดิน / feedrate / back-off กรอกเองได้ และจำค่าไว้; ติ๊ก "Return to start
+#   point" = กลับจุด Set Zero หลังแตะ (core/probe_test.py v02)
 # CHANGE LOG (v11 -> v12):
 #   FIX: ส่งการหมุนจอ (app.screen_rotation) เข้า generate_gcode() /
 #   export_schema_json() / build_settings_snapshot() — X/Y ของ G-code และ
@@ -73,6 +81,7 @@ from core.gcode_generator import (GCodeSettings, generate_gcode, suggest_safe_z,
 from core.expected_points_io import export_schema_json
 from core.axis_test import (AxisTestSettings, generate_axis_test_gcode,
                             hole_centers_from_view, generate_hole_center_test_gcode)
+from core.probe_test import DIRECTIONS, ProbeTestSettings, generate_probe_test_gcode
 from core.work_zero import (DEFAULT_WORK_ZERO, label_of, describe, work_zero_origin,
                             zero_offset_from_upper_left, test_zero_name, zero_view_text)
 from ui.settings_dialog_base import SettingsDialogBase
@@ -86,8 +95,10 @@ class GCodeExportPanel:
         self.dialog = SettingsDialogBase(app.root, title="G-code Export (GRBL)")
         self.dialog.add_category("export", "Export Settings", self._build_fields)
         self.dialog.add_category("axis_test", "Axis Test (X/Y)", self._build_axis_test_fields)
+        self.dialog.add_category("probe_test", "Probe Test", self._build_probe_test_fields)
         self._entries = {}
         self._axis_entries = {}
+        self._probe_entries = {}
         self.dialog.on_close = self._remember_fields   # จำค่าที่กรอกไว้ทุกครั้งที่ปิด dialog
 
     # ------------------------------------------------------------------
@@ -117,10 +128,12 @@ class GCodeExportPanel:
     # ------------------------------------------------------------------
     _REMEMBER_EXPORT = ("padding_height", "entry_clearance", "probe_feedrate", "overtravel", "backoff")
     _REMEMBER_AXIS   = ("z_lift", "feedrate", "dwell_s")
+    _REMEMBER_PROBE  = ("distance", "feedrate", "backoff")
 
     def _remember_fields(self):
         for section, entries, keys in (("export", self._entries, self._REMEMBER_EXPORT),
-                                       ("axis_test", self._axis_entries, self._REMEMBER_AXIS)):
+                                       ("axis_test", self._axis_entries, self._REMEMBER_AXIS),
+                                       ("probe_test", self._probe_entries, self._REMEMBER_PROBE)):
             values = {}
             for key in keys:
                 entry = entries.get(key)
@@ -325,6 +338,10 @@ class GCodeExportPanel:
             return None
         return settings
 
+    def _remember_gcode_name(self, filepath: str):
+        """v14: ชื่อ G-code ล่าสุด = ชื่อ job ของ log ถัดไป (ui/openbuilds_logger.py)"""
+        self.app.last_gcode_name = os.path.splitext(os.path.basename(filepath))[0]
+
     def _save_test_gcode(self, gcode_text, suffix, title, summary, zero_name="UPPER-LEFT corner"):
         base = os.path.splitext(getattr(self.app, 'loaded_step_filename', None) or "object")[0]
         filepath = self.dialog.run_native(
@@ -340,6 +357,7 @@ class GCodeExportPanel:
         except Exception as e:
             self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
+        self._remember_gcode_name(filepath)
         self.dialog.showinfo(
             "Export complete",
             f"บันทึก {title.replace('Save ', '')} แล้ว:\n{filepath}\n\n{summary}\n"
@@ -381,6 +399,135 @@ class GCodeExportPanel:
         self._save_test_gcode(
             gcode_text, "hole_center_test", "Save Hole-Center Test G-code",
             f"{len(centers)} รู — เดินไปจุดศูนย์กลางทีละรูแล้วกลับจุด zero", zero_name)
+
+    # ------------------------------------------------------------------
+    # v13: Probe Test — G38.2 ทีละทิศ แยกไฟล์ (core/probe_test.py)
+    # ------------------------------------------------------------------
+    def _build_probe_test_fields(self, parent):
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360,
+            font=ctk.CTkFont(size=12), text_color=theme.TEXT_SECONDARY,
+            text=("Checks that the machine receives the probe signal. Each file "
+                  "moves the probe one way (G38.2) from where it is now and stops "
+                  "on contact. Touch the stylus by hand while it moves: it should "
+                  "stop and show [PRB:...:1]. If it runs the full distance and "
+                  "shows ALARM:5, the probe signal is not reaching the machine.")
+        ).pack(fill="x", pady=(0, 12))
+
+        saved = user_settings.get("probe_test", {}) or {}
+        fields = [
+            ("distance", "Probe distance (mm):",         "12.0"),
+            ("feedrate", "Probe feedrate (mm/min):",     "100.0"),
+            ("backoff",  "Back-off after contact (mm):", "2.0"),
+        ]
+        for key, label, default in fields:
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(row, text=label, font=ctk.CTkFont(size=13),
+                         text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+            entry = ctk.CTkEntry(row, width=120, height=30, placeholder_text=default,
+                                 font=ctk.CTkFont(size=13))
+            if key in saved:
+                default = f"{float(saved[key]):g}"   # ค่าที่ใช้ครั้งก่อน
+            entry.insert(0, default)
+            entry.pack(anchor="w", pady=(4, 0))
+            self._probe_entries[key] = entry
+
+        self._probe_return = ctk.BooleanVar(value=bool(saved.get("return_to_zero", True)))
+        ctk.CTkCheckBox(parent, text="Return to start point after contact (Set Zero there first)",
+                        variable=self._probe_return, font=ctk.CTkFont(size=12),
+                        command=self._remember_probe_return).pack(anchor="w", pady=(0, 4))
+
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
+        ctk.CTkLabel(parent, text="Export one direction:", font=ctk.CTkFont(size=13),
+                     text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(4, 10))
+        for name, _, _ in DIRECTIONS:
+            ctk.CTkButton(btn_row, text=name, width=60, height=30,
+                          fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                          font=ctk.CTkFont(size=12, weight="bold"),
+                          command=lambda n=name: self._on_export_probe_test(n)
+                          ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            parent, text="🖨 Export All Directions (folder)", fg_color=theme.ACCENT,
+            hover_color=theme.ACCENT_HOVER, font=ctk.CTkFont(size=13, weight="bold"),
+            height=34, command=self._on_export_probe_test_all).pack(fill="x")
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360,
+            font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED,
+            text=("Before each run, jog the probe so it has free space in that "
+                  "direction (no Z+ test). With 'Return to start point' on, Set Zero "
+                  "X/Y/Z there first — the probe goes back to that zero along the "
+                  "same axis after contact. "
+                  "ALARM:4 at the start = probe already triggered (check wiring). "
+                  "Clear an alarm with $X.")
+        ).pack(anchor="w", pady=(8, 0))
+
+    def _remember_probe_return(self):
+        saved = user_settings.get("probe_test", {}) or {}
+        saved["return_to_zero"] = bool(self._probe_return.get())
+        user_settings.save_section("probe_test", saved)
+
+    def _read_probe_test_settings(self):
+        try:
+            settings = ProbeTestSettings(**{k: float(e.get().strip())
+                                            for k, e in self._probe_entries.items()},
+                                         return_to_zero=self._probe_return.get())
+        except ValueError:
+            self.dialog.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
+            return None
+        err = settings.validate()
+        if err:
+            self.dialog.showerror("Invalid Input", err)
+            return None
+        return settings
+
+    def _on_export_probe_test(self, direction: str):
+        settings = self._read_probe_test_settings()
+        if settings is None:
+            return
+        filepath = self.dialog.run_native(
+            ctk.filedialog.asksaveasfilename,
+            title=f"Save Probe Test {direction} G-code", defaultextension=".gcode",
+            initialfile=f"probe_test_{direction}.gcode",
+            filetypes=[("G-code Files", "*.gcode *.nc *.txt")])
+        if not filepath:
+            return
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(generate_probe_test_gcode(settings, direction))
+        except Exception as e:
+            self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
+            return
+        self._remember_gcode_name(filepath)
+        self.dialog.showinfo("Export complete",
+                             f"บันทึก Probe Test {direction} แล้ว:\n{filepath}\n\n"
+                             f"เดินสูงสุด {settings.distance:g} mm — แตะก้านโพรบระหว่างเดินเพื่อทดสอบ")
+
+    def _on_export_probe_test_all(self):
+        settings = self._read_probe_test_settings()
+        if settings is None:
+            return
+        folder = self.dialog.run_native(ctk.filedialog.askdirectory,
+                                        title="Choose a folder for the Probe Test G-code files")
+        if not folder:
+            return
+        names = []
+        try:
+            for name, _, _ in DIRECTIONS:
+                fname = f"probe_test_{name}.gcode"
+                with open(os.path.join(folder, fname), "w", encoding="utf-8") as f:
+                    f.write(generate_probe_test_gcode(settings, name))
+                names.append(fname)
+        except Exception as e:
+            self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
+            return
+        self._remember_gcode_name("probe_test")   # หลายไฟล์ — ไม่รู้ว่าจะรันทิศไหน
+        self.dialog.showinfo("Export complete",
+                             f"บันทึก {len(names)} ไฟล์ใน:\n{folder}\n\n" + "\n".join(names) +
+                             f"\n\nเดินสูงสุด {settings.distance:g} mm ต่อไฟล์")
 
     # ------------------------------------------------------------------
     def _suggest_safe_z(self):
@@ -590,6 +737,7 @@ class GCodeExportPanel:
             self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
+        self._remember_gcode_name(filepath)                                         # v14
         schema_report = self._capture_export_record(selected, view_name, filepath)   # v09/v10
 
         # popup ยืนยันว่า export เสร็จ — ใช้ messagebox ที่มี dialog นี้เป็นเจ้าของ

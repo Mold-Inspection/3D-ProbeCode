@@ -2,7 +2,11 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE: หมวด "Auto Log (OpenBuilds)" — เปิด/ปิดการบันทึก log อัตโนมัติ,
+#   โฟลเดอร์ที่เก็บ log (Browse / พิมพ์เอง + Apply / Open folder) และรูปแบบชื่อไฟล์
+#   (ชื่อ job + เวลา / เวลา / ชื่อ job) — ผูกกับ ui/openbuilds_logger.py มีผลทันที
 # CHANGE LOG (v01 -> v02):
 #   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 3):
 #   two new fields added, one per category, both wired into their
@@ -45,6 +49,9 @@
 # container; Machine Working Area เป็นของใหม่ทั้งหมด (มี validation แบบ
 # เดียวกัน: X/Y/Z travel + Z Height ต้อง > 0 ทุกค่าถึงจะ apply — v02)
 # ==============================================================================
+import datetime
+import os
+
 import customtkinter as ctk
 
 from ui.settings_dialog_base import SettingsDialogBase
@@ -52,6 +59,7 @@ from ui import theme
 from core.machine_profile import MachineProfile
 from core import user_settings
 from core.work_zero import WORK_ZERO_CHOICES, label_of, mode_of_label, zero_hint_text
+from core.openbuilds_link import LOG_NAME_CHOICES, log_file_name
 
 
 class HardwareSettingDialog:
@@ -61,6 +69,7 @@ class HardwareSettingDialog:
         self.dialog.add_category("probe",   "Probe Stylus",         self._build_probe_fields)
         self.dialog.add_category("machine", "Machine Working Area", self._build_machine_fields)
         self.dialog.add_category("work_zero", "Work Zero",            self._build_work_zero_fields)
+        self.dialog.add_category("auto_log", "Auto Log (OpenBuilds)", self._build_auto_log_fields)
 
         self._probe_holder_entry = None   # v02 — Stylus Holder Height
         self._probe_length_entry = None
@@ -78,6 +87,117 @@ class HardwareSettingDialog:
     # ------------------------------------------------------------------
     def show(self):
         self.dialog.show()
+
+    # ==================================================================
+    # v03: Auto Log category — ไฟล์ log ของทุก job ใน OpenBuilds Control
+    # (ui/openbuilds_logger.py) มีผลทันที + จำข้ามการเปิดโปรแกรม
+    # ==================================================================
+    def _build_auto_log_fields(self, parent):
+        logger = self.app.openbuilds_logger
+
+        self._auto_log_var = ctk.BooleanVar(value=logger.auto_log)
+        ctk.CTkCheckBox(parent, text="Auto-save a log for every OpenBuilds job",
+                        variable=self._auto_log_var, font=ctk.CTkFont(size=13),
+                        command=lambda: logger.set_auto_log(bool(self._auto_log_var.get()))
+                        ).pack(anchor="w", pady=(0, 14))
+
+        ctk.CTkLabel(parent, text="Save logs to:", font=ctk.CTkFont(size=13),
+                     text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+        self._log_dir_entry = ctk.CTkEntry(parent, height=30, font=ctk.CTkFont(size=12))
+        self._log_dir_entry.insert(0, logger.log_dir)
+        self._log_dir_entry.pack(fill="x", pady=(4, 4))
+        self._log_dir_entry.bind("<Return>", lambda _e: self._apply_log_dir())
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 14))
+        for text, cmd in (("📁 Browse…", self._browse_log_dir), ("✔ Apply", self._apply_log_dir),
+                          ("📂 Open folder", self._open_log_dir)):
+            ctk.CTkButton(row, text=text, width=100, height=28,
+                          fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                          font=ctk.CTkFont(size=11), command=cmd).pack(side="left", padx=(0, 6))
+
+        ctk.CTkLabel(parent, text="File name:", font=ctk.CTkFont(size=13),
+                     text_color=theme.TEXT_SECONDARY).pack(anchor="w")
+        self._log_name_menu = ctk.CTkOptionMenu(
+            parent, values=[text for _key, text in LOG_NAME_CHOICES], width=200, height=30,
+            font=ctk.CTkFont(size=13), command=self._on_log_name_change)
+        self._log_name_menu.set(dict(LOG_NAME_CHOICES).get(logger.log_name, LOG_NAME_CHOICES[0][1]))
+        self._log_name_menu.pack(anchor="w", pady=(4, 4))
+        self._lbl_log_example = ctk.CTkLabel(parent, text="", anchor="w", justify="left",
+                                             font=ctk.CTkFont(size=11), text_color=theme.TEXT_MUTED)
+        self._lbl_log_example.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(
+            parent, anchor="w", justify="left", wraplength=360, font=ctk.CTkFont(size=10),
+            text_color=theme.TEXT_MUTED,
+            text=("Job name = the last G-code file exported from this program (OpenBuilds "
+                  "does not report the name of the file it runs), or the STEP file name if "
+                  "none was exported yet. A name that already exists gets _2, _3 … — old "
+                  "logs are never overwritten.")
+        ).pack(fill="x", pady=(0, 12))
+
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(0, 10))
+        self._lbl_log_status = ctk.CTkLabel(parent, text=logger.status, anchor="w", justify="left",
+                                            wraplength=360, font=ctk.CTkFont(size=11),
+                                            text_color=theme.TEXT_MUTED)
+        self._lbl_log_status.pack(fill="x")
+
+        logger.on_status.append(self._on_log_status)
+        logger.on_settings.append(self._sync_auto_log_fields)
+        self._update_log_example()
+
+    def _sync_auto_log_fields(self):
+        """ค่าเปลี่ยนจากที่อื่น (เช่น checkbox ในแท็บ Evaluation) — อัปเดตหน้านี้ให้ตรง"""
+        logger = self.app.openbuilds_logger
+        try:
+            self._auto_log_var.set(logger.auto_log)
+            self._log_dir_entry.delete(0, "end")
+            self._log_dir_entry.insert(0, logger.log_dir)
+            self._update_log_example()
+        except Exception:
+            pass   # หน้านี้ยังไม่ถูกสร้าง / ถูกปิดไปแล้ว
+
+    def _on_log_status(self, text: str):
+        try:
+            self._lbl_log_status.configure(text=text)
+        except Exception:
+            pass
+
+    def _update_log_example(self):
+        logger = self.app.openbuilds_logger
+        example = log_file_name(logger.job_name(), datetime.datetime.now(), logger.log_name)
+        self._lbl_log_example.configure(text=f"e.g.  {example}")
+
+    def _on_log_name_change(self, label: str):
+        key = next((k for k, text in LOG_NAME_CHOICES if text == label), "both")
+        self.app.openbuilds_logger.set_log_name(key)
+
+    def _browse_log_dir(self):
+        folder = self.dialog.run_native(ctk.filedialog.askdirectory,
+                                        title="Folder for OpenBuilds job logs",
+                                        initialdir=self.app.openbuilds_logger.log_dir)
+        if folder:
+            self._log_dir_entry.delete(0, "end")
+            self._log_dir_entry.insert(0, os.path.normpath(folder))
+            self._apply_log_dir()
+
+    def _apply_log_dir(self):
+        folder = os.path.normpath(self._log_dir_entry.get().strip().strip('"'))
+        if not folder or folder == ".":
+            self.dialog.showerror("Invalid Folder", "กรุณาระบุโฟลเดอร์")
+            return
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            self.dialog.showerror("Invalid Folder", f"สร้าง/ใช้โฟลเดอร์นี้ไม่ได้:\n{e}")
+            return
+        self.app.openbuilds_logger.set_log_dir(folder)
+
+    def _open_log_dir(self):
+        folder = self.app.openbuilds_logger.log_dir
+        try:
+            os.makedirs(folder, exist_ok=True)
+            os.startfile(folder)
+        except OSError as e:
+            self.dialog.showerror("Open Failed", f"เปิดโฟลเดอร์ไม่ได้:\n{e}")
 
     # ==================================================================
     # Work Zero category — จุด X0 Y0 Z0 ของ G-code (core/work_zero.py)

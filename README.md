@@ -41,7 +41,18 @@ A desktop tool that reads a CAD model (STEP/STP), automatically detects holes th
 - In the G-code Export window, the **Axis Test (X/Y)** page exports a short program for checking that the X/Y axes move the right way and the right distance — with an analog probe, a needle, or any pointer.
 - Put the needle on the object's upper-left corner (as shown on screen) and Set Zero there in OpenBuilds. The program lifts Z, visits the upper-right, lower-right and lower-left corners (pausing at each), then returns to the zero point.
 - The object size is filled in from the model in the current view (editable). Assumes X+ = right and Y+ = toward the back of the machine.
+- **Probe Test** (its own page): exports one G-code file per direction (X+, X−, Y+, Y−, Z−) that moves the probe with `G38.2` from where it is now, up to a set distance (default 12 mm). Touch the stylus while it moves — it should stop and report `[PRB:…:1]`; running the full distance and raising `ALARM:5` means the probe signal is not reaching the machine. With **Return to start point** on (default), Set Zero at the start point first — after contact the probe backs off and returns to that zero along the same axis; turn it off to leave the probe where it stopped (no Set Zero needed).
 - **Hole-Center Test** (same page, same zero and settings): visits the center of every hole/pocket selected for inspection, pausing over each, then returns to the zero point — checks that hole positions line up with the real part.
+
+**8. Record the probe log automatically (OpenBuilds Control)**
+- GRBL reports `[PRB:x,y,z:1]` in **machine coordinates**, not relative to Set Zero. Logs recorded by the app also store the work offset (`; WCO: x,y,z`), and the log parser subtracts it, so points match the Schema. A log copied by hand from the console has no WCO; the Evaluation tab warns about it.
+- **In the app (automatic):** the job logger starts with the main window and saves a normal, permanent `.log` file after every OpenBuilds job that has probe points. Set it up in **Hardware Setting → Auto Log (OpenBuilds)**:
+  - turn auto-save on or off (also a checkbox in the Evaluation tab)
+  - the folder for the logs (Browse, or type a path and Apply; **Open folder** opens it). The default is `Documents\3D ProbeCode\Logs`.
+  - the file name: **Job name + time** (default), **Time only**, or **Job name only**. The job name is the last G-code file exported from this app, because OpenBuilds doesn't report the name of the file it runs; if nothing has been exported, it's the STEP file name. Existing files are never overwritten; a repeated name gets `_2`, `_3`, and so on.
+- **Evaluate straight away:** Evaluation tab → **▶ Evaluate Next Job from OpenBuilds**, then run the G-code. The next saved log is loaded and evaluated automatically.
+- **Without the app (standalone logger):** run `Build\start_openbuilds_logger.bat` (or `python openbuilds_job_logger.py [--out DIR] [--all]`) and leave it open next to OpenBuilds Control. Don't run it while the app is open, or each job is saved twice.
+- Both connect to OpenBuilds Control's local server (`localhost:3000`, the same one its own window uses). They only listen and never send commands to the machine.
 
 ---
 
