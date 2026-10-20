@@ -1,5 +1,12 @@
 # core/gcode_generator.py
-# VERSION: 11
+# VERSION: 12
+# CHANGE LOG (v11 -> v12):
+#   FEATURE (ระยะเผื่อพื้น): ตำแหน่งชั้นวัดมาจาก core/models.py::layer_fractions() —
+#   ชั้นที่ลึกสุดสูงกว่าพื้น/ขั้นใต้ลูกบอลอย่างน้อย รัศมีหัวโพรบ + floor clearance
+#   (ถ้าพอแล้ว G-code ไม่เปลี่ยน) probe_safety_report() เตือนรูที่เว้นระยะไม่ได้
+#   FEATURE (วัดพื้นก้นรู แนว Z): HoleFeature.measure_floor + probe_profile.z_trigger →
+#   หลังวัดผนังครบ แตะพื้นกลางรูด้วย G38.2 ตามแกนรู; build_point_map(z_trigger=...)
+#   เพิ่มจุด shape='floor' (layer_idx = -1) ลำดับตรงกับ G-code เสมอ
 # CHANGE LOG (v10 -> v11):
 #   build_point_map() เพิ่ม nx/ny/nz (ทิศที่โพรบเดินเข้าหาผนัง) และ shape ต่อจุด —
 #   core/evaluation_engine.py ใช้ชดเชยรัศมีหัวโพรบและ fit วงกลมรายชั้น (G-code ไม่เปลี่ยน)
@@ -65,7 +72,10 @@ import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
 
 from core.hole_ordering import order_holes_nearest_neighbor, split_step_ready
-from core.models import rect_wall_contacts
+from core.models import (FLOOR_SAFETY, hole_floor_depth, layer_fractions, rect_wall_contacts,
+                         surface_below)
+
+FLOOR_APPROACH = 2.0   # v12: เริ่มแตะพื้นจากระยะลูกบอล-พื้น (ตาม CAD) เท่านี้ — ปรับได้
 
 class GCodeSettings:
     """Plain settings container consumed by generate_gcode()."""
@@ -185,6 +195,27 @@ def _orthonormal_basis(axis_vec):
     v = np.cross(axis, u)
     return axis, u, v
 
+def floor_probe_plan(hole_feature, z_trigger: bool):
+    """v12: จุดพื้นก้นรูที่จะแตะแนวแกนรู — (จุดบนพื้นกลางรู, แกนรูชี้เข้าก้น) หรือ None
+    ใช้ร่วมกันทั้ง build_point_map() และ generate_gcode() ให้ลำดับจุดตรงกันเสมอ
+    None เมื่อ: หัวโพรบทริกแนว Z ไม่ได้, รูไม่ได้ติ๊ก "Measure floor depth", รูทะลุ,
+    หรือ segment ที่ลึกที่สุดถูกเลือกออก (หัวโพรบลงไม่ถึง)"""
+    if not z_trigger or not getattr(hole_feature, 'measure_floor', False):
+        return None
+    sh = getattr(hole_feature, '_step_hole', None)
+    if sh is None:
+        return None
+    segs = getattr(hole_feature, 'segments', None) or []
+    if segs and not getattr(segs[0], 'selected_for_inspection', True):
+        return None
+    fd = hole_floor_depth(sh)
+    if fd is None:
+        return None
+    o = np.array(sh.open_3d, dtype=float)
+    axis, _u, _v = _orthonormal_basis(np.array(sh.deep_3d, dtype=float) - o)
+    return o + fd * axis, axis
+
+
 def _raw_layers_for_hole(hole_feature):
     sh = hole_feature._step_hole
     is_multi = bool(getattr(hole_feature, 'segments', None))
@@ -198,7 +229,9 @@ def _raw_layers_for_hole(hole_feature):
             axis, u, v = _orthonormal_basis(np.array(seg.deep_3d) - np.array(seg.open_3d))
             o = np.array(seg.open_3d)
             d = np.array(seg.deep_3d)
-            t_vals = np.linspace(0.0, 1.0, cfg.layers + 2)[1:-1]
+            length = float(np.linalg.norm(d - o))
+            below  = surface_below(sh, seg_idx)                  # v12: ระยะเผื่อพื้น/ขั้น
+            t_vals = layer_fractions(cfg.layers, length, below)
             for local_idx, t in enumerate(t_vals):
                 center = o + t * (d - o)
                 r      = seg.radius_at(t)
@@ -208,7 +241,8 @@ def _raw_layers_for_hole(hole_feature):
                     seg_idx=seg_idx, center=center, radius=r,
                     axis=axis, u=u, v=v, angle_offset=offset,
                     points_n=cfg.points_per_layer,
-                    blocked=getattr(sh, 'blocked_dirs', None)))
+                    blocked=getattr(sh, 'blocked_dirs', None),
+                    floor_gap=None if below is None else (1.0 - t) * length + below))
     else:
         axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
         if getattr(sh, 'shape', 'circle') in ('rect', 'channel'):
@@ -222,7 +256,9 @@ def _raw_layers_for_hole(hole_feature):
         n_layers = hole_feature.layers
         use_zz   = getattr(hole_feature, 'zigzag_inspection', False)
         deg      = getattr(hole_feature, 'zigzag_degree', 45.0)
-        t_vals   = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
+        length   = float(np.linalg.norm(d - o))
+        below    = surface_below(sh)                             # v12: ระยะเผื่อพื้น
+        t_vals   = layer_fractions(n_layers, length, below)
         for idx, t in enumerate(t_vals):
             center = o + t * (d - o)
             r      = sh.radius_at(t)
@@ -231,7 +267,8 @@ def _raw_layers_for_hole(hole_feature):
                 seg_idx=0, center=center, radius=r,
                 axis=axis, u=u, v=v, angle_offset=offset,
                 points_n=hole_feature.points_per_layer,
-                blocked=getattr(sh, 'blocked_dirs', None))
+                blocked=getattr(sh, 'blocked_dirs', None),
+                floor_gap=None if below is None else (1.0 - t) * length + below)
             if getattr(sh, 'shape', 'circle') == 'rect':
                 lyr.update(shape='rect', half_u=sh.half_u, half_v=sh.half_v,
                            corner_radius=sh.corner_radius)
@@ -393,6 +430,7 @@ def _layer_contacts(lyr) -> list:
 # v10: ตรวจความปลอดภัยก่อน export (ใช้ค่าจาก Hardware Setting จริง)
 # ---------------------------------------------------------------------
 def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
+    # v12: + พื้นใต้ชั้นวัดที่ลึกสุด (ระยะเผื่อพื้น) และความยาวก้นสำหรับการแตะพื้นก้นรู
     """รูที่โปรแกรมนี้จะโพรบได้ไม่ปลอดภัยด้วยหัวโพรบปัจจุบัน — [(hole, [เหตุผล...]), ...]
 
     คิดจาก layer ที่จะถูกโพรบจริง (_raw_layers_for_hole — segment ที่ไม่ได้เลือกไม่นับ):
@@ -405,6 +443,8 @@ def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
     tip_r     = float(probe_profile.tip_radius)
     clearance = float(getattr(probe_profile, 'wall_clearance', 0.0))
     stylus    = float(probe_profile.stylus_length)
+    floor_c   = float(getattr(probe_profile, 'floor_clearance', FLOOR_SAFETY['clearance']))
+    z_trig    = bool(getattr(probe_profile, 'z_trigger', False))
     for h in holes:
         sh = getattr(h, '_step_hole', None)
         if sh is None:
@@ -432,6 +472,16 @@ def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
         elif backoff > 2.0 * room:
             reasons.append(f"back-off {backoff:.2f} mm is longer than the {2.0 * room:.2f} mm the tip can "
                            f"move across the hole \u2014 it would hit the opposite wall")
+        gaps = [l['floor_gap'] - tip_r for l in layers if l.get('floor_gap') is not None]
+        if gaps and min(gaps) < floor_c - 1e-6:   # v12: ชั้นลึกสุดใกล้พื้น/ขั้นเกินไป (ยกขึ้นไม่ได้)
+            reasons.append(f"deepest layer leaves only {max(min(gaps), 0.0):.2f} mm between the tip and "
+                           f"the floor/step below (needs {floor_c:.2f} mm)")
+        plan = floor_probe_plan(h, z_trig)
+        if plan is not None:   # v12: แตะพื้นก้นรู — ก้นต้องยาวถึงพื้น
+            fdepth = float(np.linalg.norm(plan[0] - mouth))
+            if fdepth > stylus:
+                reasons.append(f"floor is {fdepth:.1f} mm deep, stylus is only {stylus:.1f} mm "
+                               f"(untick Measure floor depth)")
         if reasons:
             report.append((h, reasons))
     return report
@@ -464,7 +514,8 @@ def gcode_extents(gcode_text: str) -> dict:
 
 
 # ---------------------------------------------------------------------
-def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None) -> list:
+def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None,
+                    z_trigger: bool = False) -> list:
     """คำนวณรายการจุดที่ "คาดหวังว่าจะถูกโพรบสัมผัส" (expected probe touch
     points) แบบเรียงลำดับเดียวกับที่ generate_gcode() จะยิงคำสั่ง G38.2
     ออกมาเป๊ะ ๆ (รู nearest-neighbor -> segment -> layer -> มุมจุดในชั้น)
@@ -519,6 +570,16 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None) -> 
                     'nx': float(normal[0]), 'ny': float(normal[1]), 'nz': float(normal[2]),
                     'shape': lyr.get('shape', 'circle'),
                 })
+        plan = floor_probe_plan(hole, z_trigger)   # v12: พื้นก้นรู — หลังผนังครบทุกชั้น
+        if plan is not None:
+            fp, ax = plan
+            point_map.append({
+                'hole_id':   getattr(hole, 'display_id', '?'),
+                'seg_idx':   0, 'layer_idx': -1, 'point_idx': 0,
+                'x': float(fp[0]), 'y': float(fp[1]), 'z': float(fp[2]),
+                'nx': float(ax[0]), 'ny': float(ax[1]), 'nz': float(ax[2]),
+                'shape': 'floor',
+            })
     return point_map
 
 
@@ -541,7 +602,8 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     # order as the G-code emission loop below (see build_point_map()'s
     # docstring for why that's safe). The .gcode TEXT emitted below is
     # completely unchanged from v04.
-    point_map = build_point_map(holes, view_name, screen_rot, origin)
+    z_trigger = bool(getattr(probe_profile, 'z_trigger', False))   # v12
+    point_map = build_point_map(holes, view_name, screen_rot, origin, z_trigger=z_trigger)
 
     lines = []
 
@@ -617,6 +679,21 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
                 lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f} ; pull-off from wall")
                 lines.append("G90")
                 lines.append(f"G0 X{c[0]:.3f} Y{c[1]:.3f} Z{c[2]:.3f} ; return to center")
+
+        plan = floor_probe_plan(hole, z_trigger)   # v12: แตะพื้นก้นรูแนวแกนรู (Z trigger)
+        if plan is not None:
+            fp, ax = plan
+            tip_r  = float(probe_profile.tip_radius)
+            start  = fp - (tip_r + FLOOR_APPROACH) * ax              # ลูกบอลลอยเหนือพื้น FLOOR_APPROACH
+            target = fp - (tip_r - settings.overtravel) * ax         # เลยพื้นตาม CAD ได้ไม่เกิน overtravel
+            back   = -ax * settings.backoff
+            lines.append(f"G0 X{start[0]:.3f} Y{start[1]:.3f} Z{start[2]:.3f} ; floor — approach")
+            lines.append(f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} Z{target[2]:.3f} "
+                         f"F{settings.probe_feedrate:.0f} ; floor — touch (Z trigger)")
+            lines.append("G91")
+            lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f} ; pull-off from floor")
+            lines.append("G90")
+            lines.append(f"G0 X{start[0]:.3f} Y{start[1]:.3f} Z{start[2]:.3f} ; floor — retract")
         lines.append("")
 
     lines.append(f"G0 Z{settings.safe_z:.3f}")

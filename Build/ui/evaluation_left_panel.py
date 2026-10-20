@@ -2,7 +2,21 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 09
+# VERSION: 13
+# CHANGE LOG (v12 -> v13):
+#   Results แสดง 'Depth checked x / y holes' (เตือนสีส้มถ้ายังกรอกความลึกเวอร์เนียร์ไม่ครบ)
+# CHANGE LOG (v11 -> v12):
+#   เตือนเมื่อจำนวนจุดใน log ไม่เท่ากับ schema (sequence_mismatch) — เดิมจับคู่เท่าที่มี
+#   แล้วเงียบ (เช่น log ที่มีจุดพื้นก้นรู กับ schema ที่ไม่มี)
+# CHANGE LOG (v10 -> v11):
+#   ตัวบันทึก log ย้ายไปทำงานเบื้องหลังตั้งแต่เปิดโปรแกรม (ui/openbuilds_logger.py,
+#   app.openbuilds_logger) — ปุ่มเปลี่ยนเป็น "▶ Evaluate Next Job from OpenBuilds"
+#   (รอ job ถัดไปที่บันทึกแล้วประเมินผลให้) + checkbox เปิด/ปิด auto-log
+# CHANGE LOG (v09 -> v10):
+#   FEATURE: ปุ่ม "🔴 Record Next Job from OpenBuilds" — ต่อ OpenBuilds Control
+#   (core/openbuilds_link.py) อัด job ถัดไป บันทึก .log ลงโฟลเดอร์ที่ตั้งไว้ แล้ว
+#   ประเมินผลทันที (ไม่ต้อง copy console / Load .log เอง) + เตือนเมื่อ log ไม่มี
+#   WCO (จุดยังเป็นพิกัดเครื่อง — ดู core/log_parser.py v02)
 # CHANGE LOG (v08 -> v09):
 #   FIX: expected points (live) และ settings snapshot ใช้การหมุนจอ
 #   (app.screen_rotation) เหมือนตอน export G-code — ดู gcode_generator.py v08
@@ -94,6 +108,10 @@ class EvaluationLeftPanel:
     def __init__(self, app):
         self.app = app
         self._built = False
+        self._waiting_for_job = False   # v11: รอประเมินผล job ถัดไปจาก OpenBuilds
+        app.openbuilds_logger.on_status.append(self._on_logger_status)
+        app.openbuilds_logger.on_saved.append(self._on_job_saved)
+        app.openbuilds_logger.on_settings.append(self._on_logger_settings)
 
     # ------------------------------------------------------------------
     def build(self, parent):
@@ -163,7 +181,29 @@ class EvaluationLeftPanel:
         self.lbl_log_info = ctk.CTkLabel(
             parent, text="No .log file loaded", text_color=theme.TEXT_MUTED,
             font=ctk.CTkFont(size=11), wraplength=220, justify="left")
-        self.lbl_log_info.pack(pady=(0, 15), padx=20, anchor="w")
+        self.lbl_log_info.pack(pady=(0, 10), padx=20, anchor="w")
+
+        # --- v10/v11: OpenBuilds auto log + evaluate next job ----------------
+        self._auto_log_var = ctk.BooleanVar(value=self.app.openbuilds_logger.auto_log)
+        ctk.CTkCheckBox(
+            parent, text="Auto-save a log for every OpenBuilds job", variable=self._auto_log_var,
+            font=ctk.CTkFont(size=11), command=self._on_toggle_auto_log
+        ).pack(pady=(0, 6), padx=20, anchor="w")
+        self.btn_record = ctk.CTkButton(
+            parent, text="▶ Evaluate Next Job from OpenBuilds",
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_toggle_record)
+        self.btn_record.pack(pady=(0, 5), padx=20, fill="x")
+        self.lbl_record = ctk.CTkLabel(
+            parent, text=self.app.openbuilds_logger.status,
+            text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11), wraplength=220, justify="left")
+        self.lbl_record.pack(pady=(0, 2), padx=20, anchor="w")
+        ctk.CTkButton(
+            parent, text="📁 Log folder…", height=22, width=110,
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+            font=ctk.CTkFont(size=10), command=self._on_change_log_dir
+        ).pack(pady=(0, 15), padx=20, anchor="w")
 
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(0, 15))
 
@@ -234,6 +274,7 @@ class EvaluationLeftPanel:
         ready = (app.geo.mesh is not None and app.geo.step_data is not None
                 and getattr(app, 'holes_detected', False) and app.current_holes)
         self.btn_load_log.configure(state="normal" if ready else "disabled")
+        self.btn_record.configure(state="normal" if ready or self._waiting_for_job else "disabled")
         self.btn_load_schema.configure(state="normal" if ready else "disabled")
 
         result = getattr(app, 'evaluation_result', None)
@@ -245,9 +286,19 @@ class EvaluationLeftPanel:
         if result:
             log_name  = result.get('log_filename', '—')
             total_pts = result.get('total_points', 0)
+            pts = result.get('_actual_points') or []
+            no_wco = bool(pts) and all(p.get('wco') is None for p in pts)
+            warn = ""
+            if result.get('sequence_mismatch'):   # v12: จำนวนจุด log ≠ schema — จับคู่ได้แค่ส่วนแรก
+                warn += (f"\n⚠ Point count differs: log {result.get('actual_count')} vs expected "
+                         f"{result.get('expected_count')} — only the first {total_pts} were compared. "
+                         f"Wrong schema/log pair?")
+            if no_wco:
+                warn += ("\n⚠ No work offset (WCO) in this log — points are machine\n"
+                         "coordinates. Use Evaluate Next Job from OpenBuilds.")
             self.lbl_log_info.configure(
-                text=f"Loaded: {log_name}\n{total_pts} points parsed",
-                text_color=theme.TEXT_SECONDARY)
+                text=f"Loaded: {log_name}\n{total_pts} points compared" + warn,
+                text_color=theme.WARN_TEXT if warn else theme.TEXT_SECONDARY)
 
             failed = result.get('failed_points', 0)
             if total_pts:
@@ -267,14 +318,29 @@ class EvaluationLeftPanel:
                 'unavailable': "Tip compensation: unavailable (schema has no probe directions"
                                " — re-export G-code + schema)",
             }.get(comp, "Tip compensation: off")
+            depth_text, depth_warn = self._depth_status_text()   # v13
             self.lbl_hole_rate.configure(
-                text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text,
-                text_color=theme.WARN_TEXT if comp == 'unavailable' else theme.TEXT_MUTED,
+                text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text
+                     + depth_text,
+                text_color=(theme.WARN_TEXT if comp == 'unavailable' or depth_warn
+                            else theme.TEXT_MUTED),
                 justify="left", wraplength=260)
         else:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
+
+    def _depth_status_text(self):
+        """v13: ' Depth checked x / y holes' จากแผงขวา (เวอร์เนียร์ / โพรบแตะพื้น)"""
+        sp = getattr(self.app, 'evaluation_sidebar_panel', None)
+        if sp is None or not hasattr(sp, 'depth_status'):
+            return "", False
+        done, total = sp.depth_status()
+        if not total:
+            return "", False
+        if done < total:
+            return f"\n⚠ Depth checked {done} / {total} holes — enter caliper depths (right panel)", True
+        return f"\nDepth checked {done} / {total} holes", False
 
     # ------------------------------------------------------------------
     # Schema (.json) load (direct replace) / clear
@@ -467,11 +533,11 @@ class EvaluationLeftPanel:
             expected_points = app.loaded_expected_points
         else:
             try:
-                from core.work_zero import work_zero_origin
+                from core.work_zero import machining_origin
                 rot = getattr(app, 'screen_rotation', 0)
-                origin = work_zero_origin(app.geo.mesh, view_name, rot,
-                                          getattr(app, 'work_zero', 'centroid'))
-                expected_points = build_point_map(selected, view_name, rot, origin)
+                origin = machining_origin(app, view_name, rot)   # รวมการเลื่อน Z ตามวิธีตั้ง Z0
+                expected_points = build_point_map(selected, view_name, rot, origin,
+                                                  z_trigger=app.probe_profile.z_trigger)
             except Exception as e:
                 _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
                 return False
@@ -561,3 +627,75 @@ class EvaluationLeftPanel:
             return
 
         self._evaluate_and_apply(actual_points, os.path.basename(filepath))
+
+    # ------------------------------------------------------------------
+    # v10/v11: OpenBuilds — ตัวบันทึก log ทำงานเบื้องหลังตั้งแต่เปิดโปรแกรม
+    # (ui/openbuilds_logger.py) ปุ่มนี้แค่ "รอ job ถัดไปแล้วประเมินผลให้"
+    # ------------------------------------------------------------------
+    def _on_change_log_dir(self):
+        logger = self.app.openbuilds_logger
+        folder = ctk.filedialog.askdirectory(title="Folder for OpenBuilds job logs",
+                                             initialdir=logger.log_dir)
+        if folder:
+            logger.set_log_dir(folder)
+
+    def _on_toggle_auto_log(self):
+        logger = self.app.openbuilds_logger
+        logger.set_auto_log(bool(self._auto_log_var.get()))
+        if self._waiting_for_job:
+            logger.start()        # ยังรอประเมินผล job ถัดไปอยู่ — ต่อไว้จนจบรอบนี้
+
+    def _on_logger_settings(self):
+        if self._built:
+            self._auto_log_var.set(self.app.openbuilds_logger.auto_log)
+
+    def _on_logger_status(self, text: str):
+        if not self._built:
+            return
+        color = (theme.WARN_TEXT if text.startswith("⚠") else
+                 theme.ERR_TEXT if text.startswith("●") else theme.TEXT_MUTED)
+        if self._waiting_for_job and not text.startswith(("⚠", "●")):
+            text, color = "Waiting for the next job — run the G-code in OpenBuilds Control.", theme.TEXT_SECONDARY
+        self.lbl_record.configure(text=text, text_color=color)
+
+    def _set_waiting(self, waiting: bool):
+        self._waiting_for_job = waiting
+        if waiting:
+            self.btn_record.configure(text="⏹ Cancel", fg_color=theme.BTN_SECONDARY,
+                                      hover_color=theme.BTN_SECONDARY_HOVER)
+        else:
+            self.btn_record.configure(text="▶ Evaluate Next Job from OpenBuilds",
+                                      fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER)
+        self._on_logger_status(self.app.openbuilds_logger.status)
+
+    def _on_toggle_record(self):
+        logger = self.app.openbuilds_logger
+        if self._waiting_for_job:
+            self._set_waiting(False)
+            if not logger.auto_log:
+                logger.stop()
+            return
+        app = self.app
+        if app.geo.mesh is None or app.geo.step_data is None or not app.current_holes:
+            _mb.showwarning("Not Ready", "กรุณาโหลด STEP + Generate Holes (หรือโหลด Schema) ก่อน")
+            return
+        logger.start()            # ถ้าปิด auto-log ไว้ ให้ต่อเฉพาะรอบนี้
+        self._set_waiting(True)
+
+    def _on_job_saved(self, job, path):
+        """callback จาก ui/openbuilds_logger.py หลังบันทึกไฟล์ของแต่ละ job"""
+        if not self._waiting_for_job:
+            return
+        self._set_waiting(False)
+        if not self.app.openbuilds_logger.auto_log:
+            self.app.openbuilds_logger.stop()
+        try:
+            from core.log_parser import parse_openbuilds_log
+            actual_points = parse_openbuilds_log(path)
+        except Exception as e:
+            _mb.showerror("Parse Failed", f"อ่าน log ไม่สำเร็จ:\n{e!r}")
+            return
+        self.lbl_record.configure(text=f"Job {job.result} — {job.probe_count} point(s), evaluated:\n{path}",
+                                  text_color=theme.OK_TEXT if job.result.startswith("completed")
+                                  else theme.WARN_TEXT)
+        self._evaluate_and_apply(actual_points, os.path.basename(path))

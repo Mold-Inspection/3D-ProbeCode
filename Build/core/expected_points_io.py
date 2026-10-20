@@ -72,7 +72,7 @@ def export_schema_json(holes: list, view_name: str, filepath: str,
                         source_step_filename: str = None,
                         tolerance_mm_at_export: float = None,
                         screen_rot: int = 0,
-                        origin=None, work_zero: str = None) -> dict:
+                        origin=None, work_zero: str = None, z_trigger: bool = False) -> dict:
     """คำนวณ expected points ผ่าน build_point_map() แล้วเขียนรวมกับ
     settings_snapshot (มาจาก core/evaluation_engine.py::
     build_settings_snapshot() เสมอ — ผู้เรียกเป็นคนสร้างแล้วส่งเข้ามา ไม่
@@ -114,7 +114,7 @@ def export_schema_json(holes: list, view_name: str, filepath: str,
            ในแอปต่อได้ทันที โดยไม่ต้องเปิดไฟล์กลับมาอ่านหรือคำนวณ
            build_point_map() ซ้ำ
     """
-    points = build_point_map(holes, view_name, screen_rot, origin)
+    points = build_point_map(holes, view_name, screen_rot, origin, z_trigger=z_trigger)   # + จุดพื้นก้นรู
 
     payload = {
         "schema_version":         _SCHEMA_VERSION,

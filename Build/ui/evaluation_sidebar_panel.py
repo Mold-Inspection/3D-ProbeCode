@@ -3,7 +3,20 @@
 # ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
 # comparison_v02.md)
 # ==============================================================================
-# VERSION: 03
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   FIX (layout): warning_frame ว่าง (CTkFrame สูง 200 px โดยปริยาย) ถูก pack ไว้เสมอ
+#   ดันการ์ดรูลงไปกลางจอ — ตอนนี้ pack เฉพาะเมื่อมีข้อความ การ์ดแรกอยู่ใต้ Tolerance 5 px
+#   FEATURE: เตือนให้กรอก Caliper depth — รูที่มีพื้นแต่โพรบไม่ได้แตะพื้นและยังไม่มีค่า:
+#   แบนเนอร์สีส้มใต้ Tolerance (+ ปุ่ม 'Fill in ▸' เปิดการ์ดและโฟกัสช่องกรอก),
+#   แท็ก '⚠ caliper depth' บนหัวการ์ด, กรอบช่องกรอกสีส้ม + '(required)' และสรุป
+#   'Depth checked x / y holes' ที่แผงซ้าย — หายเองเมื่อกรอกครบ
+# CHANGE LOG (v03 -> v04):
+#   FEATURE: ส่วน "Depth" ในการ์ดรู — ความลึกสูงสุดตาม CAD (ถึงพื้น หรือรูทะลุ + ช่วงของ
+#   แต่ละ segment), ความลึกพื้นที่โพรบวัดได้ (เมื่อเปิด Z trigger) และช่องกรอกค่าจาก
+#   เวอร์เนียร์ (เทียบกับ CAD ด้วย tolerance เดียวกัน, จำค่าไว้ต่อไฟล์ STEP ใน
+#   settings.json) — แสดงได้แม้ยังไม่ได้โหลด .log (การ์ดขึ้น "no data")
+#   หัวการ์ดแสดงความลึก (↧) ด้วย
 # CHANGE LOG (v02 -> v03):
 #   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
 #   Requirement 5 — "แสดงผลลัพธ์...ให้อะไรที่ผ่าน threshold เป็นสีเขียว
@@ -40,8 +53,12 @@
 #   _ROW_PASS/_ROW_FAIL colors ของพื้นหลังแถวจุดวัดรายจุด (v03)
 # ==============================================================================
 import customtkinter as ctk
+import numpy as np
 import tkinter.messagebox as _mb
 
+from core import user_settings
+from core.evaluation_engine import _hole_fingerprint
+from core.models import hole_floor_depth
 from ui.evaluation_left_panel import _remap_holes_by_gi
 from ui import theme
 
@@ -72,7 +89,7 @@ class EvaluationSidebarPanel:
 
         # --- tolerance row ---------------------------------------------
         tol_frame = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
-        tol_frame.pack(padx=20, pady=(0, 10), fill="x")
+        tol_frame.pack(padx=20, pady=(0, 5), fill="x")   # v05: การ์ดแรกอยู่ใต้ Tolerance 5 px
         row = ctk.CTkFrame(tol_frame, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=8)
         ctk.CTkLabel(row, text="Tolerance (mm):", text_color=theme.TEXT_SECONDARY).pack(side="left")
@@ -82,11 +99,13 @@ class EvaluationSidebarPanel:
         ctk.CTkButton(row, text="Apply", width=70, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      command=self._on_apply_tolerance).pack(side="left")
 
-        self.warning_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        self.warning_frame.pack(padx=20, fill="x")
+        # v05: pack เฉพาะเมื่อมีข้อความเตือน (_pack_warning_frame)
+        self.warning_frame = ctk.CTkFrame(parent, fg_color="transparent", height=1)
+        self._depth_banner = None
 
-        self.list_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent")
-        self.list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        # corner_radius=0: ขอบโค้งด้านในของ CTkScrollableFrame เว้นที่ว่างด้านบนอีก ~9 px
+        self.list_frame = ctk.CTkScrollableFrame(parent, fg_color="transparent", corner_radius=0)
+        self.list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 5))
 
         self._built = True
         self.refresh()
@@ -103,20 +122,22 @@ class EvaluationSidebarPanel:
             w.destroy()
         for w in self.warning_frame.winfo_children():
             w.destroy()
+        self._depth_banner = None
         self._hole_widgets = {}
 
         result = getattr(app, 'evaluation_result', None)
         if not result:
+            # v04: ยังแสดงการ์ดรูได้ (ส่วน Depth + กรอกค่าเวอร์เนียร์) แม้ยังไม่มี .log
             ctk.CTkLabel(
                 self.list_frame,
-                text="No evaluation data yet.\nLoad a .log file from the left panel.",
-                text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12), justify="left"
-            ).pack(pady=20, padx=10)
-            return
+                text="No probe data yet — load or record a .log from the left panel.\n"
+                     "Hole depths (CAD) and caliper entries are below.",
+                text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left"
+            ).pack(pady=(10, 6), padx=10, anchor="w")
+        else:
+            self._build_warning_banner(result)
 
-        self._build_warning_banner(result)
-
-        holes_result = result.get('holes', {}) or {}
+        holes_result = (result or {}).get('holes', {}) or {}
         any_card = False
         for gi, h in enumerate(app.current_holes):
             if not getattr(h, 'selected_for_inspection', False):
@@ -130,6 +151,7 @@ class EvaluationSidebarPanel:
                 self.list_frame, text="No holes are currently selected for inspection.",
                 text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12)
             ).pack(pady=20, padx=10)
+        self._update_depth_prompts()   # v05: แบนเนอร์ความลึก + แสดง/ซ่อนพื้นที่เตือน
 
     def _build_warning_banner(self, result: dict):
         # v03: the §6 stale-settings guard has nothing to warn about when
@@ -148,7 +170,7 @@ class EvaluationSidebarPanel:
                 text_color=theme.WARN_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
                 wraplength=380, justify="left",
                 fg_color=theme.WARN_BG, corner_radius=6
-            ).pack(fill="x", pady=(0, 10), ipady=6)
+            ).pack(fill="x", pady=(0, 5), ipady=6)
         elif result.get('expected_source') != 'json' and getattr(self.app, 'last_export_snapshot', None) is None:
             ctk.CTkLabel(
                 self.warning_frame,
@@ -156,7 +178,7 @@ class EvaluationSidebarPanel:
                      "results assume the current configuration matches what was run.",
                 text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=10),
                 wraplength=380, justify="left"
-            ).pack(fill="x", pady=(0, 10))
+            ).pack(fill="x", pady=(0, 5))
 
     # ------------------------------------------------------------------
     def _bind_hover_recursive(self, widget, on_enter, on_leave):
@@ -175,7 +197,7 @@ class EvaluationSidebarPanel:
         self._hole_widgets[gi] = widgets
 
         item_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        item_frame.pack(fill="x", padx=10, pady=4)
+        item_frame.pack(fill="x", padx=10, pady=(0, 8))   # v05: ชิดด้านบน
 
         if info is None:
             badge, color = "⚪ no data", _COLOR_NODATA
@@ -185,12 +207,18 @@ class EvaluationSidebarPanel:
             badge = f"❌ ({info.get('passed_points', 0)}/{info.get('total_points', 0)} pts)"
             color = _COLOR_FAIL
 
+        floor, length, _parts = self._depth_info(hole)   # v04: ความลึกบนหัวการ์ด
+        depth_tag = (f"   ↧{floor:.2f}" if floor is not None else
+                     f"   ↧{length:.2f} thru" if length is not None else "")
         btn = ctk.CTkButton(
-            item_frame, text=f"Hole {hole.display_id}   {badge}", anchor="w",
+            item_frame, text=f"Hole {hole.display_id}   {badge}{depth_tag}", anchor="w",
             fg_color=color, hover_color=color,
             command=lambda: self._toggle_hole(gi))
         btn.pack(fill="x")
         widgets['btn'] = btn
+        widgets['btn_text'] = f"Hole {hole.display_id}   {badge}{depth_tag}"   # v05
+        widgets.update(hole=hole, floor=floor, fp=_hole_fingerprint(hole),
+                       probed_floor=bool((info or {}).get('floor')))
 
         def enter(e, g=gi):
             if self.app.current_tab == "Evaluation" and hasattr(self.app, 'evaluation_tab'):
@@ -204,10 +232,12 @@ class EvaluationSidebarPanel:
 
         body = ctk.CTkFrame(item_frame, fg_color=theme.BG_INPUT, corner_radius=6)
         widgets['body'] = body
+        self._build_depth_block(body, hole, info, gi)   # v04
 
         if info is None:
             ctk.CTkLabel(
-                body, text="No matching probe data found for this hole in the log.",
+                body, text=("No matching probe data found for this hole in the log."
+                            if getattr(self.app, 'evaluation_result', None) else "No probe data yet."),
                 text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11),
                 wraplength=280, justify="left"
             ).pack(padx=10, pady=8, anchor="w")
@@ -362,6 +392,203 @@ class EvaluationSidebarPanel:
         state['show_all'] = not state['show_all']
         self._render_point_table(state['table_frame'], gi, seg_idx, layer_idx)
 
+
+    # ------------------------------------------------------------------
+    # v04: ความลึกของรู — CAD / โพรบแตะพื้น (Z trigger) / เวอร์เนียร์ (กรอกเอง)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _depth_info(hole):
+        """(ความลึกพื้นตาม CAD หรือ None ถ้ารูทะลุ, ความยาวรูตาม CAD, ['⌀.. : a–b mm', ...])"""
+        sh = getattr(hole, '_step_hole', None)
+        if sh is None:
+            return None, None, []
+        o = np.asarray(sh.open_3d, dtype=float)
+        parts = []
+        segs = getattr(sh, 'segments', None) or []
+        if len(segs) > 1:
+            for seg in reversed(segs):   # segments เรียงลึกสุดก่อน — แสดงจากปากรูลงไป
+                a = float(np.linalg.norm(np.asarray(seg.open_3d, dtype=float) - o))
+                b = float(np.linalg.norm(np.asarray(seg.deep_3d, dtype=float) - o))
+                parts.append(f"⌀{2 * max(seg.radius_open, seg.radius_deep):.2f}: "
+                             f"{min(a, b):.2f} – {max(a, b):.2f} mm")
+        return hole_floor_depth(sh), float(sh.depth), parts
+
+    def _manual_depths(self) -> dict:
+        """ค่าความลึกที่กรอกเอง (เวอร์เนียร์) ของไฟล์ STEP นี้ — จำไว้ใน settings.json"""
+        all_ = user_settings.get("manual_depths", {}) or {}
+        return all_.get(getattr(self.app, 'loaded_step_filename', None) or "?", {}) or {}
+
+    def _save_manual_depth(self, fp: str, value):
+        all_ = user_settings.get("manual_depths", {}) or {}
+        key = getattr(self.app, 'loaded_step_filename', None) or "?"
+        mine = all_.get(key, {}) or {}
+        if value is None:
+            mine.pop(fp, None)
+        else:
+            mine[fp] = value
+        all_[key] = mine
+        user_settings.save_section("manual_depths", all_)
+
+    def _build_depth_block(self, parent, hole, info, gi=None):
+        floor, length, parts = self._depth_info(hole)
+        if length is None:
+            return
+        tol = float(getattr(self.app, 'evaluation_tolerance_mm', 0.5))
+        box = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=5)
+        box.pack(fill="x", padx=6, pady=(8, 2))
+        lines = ([f"Depth (CAD): {floor:.3f} mm to the floor"] if floor is not None else
+                 [f"Through hole — length {length:.3f} mm (no floor)"])
+        lines += [f"  {p}" for p in parts]
+        ctk.CTkLabel(box, text="\n".join(lines), anchor="w", justify="left",
+                     font=ctk.CTkFont(family=theme.FONT_MONO, size=10),
+                     text_color=theme.TEXT_SECONDARY).pack(fill="x", padx=8, pady=(6, 2))
+        if floor is None:
+            return
+
+        fl = (info or {}).get('floor')
+        if fl:
+            err = fl.get('depth_error', 0.0)
+            ok = fl.get('passed', False)
+            ctk.CTkLabel(box, anchor="w", font=ctk.CTkFont(family=theme.FONT_MONO, size=10),
+                         text=f"Probed floor: {floor + err:.3f} mm ({err:+.3f}) {'✅' if ok else '❌'}",
+                         text_color=theme.OK_TEXT if ok else theme.ERR_TEXT).pack(fill="x", padx=8)
+        else:
+            probing = (getattr(self.app.probe_profile, 'z_trigger', False)
+                       and getattr(hole, 'measure_floor', False))
+            ctk.CTkLabel(box, anchor="w", font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED,
+                         text=("Floor not probed in this log — or measure it with a caliper:" if probing
+                               else "Floor not probed — measure it with a caliper:")
+                         ).pack(fill="x", padx=8)
+
+        fp = _hole_fingerprint(hole)
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(2, 6))
+        lbl = ctk.CTkLabel(row, text="Caliper depth:", font=ctk.CTkFont(size=10),
+                           text_color=theme.TEXT_SECONDARY)
+        lbl.pack(side="left")
+        ent = ctk.CTkEntry(row, width=70, height=24, font=ctk.CTkFont(size=11), placeholder_text="mm")
+        ent.pack(side="left", padx=(6, 6))
+        if gi is not None:   # v05: ให้ _update_depth_prompts() เน้นช่องนี้ได้
+            w = self._hole_widgets[gi]
+            w.update(caliper_entry=ent, caliper_label=lbl,
+                     entry_border=ent.cget("border_color"), entry_border_w=ent.cget("border_width"))
+        res = ctk.CTkLabel(row, text="", font=ctk.CTkFont(family=theme.FONT_MONO, size=10))
+        res.pack(side="left")
+        saved = self._manual_depths().get(fp)
+        if saved is not None:
+            ent.insert(0, f"{float(saved):g}")
+
+        def show(value):
+            if value is None:
+                res.configure(text="")
+                return
+            err = value - floor
+            ok = abs(err) <= tol
+            res.configure(text=f"{err:+.3f} {'✅' if ok else '❌'}",
+                          text_color=theme.OK_TEXT if ok else theme.ERR_TEXT)
+
+        def commit(_e=None):
+            text = ent.get().strip()
+            if not text:
+                self._save_manual_depth(fp, None)
+                show(None)
+            else:
+                try:
+                    value = float(text)
+                except ValueError:
+                    res.configure(text="number?", text_color=theme.WARN_TEXT)
+                    return
+                self._save_manual_depth(fp, value)
+                show(value)
+            self._update_depth_prompts()   # v05
+
+        ent.bind("<Return>", commit)
+        ent.bind("<FocusOut>", commit)
+        show(None if saved is None else float(saved))
+
+
+    # ------------------------------------------------------------------
+    # v05: เตือนให้กรอกความลึกจากเวอร์เนียร์ — รูที่มีพื้นแต่โพรบไม่ได้แตะพื้น
+    # ------------------------------------------------------------------
+    def _needs_caliper(self, gi) -> bool:
+        w = self._hole_widgets.get(gi) or {}
+        if w.get('floor') is None or w.get('probed_floor'):
+            return False
+        return w.get('fp') not in self._manual_depths()
+
+    def depth_status(self):
+        """(จำนวนรูที่ตรวจความลึกแล้ว, จำนวนรูที่มีพื้นทั้งหมด) — ให้แผงซ้ายแสดงสรุป"""
+        need = [gi for gi, w in self._hole_widgets.items() if w.get('floor') is not None]
+        done = [gi for gi in need if not self._needs_caliper(gi)]
+        return len(done), len(need)
+
+    def _update_depth_prompts(self):
+        """อัปเดตแบนเนอร์เตือน + แท็ก ⚠ บนหัวการ์ด + กรอบช่องกรอก ให้ตรงกับค่าปัจจุบัน"""
+        missing = [gi for gi in self._hole_widgets if self._needs_caliper(gi)]
+        for gi, w in self._hole_widgets.items():
+            if 'btn' not in w:
+                continue
+            need = gi in missing
+            w['btn'].configure(text=w['btn_text'] + ("   ⚠ caliper depth" if need else ""))
+            ent = w.get('caliper_entry')
+            if ent is not None:
+                ent.configure(border_color=theme.WARN_TEXT if need else w['entry_border'],
+                              border_width=2 if need else w['entry_border_w'])
+                w['caliper_label'].configure(
+                    text="Caliper depth (required):" if need else "Caliper depth:",
+                    text_color=theme.WARN_TEXT if need else theme.TEXT_SECONDARY)
+
+        if self._depth_banner is not None:
+            self._depth_banner.destroy()
+            self._depth_banner = None
+        if missing:
+            names = ", ".join(str(getattr(self._hole_widgets[gi]['hole'], 'display_id', '?'))
+                              for gi in missing)
+            banner = ctk.CTkFrame(self.warning_frame, fg_color=theme.WARN_BG, corner_radius=6)
+            banner.pack(fill="x", pady=(0, 5))
+            ctk.CTkLabel(
+                banner, anchor="w", justify="left", wraplength=290,
+                text_color=theme.WARN_TEXT, font=ctk.CTkFont(size=11, weight="bold"),
+                text=(f"⚠ Depth not checked — hole {names}\n"
+                      f"The probe does not touch the floor. Measure the depth with a caliper "
+                      f"and type it into 'Caliper depth' in the hole card.")
+            ).pack(side="left", fill="x", expand=True, padx=(10, 6), pady=6)
+            ctk.CTkButton(banner, text="Fill in ▸", width=70, height=26,
+                          fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+                          font=ctk.CTkFont(size=11),
+                          command=lambda: self._show_caliper_inputs(missing)
+                          ).pack(side="right", padx=(0, 8), pady=6)
+            self._depth_banner = banner
+        self._pack_warning_frame()
+        if hasattr(self.app, 'evaluation_left_panel'):
+            self.app.evaluation_left_panel.refresh()
+
+    def _show_caliper_inputs(self, gis):
+        """ปุ่ม 'Fill in ▸' — เปิดการ์ดของรูที่ยังไม่ได้กรอก แล้วโฟกัสช่องแรก"""
+        first = None
+        for gi in gis:
+            w = self._hole_widgets.get(gi) or {}
+            if not w.get('is_expanded'):
+                self._toggle_hole(gi)
+            if first is None and w.get('caliper_entry') is not None:
+                first = w['caliper_entry']
+        if first is not None:
+            first.focus_set()
+            try:   # เลื่อนรายการให้เห็นการ์ดแรกที่ต้องกรอก
+                self.list_frame._parent_canvas.yview_moveto(0.0)
+            except Exception:
+                pass
+
+    def _pack_warning_frame(self):
+        """แสดงพื้นที่เตือนเฉพาะเมื่อมีข้อความ — CTkFrame ว่างสูง 200 px โดยปริยาย
+        (เคยดันรายการการ์ดรูลงไปกลางจอ)"""
+        if self.warning_frame.winfo_children():
+            # CTkScrollableFrame: ตัวที่ถูก pack จริงคือกรอบนอก _parent_frame
+            anchor = getattr(self.list_frame, '_parent_frame', self.list_frame)
+            self.warning_frame.pack(padx=20, fill="x", pady=(0, 0), before=anchor)
+        else:
+            self.warning_frame.pack_forget()
+
     # ------------------------------------------------------------------
     def _on_apply_tolerance(self):
         app = self.app
@@ -378,6 +605,7 @@ class EvaluationSidebarPanel:
         if result is None:
             # nothing to re-run yet — value is stored and will be used the
             # next time a .log is loaded from the left panel
+            self.refresh()   # v04: ผลเทียบค่าเวอร์เนียร์ใช้ tolerance นี้ด้วย
             return
 
         try:

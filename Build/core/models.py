@@ -36,6 +36,10 @@
 # ผนังปลายทั้งสองด้านจึงไม่มีช่วงตรง — rect_wall_contacts() วางจุดของผนัง
 # ปลายบนส่วนโค้งครึ่งวงกลมแทน (กระจายตามมุม ±RECT_CONTACT_SPAN × 90°)
 #
+# NOTE (v06): ระยะเผื่อพื้น — layer_fractions() ยกชั้นวัดที่ลึกสุดให้สูงกว่าพื้น/ขั้น
+# ใต้ลูกบอลอย่างน้อย รัศมีหัวโพรบ + floor clearance (FLOOR_SAFETY) และ
+# HoleFeature.measure_floor = แตะพื้นก้นรูแนวแกน Z (เฉพาะหัวโพรบที่ทริกแนว Z ได้)
+#
 # ตัวแปรที่ปรับจูนได้ (v04):
 #   RECT_CONTACT_SPAN = สัดส่วนช่วงความยาวด้านตรงที่วางจุดสัมผัสได้ (0..1)
 #                       — กันหัวโพรบไม่ให้ไปโดนผนังข้างเคียงใกล้มุม
@@ -58,6 +62,64 @@ def clamp_layers(n) -> int:
     except (TypeError, ValueError):
         n = MIN_LAYERS
     return max(MIN_LAYERS, min(MAX_LAYERS, n))
+
+
+# ------------------------------------------------------------------------------
+# v06: ระยะเผื่อพื้น — ชั้นวัดที่ลึกที่สุดต้องอยู่สูงกว่าพื้น/ขั้นที่อยู่ใต้ลูกบอลอย่างน้อย
+# (รัศมีหัวโพรบ + floor clearance) กันลูกบอลจมพื้นเมื่อ Set Zero แกน Z ผิดเล็กน้อย
+# — หัวโพรบส่วนใหญ่ทริกเฉพาะแนวด้านข้าง ถ้าชนพื้นเครื่องจะไม่หยุด
+# ค่าใน FLOOR_SAFETY ตั้งจาก Hardware Setting (ui/main_window.py → set_floor_safety)
+# ------------------------------------------------------------------------------
+FLOOR_SAFETY = {'tip_r': 0.0, 'clearance': 0.0}
+FLOOR_MATCH_TOL = 0.5   # พื้นที่ยิงเส้นเจอ ลึกเกินก้นรูไม่เกินนี้ (+ ครึ่งรัศมี — ปลายดอกสว่าน) = พื้นของรูนี้
+
+
+def set_floor_safety(tip_radius: float, clearance: float) -> None:
+    FLOOR_SAFETY['tip_r'] = max(0.0, float(tip_radius))
+    FLOOR_SAFETY['clearance'] = max(0.0, float(clearance))
+
+
+def hole_floor_depth(sh):
+    """ความลึกจากปากรูถึงพื้น (ตามแกนรู ที่กลางรู) จาก B-Rep — None = รูทะลุ / ไม่มีพื้นของรูนี้
+    sh.floor_depth วัดโดย core/step_extractor.py::_measure_floor_depths(); ถ้ายังไม่ได้วัด
+    ถือว่ามีพื้นที่ก้นรูพอดี (ปลอดภัยไว้ก่อน)"""
+    if not hasattr(sh, 'floor_depth'):
+        return float(sh.depth)
+    fd = sh.floor_depth
+    if fd is None:
+        return None
+    tol = FLOOR_MATCH_TOL + 0.5 * float(getattr(sh, 'radius', 0.0) or 0.0)
+    return float(fd) if float(fd) <= float(sh.depth) + tol else None
+
+
+def surface_below(sh, seg_index=None):
+    """ระยะจากก้นของช่วงที่วัด (segment หรือทั้งรู) ลงไปถึงผิวที่อยู่ใต้ลูกบอลตอนแตะผนัง
+    0 = มีพื้น/ขั้นอยู่ที่ก้นพอดี, None = ไม่มีอะไรรองรับ (รูทะลุ)
+    seg_index: ลำดับใน sh.segments (0 = ลึกสุด) — None = รูทั้งรู (segment เดียว)"""
+    segs = getattr(sh, 'segments', None) or []
+    multi = seg_index is not None and len(segs) > 1
+    if multi and seg_index > 0:
+        return 0.0   # ใต้ผนังของ segment บนคือขั้น (ledge) ของ segment ที่แคบกว่า
+    fd = hole_floor_depth(sh)
+    if fd is None:
+        return None
+    end = (float(np.linalg.norm(np.asarray(segs[0].deep_3d, dtype=float)
+                                - np.asarray(sh.open_3d, dtype=float))) if multi else float(sh.depth))
+    return max(0.0, fd - end)
+
+
+def layer_fractions(n, length: float, below=None) -> np.ndarray:
+    """ตำแหน่ง t ของแต่ละชั้น (0 = ปาก, 1 = ก้นของช่วง) — ปกติแบ่งเท่ากัน i/(n+1)
+    ถ้าชั้นลึกสุดจะอยู่ใกล้ผิวด้านล่าง (below) น้อยกว่า tip_r + clearance → ย่นทุกชั้นขึ้น
+    ตามสัดส่วนให้ได้ระยะเผื่อ (ถ้าทำไม่ได้เลย คืนค่าเดิมให้ probe_safety_report() เตือน)"""
+    t = np.linspace(0.0, 1.0, int(n) + 2)[1:-1]
+    need = FLOOR_SAFETY['tip_r'] + FLOOR_SAFETY['clearance']
+    if below is None or need <= 0 or length <= 1e-9 or len(t) == 0:
+        return t
+    t_max = (length + below - need) / length
+    if t_max >= t[-1] or t_max <= 0:
+        return t
+    return t * (t_max / t[-1])
 
 
 def profile_radius(obj, t: float):
@@ -162,6 +224,7 @@ class HoleFeature:
         self.selected_for_inspection = False
         self.zigzag_inspection = False
         self.zigzag_degree = 45.0
+        self.measure_floor = False   # v06: แตะพื้นก้นรูแนวแกน Z (ต้องเปิด Z trigger ใน Hardware Setting)
 
         self.is_rejected = False
         self.reject_reason = ""

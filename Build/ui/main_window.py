@@ -15,7 +15,18 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 19
+# VERSION: 22
+# CHANGE LOG (v21 -> v22):
+#   โหลด self.z0_ref (วิธีตั้ง Z0: ก้นลูกบอล/จุดศูนย์กลางลูกบอล — core/work_zero.py)
+# CHANGE LOG (v20 -> v21):
+#   โหลด probe_profile.floor_clearance / z_trigger จาก settings แล้วตั้ง core.models.
+#   set_floor_safety() (ระยะเผื่อพื้นของชั้นวัด) + checkbox "Measure floor depth (Z)"
+#   ในการ์ด Properties ของแต่ละรู (ใช้ได้เมื่อเปิด Z trigger และรูมีพื้น) —
+#   refresh_floor_options() อัปเดตการ์ดเมื่อเปลี่ยนค่าใน Hardware Setting
+# CHANGE LOG (v19 -> v20):
+#   FEATURE: self.openbuilds_logger (ui/openbuilds_logger.py) — บันทึก log ของทุก
+#   job ใน OpenBuilds Control อัตโนมัติ เริ่มทำงานทันทีที่เปิดหน้าต่างหลัก
+#   (ปิดได้ที่ checkbox ในแท็บ Evaluation — จำค่าไว้)
 # CHANGE LOG (v18 -> v19):
 #   FIX: ขนาดชิ้นงาน (Width X / Length Y / Thickness Z) ตามการหมุนจอแล้ว —
 #   หมุน 90°/270° ค่ากว้าง/ยาวสลับกัน และบอกว่าตรงกับแกนไหนของโมเดล
@@ -52,7 +63,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.colors import LinearSegmentedColormap
 import matplotlib.pyplot as plt
 from core.models import (HoleFeature, HoleSegmentSetting, validate_segment_reachability,
-                         MIN_LAYERS, MAX_LAYERS, clamp_layers)
+                         MIN_LAYERS, MAX_LAYERS, clamp_layers, hole_floor_depth, set_floor_safety)
 from core.probe_profile import ProbeProfile
 from core.machine_profile import MachineProfile
 from ui.tabs.selection_tab import SelectionTab
@@ -60,6 +71,7 @@ from ui.tabs.customization_tab import CustomizationTab
 from ui.tabs.path_mapper_tab import PathMapperTab
 from ui.tabs.evaluation_tab import EvaluationTab
 from ui.evaluation_left_panel import EvaluationLeftPanel
+from ui.openbuilds_logger import OpenBuildsLogger
 from ui.evaluation_sidebar_panel import EvaluationSidebarPanel
 from core.gcode_export_panel import GCodeExportPanel
 from ui.tool_bar import ToolBar
@@ -67,7 +79,7 @@ from ui.tab_strip import TabStrip
 from ui.hardware_setting_dialog import HardwareSettingDialog
 from core.ui_notify import UINotify
 from core import user_settings
-from core.work_zero import WORK_ZERO_CHOICES, DEFAULT_WORK_ZERO
+from core.work_zero import WORK_ZERO_CHOICES, DEFAULT_WORK_ZERO, Z0_REF_CHOICES, DEFAULT_Z0_REF
 from ui import theme
 
 
@@ -142,8 +154,10 @@ class UIManager:
         _saved = user_settings.load()
         user_settings.apply_numbers(self.probe_profile, _saved.get('probe'),
                                     ('stylus_holder_height', 'stylus_length', 'tip_diameter', 'wall_clearance',
-                                     'effective_tip_diameter'),
-                                    allow_zero=('wall_clearance', 'effective_tip_diameter'))
+                                     'effective_tip_diameter', 'floor_clearance'),
+                                    allow_zero=('wall_clearance', 'effective_tip_diameter', 'floor_clearance'))
+        self.probe_profile.z_trigger = bool((_saved.get('probe') or {}).get('z_trigger', False))   # v21
+        set_floor_safety(self.probe_profile.tip_radius, self.probe_profile.floor_clearance)      # v21
         user_settings.apply_numbers(self.machine_profile, _saved.get('machine'),
                                     ('x_travel', 'y_travel', 'z_travel', 'z_height'))
         self.appearance_mode = (_saved.get('appearance')
@@ -159,6 +173,8 @@ class UIManager:
         self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด (live path) — เขียนโดย core/gcode_export_panel.py
         # จุด X0 Y0 Z0 ของ G-code (core/work_zero.py) — เลือกได้ใน G-code Export, จำข้ามการเปิดโปรแกรม
         self.work_zero = _zero if _zero in dict(WORK_ZERO_CHOICES) else DEFAULT_WORK_ZERO
+        # v22: Z0 ตั้งด้วยก้นลูกบอล ('tip', ค่าเริ่มต้น) หรือจุดศูนย์กลางลูกบอล ('center')
+        self.z0_ref = _saved.get('z0_ref') if _saved.get('z0_ref') in dict(Z0_REF_CHOICES) else DEFAULT_Z0_REF
 
         # v15: Expected Points (.json) import state
         self.loaded_expected_points        = None   # list ของ point dicts ที่โหลดมา (None = ยังไม่ได้โหลด, ใช้ live recompute จาก app.current_holes แทน)
@@ -257,6 +273,7 @@ class UIManager:
         # so on_nav_change() can pack_forget() one pair and pack() the other.
         # Not packed here — _show_normal_sidebars() (called at startup below)
         # leaves the normal sidebars visible by default.
+        self.openbuilds_logger        = OpenBuildsLogger(self)   # v20: ต้องมีก่อน Evaluation panel
         self.evaluation_left_panel    = EvaluationLeftPanel(self)
         self.evaluation_sidebar_panel = EvaluationSidebarPanel(self)
 
@@ -482,6 +499,7 @@ class UIManager:
         # 1400x800 เอง — จึงต้องสั่ง maximize หลัง mainloop เริ่มทำงานแล้ว
         self.root.after(0, self._maximize)
         self.root.after(300, self._warm_up_heavy_imports)
+        self.root.after(500, self.openbuilds_logger.start_if_enabled)   # v20
         self.root.mainloop()
 
     def _warm_up_heavy_imports(self):
@@ -602,6 +620,7 @@ class UIManager:
                     'layers':     getattr(h, 'layers',                  3),
                     'points':     getattr(h, 'points_per_layer',        4),
                     'segments':   getattr(h, 'segments', []),
+                    'floor':      getattr(h, 'measure_floor',           False),   # v21
                 }
 
             has_step = (hasattr(self.geo, 'step_data') and self.geo.step_data is not None)
@@ -637,6 +656,7 @@ class UIManager:
                     h.zigzag_degree           = state.get('zigzag_deg', 45.0)
                     h.layers                  = clamp_layers(state.get('layers', MIN_LAYERS))
                     h.points_per_layer        = state.get('points', 4)
+                    h.measure_floor           = state.get('floor', False)          # v21
                     old_segments = state.get('segments') or []
                     if old_segments and len(old_segments) == len(getattr(h, 'segments', [])):
                         h.segments = old_segments
@@ -992,6 +1012,64 @@ class UIManager:
 
             if hole.zigzag_inspection:
                 df.pack(fill="x", padx=15, pady=(0, 8))
+
+        self._build_floor_option(setting_frame, idx, hole)   # v21
+
+    # ------------------------------------------------------------------
+    # v21: วัดความลึกพื้นก้นรู (แนว Z) — ต่อรู
+    # ------------------------------------------------------------------
+    def _floor_option_state(self, hole):
+        """(ใช้ได้ไหม, ข้อความอธิบาย) ของ checkbox Measure floor depth"""
+        sh = getattr(hole, '_step_hole', None)
+        if sh is None:
+            return False, "No STEP geometry"
+        fd = hole_floor_depth(sh)
+        if fd is None:
+            return False, "Through hole — no floor to measure"
+        if not self.probe_profile.z_trigger:
+            return False, (f"Floor {fd:.2f} mm deep (CAD). The probe does not trigger along Z — "
+                           f"turn it on in Hardware Setting → Probe Stylus, or measure with a caliper.")
+        return True, f"Floor {fd:.2f} mm deep (CAD) — touched once at the hole centre after the walls"
+
+    def _build_floor_option(self, parent, idx, hole):
+        widgets = self.hole_widgets[idx]
+        var = ctk.BooleanVar(value=bool(getattr(hole, 'measure_floor', False)))
+        chk = ctk.CTkCheckBox(parent, text="⤓ Measure floor depth (Z)", variable=var,
+                              text_color=theme.TEXT_SECONDARY,
+                              command=lambda: self._on_floor_toggle(idx, var))
+        chk.pack(anchor="w", padx=10, pady=(8, 0))
+        lbl = ctk.CTkLabel(parent, text="", anchor="w", justify="left", font=("", 10),
+                           text_color=theme.TEXT_MUTED, wraplength=_RIGHT_WIDTH - 70)
+        lbl.pack(anchor="w", padx=12, pady=(0, 8))
+        widgets['chk_floor'], widgets['floor_var'], widgets['lbl_floor'] = chk, var, lbl
+        self._refresh_floor_option(idx)
+
+    def _refresh_floor_option(self, idx):
+        widgets = self.hole_widgets.get(idx) or {}
+        chk, hole = widgets.get('chk_floor'), widgets.get('hole')
+        if chk is None or hole is None:
+            return
+        ok, text = self._floor_option_state(hole)
+        chk.configure(state="normal" if ok else "disabled")
+        widgets['floor_var'].set(bool(ok and getattr(hole, 'measure_floor', False)))
+        widgets['lbl_floor'].configure(text=text)
+
+    def _on_floor_toggle(self, idx, var):
+        hole = (self.hole_widgets.get(idx) or {}).get('hole')
+        if hole is None:
+            return
+        hole.measure_floor = bool(var.get())
+        if self.current_tab == "Path Mapper":
+            self.path_mapper_tab.draw_path_mapper()
+        elif self.current_tab == "Customization":
+            self.customization_tab.draw_cross_section()
+
+    def refresh_floor_options(self):
+        """เรียกเมื่อเปลี่ยน Z trigger / floor clearance ใน Hardware Setting"""
+        for idx in list(self.hole_widgets.keys()):
+            self._refresh_floor_option(idx)
+        if self.current_tab == "Customization" and self.geo.mesh is not None:
+            self.customization_tab.draw_cross_section()
 
     def _refresh_contact_status(self, idx):
         """แผง Properties: แจ้งเมื่อจุดโพรบถูกหมุนหลบช่องเปิดในผนังอัตโนมัติ (สีน้ำเงิน)

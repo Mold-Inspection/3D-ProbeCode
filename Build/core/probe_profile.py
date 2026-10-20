@@ -1,7 +1,12 @@
 # ==============================================================================
 # core/probe_profile.py — ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   z_trigger       = หัวโพรบทริกเมื่อถูกดันขึ้นแนวแกน Z ได้หรือไม่ (ค่าเริ่มต้น False —
+#                     หัวโพรบหลายรุ่นทริกเฉพาะด้านข้าง) เปิดแล้วจึงแตะพื้นก้นรูได้
+#   floor_clearance = ระยะว่างขั้นต่ำระหว่างลูกบอลกับพื้น/ขั้นใต้ชั้นวัดที่ลึกสุด (mm)
+#                     กันลูกบอลจมพื้นเมื่อ Set Zero แกน Z ผิดเล็กน้อย
 # CHANGE LOG (v01 -> v02):
 #   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 1):
 #   added `stylus_holder_height` — the height of the probe holder itself
@@ -43,12 +48,18 @@ class ProbeProfile:
     # เส้นผ่าศูนย์กลางหัวโพรบ "ที่ใช้งานจริง" จากการ calibrate กับ Ring Gauge — เล็กกว่าขนาด
     # ลูกบอลเล็กน้อยเพราะก้านโพรบโก่งก่อน trigger ใช้ชดเชยรัศมีตอนประเมินผล (0 = ใช้ tip_diameter)
     effective_tip_diameter: float = 0.0   # mm
+    # v03: ระยะว่างขั้นต่ำระหว่างลูกบอลกับพื้น/ขั้นที่อยู่ใต้ชั้นวัดที่ลึกที่สุด — ชั้นจะถูกยกขึ้นให้เอง
+    floor_clearance: float = 1.0   # mm
+    # v03: หัวโพรบทริกเมื่อถูกดันขึ้นตรง ๆ (แนว Z) ได้ไหม — ปิด = ไม่มีคำสั่งแตะพื้นใน G-code เลย
+    z_trigger: bool = False
  
     DEFAULT_HOLDER_HEIGHT: float = field(default=20.0, init=False, repr=False)  # v02
     DEFAULT_LENGTH: float = field(default=50.0, init=False, repr=False)
     DEFAULT_TIP_D:  float = field(default=2.0,  init=False, repr=False)
     DEFAULT_CLEARANCE: float = field(default=0.5, init=False, repr=False)
     DEFAULT_EFFECTIVE_TIP_D: float = field(default=0.0, init=False, repr=False)
+    DEFAULT_FLOOR_CLEARANCE: float = field(default=1.0, init=False, repr=False)   # v03
+    DEFAULT_Z_TRIGGER: bool = field(default=False, init=False, repr=False)        # v03
  
     # ------------------------------------------------------------------
     @property
