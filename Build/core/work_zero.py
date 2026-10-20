@@ -1,7 +1,11 @@
 # ==============================================================================
 # core/work_zero.py — ตำแหน่ง Work Zero (X0 Y0 Z0) ของ G-code
 # ==============================================================================
-# VERSION: 01
+# VERSION: 03
+# CHANGE LOG (-> v03):
+#   machining_origin(): เลื่อน Z ตามวิธีตั้ง Z0 (app.z0_ref: 'tip' = ก้นลูกบอลแตะผิวบน —
+#   ค่าเริ่มต้น, 'center' = จุดศูนย์กลางลูกบอลอยู่ที่ผิวบน) + z0_note() สำหรับหัว G-code
+#   work_zero_origin() เดิมไม่เปลี่ยน (เครื่องหมาย X0 Y0 บนจอยังอยู่ที่ผิวบน)
 # หน้าที่: ให้ผู้ใช้เลือกได้ว่าจุด zero ของโปรแกรม G-code อยู่ตรงไหนของชิ้นงาน
 # (ตั้งค่าที่ G-code Export → Export Settings → "Work zero") แล้วคำนวณ
 # "origin" = ตำแหน่งของจุดนั้นในพิกัดเครื่อง (machining frame) เพื่อนำไปลบออก
@@ -70,6 +74,44 @@ def zero_hint_text(app) -> str:
             f"in the current {zero_view_text(app)}, shown by the X0 Y0 mark on the "
             "Selection and Customization views. Used by the probe G-code, the "
             "schema and both test programs.")
+
+
+# ------------------------------------------------------------------------------
+# v03: Z0 ตั้งด้วยก้นลูกบอล หรือจุดศูนย์กลางลูกบอล
+# พิกัดใน G-code คือจุดศูนย์กลางลูกบอล — ถ้า Set Zero Z ตอน "ก้นลูกบอลแตะผิวบน" (วิธีที่ทำกัน
+# ปกติ) ลูกบอลจะสูงกว่าที่โปรแกรมคิดเท่ารัศมี จึงเลื่อน Z ของทุกจุด (G-code + Schema) ลง r
+# ------------------------------------------------------------------------------
+Z0_REF_CHOICES = [
+    ("tip",    "Ball bottom touches the top surface"),
+    ("center", "Ball centre at the top surface"),
+]
+DEFAULT_Z0_REF = "tip"
+
+
+def z0_ref_label(ref: str) -> str:
+    return dict(Z0_REF_CHOICES).get(ref, dict(Z0_REF_CHOICES)[DEFAULT_Z0_REF])
+
+
+def z0_ref_of_label(label: str) -> str:
+    return next((k for k, t in Z0_REF_CHOICES if t == label), DEFAULT_Z0_REF)
+
+
+def machining_origin(app, view_name: str, screen_rot: int = 0) -> np.ndarray:
+    """จุด zero ที่ใช้เขียน G-code / Schema = work_zero_origin() + เลื่อน Z ตามวิธีตั้ง Z0
+    (ref 'tip' → +รัศมีลูกบอล: ทุกพิกัด Z ลดลง r) — mesh centroid ไม่เลื่อน"""
+    mode = getattr(app, 'work_zero', DEFAULT_WORK_ZERO)
+    org = np.array(work_zero_origin(app.geo.mesh, view_name, screen_rot, mode), dtype=float)
+    if mode in _POINT_TEXT and getattr(app, 'z0_ref', DEFAULT_Z0_REF) == "tip":
+        org[2] += float(app.probe_profile.tip_radius)
+    return org
+
+
+def z0_note(app) -> str:
+    """ต่อท้ายหัวไฟล์ G-code — บอกว่าต้องตั้ง Z0 ด้วยวิธีไหน"""
+    if getattr(app, 'z0_ref', DEFAULT_Z0_REF) == "tip":
+        return "; set Z0 with the ball BOTTOM touching the top surface"
+    return (f"; set Z0 with the ball CENTRE at the top surface "
+            f"(ball touching, then G10 L20 P1 Z{float(app.probe_profile.tip_radius):.3f})")
 
 
 def describe(mode: str) -> str:

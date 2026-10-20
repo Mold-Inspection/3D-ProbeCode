@@ -2,7 +2,11 @@
 # ui/openbuilds_logger.py — ตัวบันทึก log ของ OpenBuilds Control ที่ทำงานเบื้องหลัง
 # ตั้งแต่เปิดหน้าต่างหลัก (ไม่ต้องเปิด start_openbuilds_logger.bat แยก)
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   on_event (ทุก event ใน main thread), send_gcode()/stop_machine() ส่งคำสั่งผ่าน
+#   OpenBuilds และ suppress_logs() — งานแตะผนังตั้ง zero (ui/wall_zero.py) ไม่ถูกบันทึก
+#   เป็นไฟล์ log งานวัด
 # CHANGE LOG (v01 -> v02):
 #   ตั้งค่าได้ที่ Hardware Setting → Auto Log: โฟลเดอร์ + รูปแบบชื่อไฟล์ (log_name)
 #   ชื่อ job = ชื่อไฟล์ G-code ที่ export จากโปรแกรมนี้ล่าสุด (app.last_gcode_name)
@@ -25,6 +29,7 @@
 # ==============================================================================
 import os
 import queue
+import time
 
 from core import user_settings
 from core.openbuilds_link import JobRecorder, OpenBuildsLink, default_log_dir, write_job_log
@@ -44,6 +49,8 @@ class OpenBuildsLogger:
         self.on_saved = []      # callback(job, path) หลังบันทึกไฟล์แต่ละ job
         self.on_status = []     # callback(text) เมื่อสถานะเปลี่ยน
         self.on_settings = []   # callback() เมื่อค่าตั้ง (auto_log / log_dir / log_name) เปลี่ยน
+        self.on_event = []      # v03: callback(name, payload) ทุก event จาก OpenBuilds (main thread)
+        self._quiet_until = 0.0 # v03: งานที่จบก่อนเวลานี้ไม่บันทึก log (งานแตะผนังตั้ง zero)
 
     # ------------------------------------------------------------------
     # ค่าที่จำไว้
@@ -148,6 +155,11 @@ class OpenBuildsLogger:
                     self.connected = bool(a)
                     self._set_status(self._ready_text() if a else f"⚠ {b}")
                     continue
+                for cb in list(self.on_event):   # v03
+                    try:
+                        cb(a, b)
+                    except Exception as e:
+                        print(f"[openbuilds_logger] event callback failed: {e!r}")
                 was_recording = self.recorder.recording
                 job = self.recorder.feed(a, b)
                 if self.recorder.recording:
@@ -159,7 +171,28 @@ class OpenBuildsLogger:
             pass
         self.app.root.after(_POLL_MS, self._poll)
 
+    # ------------------------------------------------------------------
+    # v03: ส่งคำสั่งให้เครื่อง (ผ่าน OpenBuilds Control)
+    # ------------------------------------------------------------------
+    def send_gcode(self, text: str):
+        """เข้าคิวของ OpenBuilds เหมือนพิมพ์ใน console (หลายบรรทัดได้) — ต้องเชื่อมต่ออยู่"""
+        if self.link is None:
+            raise ConnectionError("OpenBuilds link is not running")
+        self.link.send("runCommand", text)
+
+    def stop_machine(self):
+        """เหมือนปุ่ม Stop ของ OpenBuilds: พักการเคลื่อนที่ ล้างคิว แล้ว soft reset"""
+        if self.link is not None:
+            self.link.send("stop", {"stop": False, "jog": False, "abort": False})
+
+    def suppress_logs(self, seconds: float):
+        """งานที่จบภายใน seconds วินาทีจากนี้ไม่ถูกบันทึกเป็นไฟล์ log"""
+        self._quiet_until = time.monotonic() + float(seconds)
+
     def _on_job(self, job):
+        if time.monotonic() < self._quiet_until:   # v03: งานแตะผนังตั้ง zero — ไม่บันทึก
+            self._set_status(self._ready_text())
+            return
         if job.probe_count == 0:
             self._set_status(self._ready_text())
             return

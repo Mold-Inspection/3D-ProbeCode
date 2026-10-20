@@ -4,7 +4,14 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 07
+# VERSION: 08
+# CHANGE LOG (v07 -> v08):
+#   FEATURE: จุดพื้นก้นรู (shape='floor', layer_idx=-1 — โพรบแนว Z) ประเมินเฉพาะ
+#   ความลึก: ระยะ = |(actual - expected) · แกนรู| ไม่นับการเยื้องแนวราบ — เก็บแยกที่
+#   holes[id]['floor'] = {expected, actual, depth_error (+ = ลึกกว่า CAD), passed}
+#   ไม่อยู่ใน segments/layers (ไม่ปนกับ circle fit) แต่ยังนับรวมผ่าน/ไม่ผ่านของรู
+#   build_settings_snapshot() บันทึก measure_floor + ความลึกสูงสุดของรู (CAD) และ
+#   apply/diff รองรับ measure_floor (schema เก่าที่ไม่มี key = ปิด)
 # CHANGE LOG (v06 -> v07):
 #   FEATURE: ชดเชยรัศมีหัวโพรบ (Probe Radius Compensation) — เครื่องรายงานพิกัด
 #   "จุดศูนย์กลางลูกบอล" ซึ่งห่างผิวจริงเท่ารัศมีลูกบอลเสมอ evaluate_points() รับ
@@ -79,7 +86,7 @@ import math
 import numpy as np
 
 from core.circle_fit import fit_circle_3d
-from core.models import clamp_layers
+from core.models import clamp_layers, hole_floor_depth
 
 
 def _probe_dir(point):
@@ -175,7 +182,13 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         else:
             ax_, ay_, az_ = raw
         dx, dy, dz = ax_ - ex, ay_ - ey, az_ - ez
-        distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+        is_floor = exp.get('shape') == 'floor'
+        if is_floor:   # v08: พื้นก้นรู — เทียบความลึกตามแกนรูอย่างเดียว
+            n = _probe_dir(exp) or (0.0, 0.0, -1.0)
+            depth_err = dx * n[0] + dy * n[1] + dz * n[2]
+            distance = abs(depth_err)
+        else:
+            distance = math.sqrt(dx * dx + dy * dy + dz * dz)
         passed = distance <= tolerance_mm
         if passed:
             passed_points += 1
@@ -196,6 +209,19 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         if passed:
             hole_entry['passed_points'] += 1
         hole_entry['max_deviation'] = max(hole_entry['max_deviation'], distance)
+
+        if is_floor:   # v08: แยกไว้ระดับรู — ไม่สร้าง layer ปลอม
+            hole_entry['floor'] = {
+                'expected':    (ex, ey, ez),
+                'actual':      (ax_, ay_, az_),
+                'actual_raw':  raw,
+                'depth_error': depth_err,
+                'distance_mm': distance,
+                'passed':      passed,
+            }
+            if not passed:
+                hole_entry['_floor_failed'] = True
+            continue
 
         seg_entry = hole_entry['_segments'].setdefault(seg_idx, {
             'seg_idx': seg_idx, '_layers': {},
@@ -251,7 +277,11 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             'passed_points': hole_entry['passed_points'],
             'max_deviation': hole_entry['max_deviation'],
             'segments':      segments_out,
+            'floor':         hole_entry.get('floor'),   # v08 — None ถ้าไม่ได้แตะพื้น
         }
+        if hole_entry.get('_floor_failed'):
+            failed_point_refs.append({'hole_id': hole_id, 'seg_idx': 0, 'layer_idx': -1,
+                                      'point_idx': 0, 'offset_mm': hole_entry['floor']['distance_mm']})
 
     failed_points = total_points - passed_points
 
@@ -334,6 +364,13 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
         fp = _hole_fingerprint(hole)
         segs = getattr(hole, 'segments', None) or []
         hole_selected = bool(getattr(hole, 'selected_for_inspection', False))   # v04
+        sh = getattr(hole, '_step_hole', None)
+        depth_info = {   # v08: ความลึกสูงสุดของรูตาม CAD (บันทึกไว้ดูอย่างเดียว — ไม่ใช้เทียบ)
+            'measure_floor':  bool(getattr(hole, 'measure_floor', False)),
+            'max_depth_mm':   None if sh is None else round(float(sh.depth), 4),
+            'floor_depth_mm': None if sh is None or hole_floor_depth(sh) is None
+                              else round(float(hole_floor_depth(sh)), 4),
+        }
 
         if segs:
             snapshot['holes'][fp] = {
@@ -351,6 +388,7 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
                     }
                     for si, cfg in enumerate(segs)
                 ],
+                **depth_info,
             }
         else:
             snapshot['holes'][fp] = {
@@ -361,6 +399,7 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
                 'points_per_layer':          hole.points_per_layer,
                 'zigzag_inspection':         hole.zigzag_inspection,
                 'zigzag_degree':              hole.zigzag_degree,
+                **depth_info,
             }
 
     return snapshot
@@ -384,6 +423,8 @@ def _hole_settings_differ(old_cfg: dict, new_cfg: dict) -> bool:
     # v04: a hole being selected/unselected entirely is itself a
     # meaningful settings change for the stale-settings banner.
     if old_cfg.get('selected_for_inspection') != new_cfg.get('selected_for_inspection'):
+        return True
+    if bool(old_cfg.get('measure_floor', False)) != bool(new_cfg.get('measure_floor', False)):   # v08
         return True
     if new_cfg.get('multi_segment'):
         return _segment_settings_differ(
@@ -486,6 +527,7 @@ def apply_settings_snapshot(holes: list, snapshot: dict, full_replace: bool = Tr
         matched += 1
         hole.selected_for_inspection = cfg.get('selected_for_inspection',
                                                 hole.selected_for_inspection)   # v04
+        hole.measure_floor = bool(cfg.get('measure_floor', False))               # v08
 
         if cfg.get('multi_segment'):
             segs = getattr(hole, 'segments', None) or []

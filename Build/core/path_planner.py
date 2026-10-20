@@ -12,7 +12,10 @@
 #   zigzag_inspection / cfg.zigzag_inspection = เปิด/ปิดการหมุนมุมโพรบต่อชั้น
 #   zigzag_degree / cfg.zigzag_degree = องศาสะสมที่หมุนต่อ 1 ชั้น
 # ==============================================================================
-# VERSION: 03
+# VERSION: 04
+# CHANGE LOG (v03 -> v04):
+#   ตำแหน่งชั้นมาจาก core/models.py::layer_fractions() (ระยะเผื่อพื้น/ขั้นใต้ลูกบอล)
+#   — ตัวเดียวกับ G-code ภาพ preview จึงตรงกับเครื่องจริง
 # CHANGE LOG (v02 -> v03):
 #   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — get_probe_path_layers() เติม key
 #   'contacts_display' ให้แต่ละ layer: list ของ (start_xyz, wall_xyz) ใน
@@ -31,6 +34,8 @@
 #   numbering stays contiguous for whatever actually gets probed.
 import numpy as np
 
+from core.models import layer_fractions, surface_below
+
 
 class PathPlanner:
     """คำนวณเส้นทางโพรบสำหรับตรวจสอบรูทีละชั้น (layer-by-layer)"""
@@ -48,9 +53,10 @@ class PathPlanner:
         ใช้ hole.radius_at) เหมาะกับรูปกติและรูเรียว/กรวยแท้ ถ้ารูมีขั้นเส้นผ่าน
         ศูนย์กลางจริง ให้ใช้ get_probe_path_layers_multi() แทน
         """
-        t_vals = np.linspace(0.0, 1.0, n_layers + 2)[1:-1]
         o = np.array(hole.open_3d)
         d = np.array(hole.deep_3d)
+        # ระยะเผื่อพื้น — ตำแหน่งชั้นเดียวกับ G-code (core/models.py::layer_fractions)
+        t_vals = layer_fractions(n_layers, float(np.linalg.norm(d - o)), surface_below(hole))
         # ช่องสี่เหลี่ยม / ร่องเปิด / รูที่มีร่องวิ่งเข้ามา: จุดไม่ได้เรียงเป็นวงกลมธรรมดา —
         # คำนวณด้วย _layer_contacts() ตัวเดียวกับ G-code ให้ preview ตรงกับเครื่องจริง
         is_rect = (getattr(hole, 'shape', 'circle') in ('rect', 'channel')
@@ -149,7 +155,8 @@ class PathPlanner:
 
             o = np.array(seg.open_3d)
             d = np.array(seg.deep_3d)
-            t_vals = np.linspace(0.0, 1.0, cfg.layers + 2)[1:-1]
+            t_vals = layer_fractions(cfg.layers, float(np.linalg.norm(d - o)),
+                                     surface_below(hole, seg_idx))   # ระยะเผื่อพื้น/ขั้น
 
             for seg_local_idx, t in enumerate(t_vals):
                 pt            = o + t * (d - o)

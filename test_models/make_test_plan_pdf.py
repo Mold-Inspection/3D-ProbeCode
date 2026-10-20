@@ -281,6 +281,7 @@ def build():
              "(resolution ≤ 0.002), or university CMM", "True diameters of H1–H4"],
             ["Pin gauge set", "Ø7.9–Ø8.1 in 0.01 steps", "True Ø of H3 (small hole)"],
             ["Caliper / height gauge", "Resolution 0.01", "Pocket size, depths, block size"],
+            ["Gauge block / feeler", "Known thickness, e.g. 5.000", "Set Z0 (probe needs no Z trigger)"],
             ["Thermometer", "±0.5 °C", "Record room temperature"],
             ["Vise or clamps + parallels", "—", "Hold part and ring gauge rigidly"],
         ], [1.9, 2.6, 2.1])
@@ -317,7 +318,9 @@ def build():
             "H3 Ø8: use pin gauges — the largest pin that enters freely = diameter (±0.005).",
             "Pocket P1: length and width with caliper inside jaws or gauge blocks at mid-depth; depth "
             "with depth gauge.",
-            "Depths of all features with a depth micrometer or caliper depth rod.",
+            "Depths of all features with a depth micrometer or caliper depth rod. Type them into the "
+            "Evaluation tab (hole card → Caliper depth) — the app compares them with the CAD depth "
+            "when the probe cannot touch the floor.",
             "Write down room temperature. Aluminium grows 0.023 µm per mm per °C: a Ø20 hole changes "
             "~0.5 µm per °C, so keep reference and probe measurements within ±2 °C.",
             "If a CMM is available at the university, measure the whole block there — it gives "
@@ -387,20 +390,26 @@ def build():
             "G90 G53 G0 Y[(Y1+Y2)/2]",
             "G10 L20 P1 Y0",
         ])
-        d.h2("D. Z zero — top face, ball centre")
+        d.h2("D. Z zero — top face, ball centre (gauge block — no Z trigger needed)")
+        d.para("Many touch probes only trigger from the side, so do NOT probe the top face downward. "
+               "Use a gauge block (or feeler gauge) of known thickness T instead:")
         d.code([
-            "; ball above the block centre (solid material at X0 Y0), ~3 mm above the top face",
-            "G91 G38.2 Z-10 F100",
-            "G10 L20 P1 Z1.000        ; = ball radius (Ø2 ball). Now Z0 = top face at the ball centre",
-            "G91 G0 Z10               ; retract",
+            "; ball above the block centre (solid material at X0 Y0); gauge block T on the top face",
+            "; jog Z down in 0.01 mm steps until the gauge block just stops sliding under the ball",
+            "G10 L20 P1 Z[T + 1.000]  ; T + ball radius (Ø2 ball), e.g. T = 5.000 -> Z6.000",
+            "G91 G0 Z10               ; retract, remove the gauge block",
         ])
+        d.para("Accuracy about ±0.02 mm — enough, because Z0 only sets the layer heights, not the "
+               "measured diameters. The app also keeps every deepest layer at least 'Min. Floor "
+               "Clearance' (Hardware Setting, default 1 mm) above the floor or step below, so a small "
+               "Z0 error cannot push the ball into the floor.", indent=0.1)
         d.note("Always lift Z before moving across the part. The G38.2 distances above are short on "
                "purpose — if the probe does not trigger, GRBL raises an alarm instead of crashing. "
                "Clear it with $X and check the probe input.", color="#7a1010", fc="#fdecec")
         d.para("The same procedure is used for the ring gauge, but the X/Y centre is found from the "
                "INSIDE: touch −X and +X inside the bore, go to the midpoint, touch −Y and +Y, go to the "
                "midpoint, then repeat X once more (the first X chord was not through the centre). "
-               "Z0 = top face of the ring.")
+               "Z0 = top face of the ring, set with the gauge block as above.")
 
         # ---------------- calibration + tests ----------------
         d.new_page()

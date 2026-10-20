@@ -2,7 +2,12 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 11
+# VERSION: 13
+# CHANGE LOG (v12 -> v13):
+#   Results แสดง 'Depth checked x / y holes' (เตือนสีส้มถ้ายังกรอกความลึกเวอร์เนียร์ไม่ครบ)
+# CHANGE LOG (v11 -> v12):
+#   เตือนเมื่อจำนวนจุดใน log ไม่เท่ากับ schema (sequence_mismatch) — เดิมจับคู่เท่าที่มี
+#   แล้วเงียบ (เช่น log ที่มีจุดพื้นก้นรู กับ schema ที่ไม่มี)
 # CHANGE LOG (v10 -> v11):
 #   ตัวบันทึก log ย้ายไปทำงานเบื้องหลังตั้งแต่เปิดโปรแกรม (ui/openbuilds_logger.py,
 #   app.openbuilds_logger) — ปุ่มเปลี่ยนเป็น "▶ Evaluate Next Job from OpenBuilds"
@@ -283,11 +288,17 @@ class EvaluationLeftPanel:
             total_pts = result.get('total_points', 0)
             pts = result.get('_actual_points') or []
             no_wco = bool(pts) and all(p.get('wco') is None for p in pts)
+            warn = ""
+            if result.get('sequence_mismatch'):   # v12: จำนวนจุด log ≠ schema — จับคู่ได้แค่ส่วนแรก
+                warn += (f"\n⚠ Point count differs: log {result.get('actual_count')} vs expected "
+                         f"{result.get('expected_count')} — only the first {total_pts} were compared. "
+                         f"Wrong schema/log pair?")
+            if no_wco:
+                warn += ("\n⚠ No work offset (WCO) in this log — points are machine\n"
+                         "coordinates. Use Evaluate Next Job from OpenBuilds.")
             self.lbl_log_info.configure(
-                text=f"Loaded: {log_name}\n{total_pts} points parsed"
-                     + ("\n⚠ No work offset (WCO) in this log — points are machine\n"
-                        "coordinates. Use Evaluate Next Job from OpenBuilds." if no_wco else ""),
-                text_color=theme.WARN_TEXT if no_wco else theme.TEXT_SECONDARY)
+                text=f"Loaded: {log_name}\n{total_pts} points compared" + warn,
+                text_color=theme.WARN_TEXT if warn else theme.TEXT_SECONDARY)
 
             failed = result.get('failed_points', 0)
             if total_pts:
@@ -307,14 +318,29 @@ class EvaluationLeftPanel:
                 'unavailable': "Tip compensation: unavailable (schema has no probe directions"
                                " — re-export G-code + schema)",
             }.get(comp, "Tip compensation: off")
+            depth_text, depth_warn = self._depth_status_text()   # v13
             self.lbl_hole_rate.configure(
-                text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text,
-                text_color=theme.WARN_TEXT if comp == 'unavailable' else theme.TEXT_MUTED,
+                text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text
+                     + depth_text,
+                text_color=(theme.WARN_TEXT if comp == 'unavailable' or depth_warn
+                            else theme.TEXT_MUTED),
                 justify="left", wraplength=260)
         else:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
+
+    def _depth_status_text(self):
+        """v13: ' Depth checked x / y holes' จากแผงขวา (เวอร์เนียร์ / โพรบแตะพื้น)"""
+        sp = getattr(self.app, 'evaluation_sidebar_panel', None)
+        if sp is None or not hasattr(sp, 'depth_status'):
+            return "", False
+        done, total = sp.depth_status()
+        if not total:
+            return "", False
+        if done < total:
+            return f"\n⚠ Depth checked {done} / {total} holes — enter caliper depths (right panel)", True
+        return f"\nDepth checked {done} / {total} holes", False
 
     # ------------------------------------------------------------------
     # Schema (.json) load (direct replace) / clear
@@ -507,11 +533,11 @@ class EvaluationLeftPanel:
             expected_points = app.loaded_expected_points
         else:
             try:
-                from core.work_zero import work_zero_origin
+                from core.work_zero import machining_origin
                 rot = getattr(app, 'screen_rotation', 0)
-                origin = work_zero_origin(app.geo.mesh, view_name, rot,
-                                          getattr(app, 'work_zero', 'centroid'))
-                expected_points = build_point_map(selected, view_name, rot, origin)
+                origin = machining_origin(app, view_name, rot)   # รวมการเลื่อน Z ตามวิธีตั้ง Z0
+                expected_points = build_point_map(selected, view_name, rot, origin,
+                                                  z_trigger=app.probe_profile.z_trigger)
             except Exception as e:
                 _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
                 return False

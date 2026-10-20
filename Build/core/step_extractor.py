@@ -1,7 +1,15 @@
 # ==============================================================================
 # core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# VERSION: 03
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   FIX: หลุมทรงกลม (sphere cap) ที่ CAD แบ่งเป็นหลายผิว (เช่น ซ้าย/ขวา) ถูกตรวจเป็นหลายรู
+#   ที่เยื้องกัน — _sphere_groups() จับกลุ่มผิวที่จุดศูนย์กลาง + รัศมีเดียวกัน แล้ว
+#   _sphere_group_geometry() คิดแกน/ปาก/ก้นจากทุกผิวรวมกันเป็นหลุมเดียว (ผิวเดียวเหมือนเดิม)
+# CHANGE LOG (v03 -> v04):
+#   FEATURE: _measure_floor_depths() — ยิงเส้นจากปากรูลงตามแกน เก็บความลึกถึงพื้น
+#   ที่กลางรูไว้ที่ h.floor_depth (None = รูทะลุ) ใช้กันชั้นวัดชนพื้น และเป็นค่า CAD
+#   ของความลึกพื้นก้นรู (โพรบแนว Z / เวอร์เนียร์ในแท็บ Evaluation)
 # CHANGE LOG (v02 -> v03):
 #   FEATURE: ช่องสี่เหลี่ยม (จัตุรัส/ผืนผ้า มุมคมและมุมโค้ง) — extract()
 #   เรียก core/pocket_extractor.py::extract_rect_pockets() ก่อน แล้ว:
@@ -135,6 +143,62 @@ def _arc_radius(edge) -> float:
     arc_len = edge.Length()
     if arc_len > 0: return arc_len / (2 * math.pi)
     return 0.0
+
+def _sphere_groups(faces):
+    """v05: ผิวทรงกลมที่จุดศูนย์กลาง + รัศมีเดียวกัน = หลุมทรงกลมเดียวที่ CAD แบ่งเป็นหลายผิว
+    (เช่น ครึ่งซ้าย/ครึ่งขวา) — คืน ({index ผิวแรก: [ผิวทั้งกลุ่ม]}, {index ผิวที่เหลือในกลุ่ม})
+    เดิมแต่ละผิวถูกคิดเป็นรูแยก แกนเอียงไปทางซีกของตัวเอง → หลุมเดียวกลายเป็น 2 รู"""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    by_key = {}
+    for i, f in enumerate(faces):
+        if f.geomType() != 'SPHERE':
+            continue
+        try:
+            sph = BRepAdaptor_Surface(f.wrapped).Sphere()
+            c = sph.Location()
+            key = (round(c.X(), 3), round(c.Y(), 3), round(c.Z(), 3), round(float(sph.Radius()), 3))
+        except Exception:
+            continue
+        by_key.setdefault(key, []).append(i)
+    first, rest = {}, set()
+    for idxs in by_key.values():
+        if len(idxs) > 1:
+            first[idxs[0]] = [faces[i] for i in idxs]
+            rest.update(idxs[1:])
+    return first, rest
+
+
+def _sphere_group_geometry(group, c0, R, off):
+    """v05: ปาก/ก้นของหลุมทรงกลมจากทุกผิวในกลุ่มรวมกัน
+    แกน = จุดศูนย์กลางมวล (ถ่วงด้วยพื้นที่) ของทุกผิว − จุดศูนย์กลางทรงกลม
+    ระดับปาก = จุดบนขอบที่ใกล้จุดศูนย์กลางทรงกลมที่สุดตามแกน → รัศมีปากจากสูตรทรงกลม"""
+    off = np.asarray(off, dtype=float)
+    area_sum, cen_sum, pts = 0.0, np.zeros(3), []
+    for f in group:
+        a = float(f.Area())
+        fc = f.Center()
+        cen_sum += a * (np.array([fc.x, fc.y, fc.z]) - off)
+        area_sum += a
+        for e in f.Edges():
+            for t in np.linspace(0.0, 1.0, 9):
+                try:
+                    pt = e.positionAt(float(t))
+                    pts.append(np.array([pt.x, pt.y, pt.z]) - off)
+                except Exception:
+                    pass
+    if area_sum <= 0 or not pts:
+        raise ValueError("empty sphere group")
+    axis = cen_sum / area_sum - c0
+    n = float(np.linalg.norm(axis))
+    if n < 1e-6:
+        raise ValueError("degenerate sphere group axis")
+    axis /= n
+    h_rim = float(np.clip(min(float((p - c0) @ axis) for p in pts), -R, R))
+    rim_center = c0 + h_rim * axis
+    pole = c0 + R * axis
+    r_open = float(np.sqrt(max(R * R - h_rim * h_rim, 0.0)))
+    return tuple(rim_center), tuple(pole), r_open, float(np.linalg.norm(pole - rim_center)), axis
+
 
 def _merge_half_faces(holes: list) -> list:
     if not holes: return holes
@@ -538,6 +602,38 @@ def _measure_radius_profiles(holes, step_data, mesh_centroid):
             _dbg(f"radius profile failed for hole at {h.open_3d}: {e!r}")
 
 
+def _measure_floor_depths(holes, step_data, mesh_centroid):
+    """v04: ความลึกจากปากรูถึง "ผิวแรกที่อยู่ใต้กลางรู" ตามแกนรู — ยิงเส้นจากปากรูลงไป
+    เก็บที่ h.floor_depth (mm) หรือ None ถ้าไม่ชนอะไร (รูทะลุ)
+    ใช้ (1) เว้นระยะชั้นวัดให้สูงกว่าพื้น (core/models.py::layer_fractions) และ
+    (2) เป็นค่าความลึก CAD ของพื้นก้นรูที่โพรบแนว Z / เวอร์เนียร์เทียบ (แท็บ Evaluation)"""
+    if not holes:
+        return
+    from core.channel_extractor import _Rays
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    comp, builder = TopoDS_Compound(), BRep_Builder()
+    builder.MakeCompound(comp)
+    for f in step_data.faces().vals():
+        builder.Add(comp, f.wrapped)
+    rays = _Rays(comp)
+    cen = np.asarray(mesh_centroid, dtype=float)
+    for h in holes:
+        try:
+            o = np.asarray(h.open_3d, dtype=float) + cen
+            d = np.asarray(h.deep_3d, dtype=float) + cen
+            length = float(np.linalg.norm(d - o))
+            if length < 1e-6:
+                continue
+            axis = (d - o) / length
+            eps = min(0.05, 0.01 * length)
+            hit = rays.dist(o + eps * axis, axis, max_d=3.0 * length + 50.0)
+            h.floor_depth = None if hit is None else float(hit + eps)
+        except Exception as e:
+            _dbg(f"floor depth failed for hole at {h.open_3d}: {e!r}")
+
+
 def _mark_channel_openings(holes, openings):
     """รูกลมที่มีร่องเปิดวิ่งเข้ามา (เช่น บ่อกลาง runner) — ตรงปากร่องไม่มีผนัง ถ้าวาง
     จุดโพรบตรงนั้น โพรบจะเดินทะลุเข้าไปในร่องโดยไม่แตะอะไร จึงบันทึก "มุมที่ห้ามโพรบ"
@@ -597,9 +693,16 @@ class StepExtractor:
             _dbg(f"channel extraction failed: {e!r}")
             channels, channel_faces, channel_openings = [], [], []
 
-        for face in step_data.faces().vals():
+        all_faces = step_data.faces().vals()
+        sphere_first, sphere_rest = _sphere_groups(all_faces)   # v05
+
+        for face_idx, face in enumerate(all_faces):
             total_faces += 1
             geom_type = face.geomType()
+
+            if face_idx in sphere_rest:   # v05: ส่วนหนึ่งของหลุมทรงกลมที่คิดรวมไว้แล้ว
+                _dbg(f"SKIP face#{total_faces} (SPHERE): part of a split sphere cap (merged)")
+                continue
 
             if any(face.isSame(cf) for cf in channel_faces):
                 _dbg(f"SKIP face#{total_faces} ({geom_type}): part of an open channel (runner)")
@@ -619,7 +722,25 @@ class StepExtractor:
 
             analytical_success = False
 
-            if geom_type == 'CYLINDER':
+            if face_idx in sphere_first:   # v05: หลุมทรงกลมที่ถูกแบ่งหลายผิว — คิดรวมเป็นหลุมเดียว
+                try:
+                    from OCP.BRepAdaptor import BRepAdaptor_Surface
+                    sph = BRepAdaptor_Surface(face.wrapped).Sphere()
+                    loc, R = sph.Location(), float(sph.Radius())
+                    c0 = np.array([loc.X() - cx_off, loc.Y() - cy_off, loc.Z() - cz_off])
+                    end_a, end_b, r_a, face_depth, axis_vec = _sphere_group_geometry(
+                        sphere_first[face_idx], c0, R, (cx_off, cy_off, cz_off))
+                    r_b = 0.0
+                    ax, ay, az = axis_vec
+                    analytical_success = True
+                    _dbg(f"SPHERE GROUP face#{total_faces}: {len(sphere_first[face_idx])} faces merged, "
+                         f"depth={face_depth:.2f} R={R:.2f} r_open={r_a:.2f}")
+                except Exception as e:
+                    _dbg(f"Sphere group extraction failed face#{total_faces}: {e!r}")
+
+            if analytical_success:
+                pass
+            elif geom_type == 'CYLINDER':
                 try:
                     try:
                         from OCP.BRepAdaptor import BRepAdaptor_Surface
@@ -961,6 +1082,7 @@ class StepExtractor:
 
         # รัศมีจริงทุกระดับความลึก — ต้องวัดหลังจัดทิศปาก/ก้นของรูและ segment เสร็จแล้ว
         _measure_radius_profiles(holes, step_data, mesh_centroid)
+        _measure_floor_depths(holes, step_data, mesh_centroid)   # v04: พื้นก้นรู / รูทะลุ
 
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)} "

@@ -1,5 +1,11 @@
 # core/gcode_export_panel.py
-# VERSION: 14
+# VERSION: 16
+# CHANGE LOG (v15 -> v16):
+#   จุด zero ของ G-code/Schema มาจาก core/work_zero.py::machining_origin() — เลื่อน Z ลง
+#   เท่ารัศมีลูกบอลเมื่อตั้ง Z0 ด้วยก้นลูกบอล (ค่าเริ่มต้น) + หัวไฟล์บอกวิธีตั้ง Z0
+# CHANGE LOG (v14 -> v15):
+#   Schema ส่ง probe_profile.z_trigger ให้ build_point_map() (จุดพื้นก้นรู) และหน้า
+#   Probe Test เตือนว่า Z− จะ ALARM:5 ถ้าหัวโพรบไม่ทริกแนว Z
 # CHANGE LOG (v13 -> v14):
 #   ทุกครั้งที่บันทึก G-code จำชื่อไฟล์ไว้ที่ app.last_gcode_name — ใช้ตั้งชื่อ log
 #   ของ job ถัดไป (ui/openbuilds_logger.py) เพราะ OpenBuilds ไม่บอกชื่อไฟล์ที่รัน
@@ -82,7 +88,7 @@ from core.expected_points_io import export_schema_json
 from core.axis_test import (AxisTestSettings, generate_axis_test_gcode,
                             hole_centers_from_view, generate_hole_center_test_gcode)
 from core.probe_test import DIRECTIONS, ProbeTestSettings, generate_probe_test_gcode
-from core.work_zero import (DEFAULT_WORK_ZERO, label_of, describe, work_zero_origin,
+from core.work_zero import (DEFAULT_WORK_ZERO, label_of, describe, machining_origin, z0_note,
                             zero_offset_from_upper_left, test_zero_name, zero_view_text)
 from ui.settings_dialog_base import SettingsDialogBase
 from core import user_settings
@@ -113,14 +119,13 @@ class GCodeExportPanel:
 
     def _zero_origin(self, view_name):
         """ตำแหน่งจุด zero ในพิกัดเครื่อง — ลบออกจากทุกพิกัดของ G-code / Schema"""
-        app = self.app
-        return work_zero_origin(app.geo.mesh, view_name,
-                                getattr(app, 'screen_rotation', 0), self._work_zero())
+        # v16: รวมการเลื่อน Z ตามวิธีตั้ง Z0 (ก้นลูกบอล / จุดศูนย์กลางลูกบอล)
+        return machining_origin(self.app, view_name, getattr(self.app, 'screen_rotation', 0))
 
     def _zero_note(self):
         """ข้อความหัวไฟล์ G-code — None = ใช้บรรทัดเดิม (mesh centroid)"""
         mode = self._work_zero()
-        return None if mode == DEFAULT_WORK_ZERO else describe(mode)
+        return None if mode == DEFAULT_WORK_ZERO else describe(mode) + "\n" + z0_note(self.app)
 
     # ------------------------------------------------------------------
     # จำค่าที่กรอกไว้ข้ามการเปิดโปรแกรม (core/user_settings.py)
@@ -462,7 +467,9 @@ class GCodeExportPanel:
                   "X/Y/Z there first — the probe goes back to that zero along the "
                   "same axis after contact. "
                   "ALARM:4 at the start = probe already triggered (check wiring). "
-                  "Clear an alarm with $X.")
+                  "Clear an alarm with $X. Z− only stops if the probe triggers when pushed up "
+                  "— many probes trigger from the side only; then Z− always ends in ALARM:5 "
+                  "and that is normal (set it in Hardware Setting → Probe Stylus).")
         ).pack(anchor="w", pady=(8, 0))
 
     def _remember_probe_return(self):
@@ -803,7 +810,8 @@ class GCodeExportPanel:
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
                 screen_rot=getattr(self.app, 'screen_rotation', 0),
-                origin=self._zero_origin(view_name), work_zero=self._work_zero())
+                origin=self._zero_origin(view_name), work_zero=self._work_zero(),
+                z_trigger=app.probe_profile.z_trigger)   # v15: + จุดพื้นก้นรู
         except Exception as e:
             self.dialog.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
@@ -868,7 +876,8 @@ class GCodeExportPanel:
                 source_step_filename=getattr(app, 'loaded_step_filename', None),
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
                 screen_rot=getattr(self.app, 'screen_rotation', 0),
-                origin=self._zero_origin(view_name), work_zero=self._work_zero())
+                origin=self._zero_origin(view_name), work_zero=self._work_zero(),
+                z_trigger=app.probe_profile.z_trigger)   # v15: + จุดพื้นก้นรู
             print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")

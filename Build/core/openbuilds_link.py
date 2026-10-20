@@ -2,7 +2,11 @@
 # core/openbuilds_link.py — ฟังข้อมูลจาก OpenBuilds Control แบบ real-time แล้ว
 # บันทึกเป็นไฟล์ .log ของแต่ละ job อัตโนมัติ (ไม่ต้อง copy console เอง)
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   OpenBuildsLink.send(event, payload) — ส่ง event ให้ OpenBuilds Control (เช่น
+#   'runCommand' = G-code หลายบรรทัดเข้าคิว, 'stop' = หยุด) ใช้โดยการตั้ง X/Y zero
+#   ด้วยการแตะผนัง (ui/wall_zero.py) — ส่วนอื่นยังฟังอย่างเดียวเหมือนเดิม
 # CHANGE LOG (v01 -> v02):
 #   write_job_log(): เลือกรูปแบบชื่อไฟล์ได้ (LOG_NAME_CHOICES: ชื่อ job + เวลา / เวลา /
 #   ชื่อ job) ชื่อซ้ำต่อท้าย _2, _3 ไม่เขียนทับ + บันทึกชื่อ job ในหัวไฟล์
@@ -69,6 +73,7 @@ class OpenBuildsLink:
         self.on_state = on_state or (lambda connected, message: None)
         self.base = f"http://{host}:{port}/socket.io/?EIO=4&transport=polling"
         self.connected = False
+        self._url = None            # v03: URL ของ session ปัจจุบัน (ใช้ส่ง event)
         self._stop = threading.Event()
         self._thread = None
 
@@ -110,6 +115,7 @@ class OpenBuildsLink:
         url = f"{self.base}&sid={info['sid']}"
         poll_timeout = (info.get("pingInterval", 25000) + info.get("pingTimeout", 20000)) / 1000 + 5
         self._post(url, "40")                      # เข้า namespace "/"
+        self._url = url
         self._set_state(True, "connected to OpenBuilds Control")
         while not self._stop.is_set():
             for pkt in self._get(url, timeout=poll_timeout).split("\x1e"):
@@ -124,6 +130,12 @@ class OpenBuildsLink:
                         self.on_event(ev[0], ev[1] if len(ev) > 1 else None)
                 elif pkt.startswith("1") or pkt.startswith("41"):
                     raise ValueError("server closed the session")
+
+    def send(self, event: str, payload) -> None:
+        """v03: ส่ง socket.io event ไปที่ OpenBuilds Control (โยน error ถ้ายังไม่ได้เชื่อมต่อ)"""
+        if not self.connected or not self._url:
+            raise ConnectionError("not connected to OpenBuilds Control")
+        self._post(self._url, "42" + json.dumps([event, payload]))
 
     @staticmethod
     def _get(url: str, timeout: float) -> str:
