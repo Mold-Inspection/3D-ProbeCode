@@ -3,7 +3,17 @@
 # ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
 # comparison_v02.md)
 # ==============================================================================
-# VERSION: 05
+# VERSION: 09
+# CHANGE LOG (v08 -> v09):
+#   Best-fit centre: การ์ดรูแสดงระยะที่เลื่อน (ตำแหน่งรูเยื้องจาก CAD) + Apply tolerance ส่ง best_fit
+# CHANGE LOG (v07 -> v08):
+#   เตือนจากเรขาคณิต: ชั้นที่ลึกกว่า probe_profile.shaft_contact_depth() → "ก้านอาจแตะขอบปากรูก่อน
+#   หัวโพรบ" ที่หัวการ์ดรูและหัวชั้น (เตือนเท่านั้น ไม่ตัดจุด)
+# CHANGE LOG (v06 -> v07):
+#   จุดที่ก้านโพรบอาจแตะผนัง: สีผ่าน/ไม่ผ่านตามปกติ + ⚠ ท้ายแถว (เตือนเท่านั้น ไม่ตัดออก)
+# CHANGE LOG (v05 -> v06):
+#   จุดที่สงสัยก้านโพรบชน (core/evaluation_engine.py v09 — p['suspect']) แสดงสีเทา ⚠ ไม่นับผ่าน/
+#   ไม่ผ่าน; หัวชั้นบอก "shaft contact?" + ผนังเลื่อนเทียบชั้นบน; การ์ดรูบอกจำนวนจุดที่ตัดออก
 # CHANGE LOG (v04 -> v05):
 #   FIX (layout): warning_frame ว่าง (CTkFrame สูง 200 px โดยปริยาย) ถูก pack ไว้เสมอ
 #   ดันการ์ดรูลงไปกลางจอ — ตอนนี้ pack เฉพาะเมื่อมีข้อความ การ์ดแรกอยู่ใต้ Tolerance 5 px
@@ -206,6 +216,21 @@ class EvaluationSidebarPanel:
         else:
             badge = f"❌ ({info.get('passed_points', 0)}/{info.get('total_points', 0)} pts)"
             color = _COLOR_FAIL
+        if info is not None and info.get('suspect_points'):   # v06: ก้านโพรบชน — ไม่นับ
+            badge += f"  ⚠{info['suspect_points']} stylus?"
+
+        # v08: ชั้นที่ลึกเกินจุดที่ก้านโพรบแตะขอบปากรู (คำนวณจากเรขาคณิต)
+        crit = self.app.probe_profile.shaft_contact_depth()
+        try:
+            from core.gcode_generator import layer_depths
+            depths = layer_depths(hole)
+        except Exception as e:
+            print(f"[evaluation_sidebar_panel] layer depths failed: {e!r}")
+            depths = {}
+        risky = sorted(i for i, d in depths.items() if crit is not None and d > crit)
+        widgets.update(layer_depths=depths, shaft_crit=crit)
+        if risky:
+            badge += f"  ⚠ stylus L{','.join(str(i + 1) for i in risky)}"
 
         floor, length, _parts = self._depth_info(hole)   # v04: ความลึกบนหัวการ์ด
         depth_tag = (f"   ↧{floor:.2f}" if floor is not None else
@@ -246,6 +271,14 @@ class EvaluationSidebarPanel:
                 body, text=f"Max Offset: {info.get('max_deviation', 0):.3f} mm",   # v03: was "Max deviation"
                 text_color=theme.TEXT_SECONDARY, font=ctk.CTkFont(size=11)
             ).pack(anchor="w", padx=10, pady=(8, 2))
+            bf = info.get('best_fit_offset')   # v09: ตำแหน่งรูจริงเยื้องจาก CAD = −(การเลื่อน)
+            if bf:
+                d = (bf[0] ** 2 + bf[1] ** 2 + bf[2] ** 2) ** 0.5
+                ctk.CTkLabel(
+                    body, text=(f"Best-fit centre: hole is {d:.3f} mm from CAD position\n"
+                                f"(ΔX {-bf[0]:+.3f}  ΔY {-bf[1]:+.3f}  ΔZ {-bf[2]:+.3f}) — not counted"),
+                    text_color=theme.WARN_TEXT, font=ctk.CTkFont(size=11), justify="left"
+                ).pack(anchor="w", padx=10, pady=(0, 2))
             for seg in info.get('segments', []):
                 self._build_segment_block(body, gi, seg)
 
@@ -283,6 +316,18 @@ class EvaluationSidebarPanel:
 
         badge = "✅" if layer.get('passed') else "❌"
         text = f"{badge} Layer {layer_idx + 1}   max offset={layer.get('max_deviation', 0):.3f} mm"
+        hw = self._hole_widgets[gi]
+        depth = (hw.get('layer_depths') or {}).get(layer_idx)
+        crit = hw.get('shaft_crit')
+        if depth is not None:
+            text += f"   depth {depth:.1f}"
+        if depth is not None and crit is not None and depth > crit:   # v08: คำนวณจากเรขาคณิต
+            text += (f"\n   ⚠ deeper than {crit:.1f} mm: the stylus shaft"
+                     f"\n      may touch the hole edge before the ball tip"
+                     f"\n      triggers — this layer may be off")
+        if layer.get('shaft_suspect'):   # v06: ผนังเข้ามาใกล้กว่าชั้นบน — ก้านแตะก่อนลูกบอล
+            text += (f"\n   ⚠ stylus shaft may touch the wall instead of the ball tip"
+                     f"\n      (walls {layer.get('wall_shift', 0):+.2f} mm vs top layer) — values may be off")
         ctk.CTkButton(
             row, text=text, anchor="w",
             fg_color="transparent", hover_color=theme.SELECT_BG, text_color=theme.TEXT,
@@ -364,6 +409,7 @@ class EvaluationSidebarPanel:
             act  = p.get('actual', (0.0, 0.0, 0.0))
             dist = p.get('distance_mm', 0.0)
             ok   = p.get('passed', False)
+            sus  = bool(p.get('suspect'))   # v06: ก้านชน — ไม่นับ
 
             # v03: explicit green/red ROW background (Requirement 5),
             # not just text color on the offset column.
@@ -378,8 +424,9 @@ class EvaluationSidebarPanel:
             ctk.CTkLabel(r, text=f"{act[0]:.2f},{act[1]:.2f},{act[2]:.2f}", width=130,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
             ctk.CTkLabel(r, text=f"{dist:.3f}", width=68, font=ctk.CTkFont(size=9, weight="bold"),
-                        text_color=(theme.OK_TEXT if ok else theme.ERR_TEXT)).pack(side="left", pady=2)
-            ctk.CTkLabel(r, text=("✅" if ok else "❌"), width=24,
+                        text_color=(theme.OK_TEXT if ok else theme.ERR_TEXT)
+                        ).pack(side="left", pady=2)
+            ctk.CTkLabel(r, text=("✅" if ok else "❌") + ("⚠" if sus else ""), width=24,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
 
         if not points:
@@ -627,7 +674,8 @@ class EvaluationSidebarPanel:
 
         try:
             new_result = evaluate_points(expected_points, actual_points, tol,
-                                         tip_radius_mm=app.probe_profile.effective_tip_radius)
+                                         tip_radius_mm=app.probe_profile.effective_tip_radius,
+                                         best_fit=bool(getattr(app, 'evaluation_best_fit', False)))   # v09
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลใหม่ไม่สำเร็จ:\n{e!r}")
             return

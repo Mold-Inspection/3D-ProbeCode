@@ -1,7 +1,14 @@
 # ==============================================================================
 # core/probe_profile.py — ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
 # ==============================================================================
-# VERSION: 03
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   stylus_shaft_diameter / stylus_tilt_deg + shaft_contact_depth(): ความลึก (ศูนย์กลางลูกบอลใต้
+#   ปากรู) ที่ก้านโพรบเริ่มแตะขอบปากรูก่อนหัวโพรบทริก — ดูสูตรใน docstring
+# CHANGE LOG (v03 -> v04):
+#   double_touch     = แตะสองครั้งทุกจุด: แตะเร็ว → ถอย retouch_distance → แตะช้า (retouch_feed)
+#                      ใช้ค่าครั้งที่สอง (ลด pre-travel และความแปรปรวนจากความเร็ว)
+#   retouch_distance = ระยะถอยก่อนแตะซ้ำ (mm)   retouch_feed = ความเร็วแตะซ้ำ (mm/min)
 # CHANGE LOG (v02 -> v03):
 #   z_trigger       = หัวโพรบทริกเมื่อถูกดันขึ้นแนวแกน Z ได้หรือไม่ (ค่าเริ่มต้น False —
 #                     หัวโพรบหลายรุ่นทริกเฉพาะด้านข้าง) เปิดแล้วจึงแตะพื้นก้นรูได้
@@ -35,6 +42,7 @@
 #   DEFAULT_LENGTH = ค่าความยาวก้านเริ่มต้นเมื่อกด "Reset to Default"
 #   DEFAULT_TIP_D  = ค่าเส้นผ่าศูนย์กลางหัวเริ่มต้นเมื่อกด "Reset to Default"
 # ==============================================================================
+import math
 from dataclasses import dataclass, field
  
 @dataclass
@@ -52,6 +60,13 @@ class ProbeProfile:
     floor_clearance: float = 1.0   # mm
     # v03: หัวโพรบทริกเมื่อถูกดันขึ้นตรง ๆ (แนว Z) ได้ไหม — ปิด = ไม่มีคำสั่งแตะพื้นใน G-code เลย
     z_trigger: bool = False
+    # v04: แตะสองครั้ง (เร็ว → ถอย → ช้า) ใช้ค่าครั้งที่สอง
+    double_touch: bool = True
+    retouch_distance: float = 1.0   # mm — 0.5 ทำให้ ALARM:4 บนเครื่องจริง (2026-10-21)
+    retouch_feed: float = 20.0      # mm/min
+    # v05: ก้านโพรบ — ใช้หาความลึกที่ก้านเริ่มแตะขอบปากรูก่อนหัวโพรบ (shaft_contact_depth)
+    stylus_shaft_diameter: float = 1.0   # mm — ⌀ ก้านตรงส่วนที่ลงไปในรู (วัดด้วยเวอร์เนียร์)
+    stylus_tilt_deg: float = 0.0         # องศา — ก้านเอียงจากแนวดิ่ง (0 = ตั้งตรง)
  
     DEFAULT_HOLDER_HEIGHT: float = field(default=20.0, init=False, repr=False)  # v02
     DEFAULT_LENGTH: float = field(default=50.0, init=False, repr=False)
@@ -60,6 +75,11 @@ class ProbeProfile:
     DEFAULT_EFFECTIVE_TIP_D: float = field(default=0.0, init=False, repr=False)
     DEFAULT_FLOOR_CLEARANCE: float = field(default=1.0, init=False, repr=False)   # v03
     DEFAULT_Z_TRIGGER: bool = field(default=False, init=False, repr=False)        # v03
+    DEFAULT_DOUBLE_TOUCH: bool = field(default=True, init=False, repr=False)      # v04
+    DEFAULT_RETOUCH_DISTANCE: float = field(default=1.0, init=False, repr=False)  # v04
+    DEFAULT_RETOUCH_FEED: float = field(default=20.0, init=False, repr=False)     # v04
+    DEFAULT_SHAFT_D: float = field(default=1.0, init=False, repr=False)           # v05
+    DEFAULT_TILT_DEG: float = field(default=0.0, init=False, repr=False)          # v05
  
     # ------------------------------------------------------------------
     @property
@@ -72,6 +92,32 @@ class ProbeProfile:
         d = self.effective_tip_diameter if self.effective_tip_diameter > 0 else self.tip_diameter
         return d / 2.0
  
+    @property
+    def pretravel(self) -> float:
+        """ระยะที่โพรบเดินเลยจุดแตะก่อนทริก (ต่อด้าน) = (Tip ⌀ − Effective Tip ⌀) / 2 — 0 ถ้ายังไม่ calibrate"""
+        if self.effective_tip_diameter <= 0:
+            return 0.0
+        return max(0.0, (self.tip_diameter - self.effective_tip_diameter) / 2.0)
+
+    def shaft_contact_depth(self):
+        """v05: ความลึกของศูนย์กลางลูกบอลใต้ปากรู (mm) ที่ก้านเริ่มแตะขอบปากรูก่อนโพรบทริก
+        — None = ไม่เกิด (ก้านตั้งตรงและยังไม่รู้ pre-travel)
+
+        ผนังตั้งตรง ลูกบอลรัศมี R แตะผนัง ก้านรัศมี r ยังห่างผนัง R − r ที่ทุกความสูง แต่:
+          - ก้านเอียง θ : ก้านที่สูงเหนือลูกบอล h เข้าใกล้ผนังเพิ่ม h·tanθ
+          - pre-travel p: ลูกบอลถูกผนังหยุดไว้ ตัวโพรบเดินต่ออีก p ก่อนทริก ก้านหมุนรอบลูกบอล
+                          จุดที่สูง h (ก้านยาว L) เข้าหาผนังเพิ่ม p·h/L
+        ก้านแตะขอบปากรู (h = ความลึกของลูกบอล) เมื่อ h·(tanθ + p/L) ≥ R − r
+          → ความลึกวิกฤต d = (R − r) / (tanθ + p/L)
+        ใช้รัศมีลูกบอลจริง (Tip ⌀) ไม่ใช่ Effective Tip ⌀ — ส่วน p ได้จากผลต่างของสองค่านี้"""
+        gap = (self.tip_diameter - self.stylus_shaft_diameter) / 2.0
+        if gap <= 0:
+            return 0.0           # ก้านใหญ่เท่าลูกบอล — แตะได้ทุกความลึก
+        k = math.tan(math.radians(abs(self.stylus_tilt_deg))) + self.pretravel / max(self.stylus_length, 1e-6)
+        if k <= 1e-9:
+            return None
+        return gap / k
+
     # ------------------------------------------------------------------
     def can_reach_depth(self, hole_depth: float) -> bool:
         """True ถ้าก้านโพรบยาวพอลงไปถึงความลึก hole_depth"""

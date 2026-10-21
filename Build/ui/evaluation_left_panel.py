@@ -2,7 +2,25 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 13
+# VERSION: 18
+# CHANGE LOG (v17 -> v18):
+#   checkbox "Best-fit centre" ใน Results (app.evaluation_best_fit, จำค่า) — ประเมินขนาด/รูปทรง
+#   หลังเลื่อนจุดวัดแต่ละรูให้เข้ากับ CAD (evaluation_engine v11) แล้วรีเฟรชผลทันที
+# CHANGE LOG (v16 -> v17):
+#   Results บอกจำนวนชั้นที่ลึกเกินจุดที่ก้านโพรบแตะขอบปากรู (probe_profile.shaft_contact_depth)
+# CHANGE LOG (v15 -> v16):
+#   ก้านโพรบแตะผนัง: ข้อความเตือนอย่างเดียว (evaluation_engine v10 ไม่ตัดจุดออกแล้ว)
+# CHANGE LOG (v14 -> v15):
+#   แผงทั้งหมดอยู่ใน CTkScrollableFrame (เลื่อนได้เมื่อจอเตี้ย)
+#   G-code ตรวจรู: โหลด/ล้างไฟล์ G-code ในแท็บนี้ (Export G-code ตั้งให้อัตโนมัติ — app.job_gcode)
+#   โหลด G-code แล้วโหลด <ชื่อ>_schema.json ข้างกันให้ด้วยถ้ามี
+#   "▶ Run inspection" ส่ง G-code ให้เครื่องผ่าน OpenBuilds Control เอง (เหมือน Find centre) แทน
+#   "Evaluate Next Job from OpenBuilds" — รอ log ของ job นี้แล้วประเมินผลให้, "⏹ Stop" หยุดเครื่อง
+#   ก่อนรันถามเรื่อง Find centre (ui/centre_check_dialog.py) จนกว่าผู้ใช้กดไม่ต้องแสดงอีก
+#   ปุ่ม "🗑 Clear log" ล้างผลตรวจ/log ที่โหลดอยู่
+# CHANGE LOG (v13 -> v14):
+#   สรุปจำนวนจุดที่ตัดออกเพราะสงสัยก้านโพรบชน (evaluation_engine v09) และเตือนเมื่อ log มีจุด
+#   เป็น 2 เท่าของที่คาด (แตะสองครั้งแต่ log ไม่มีบรรทัดคำสั่ง — copy จาก console เอง)
 # CHANGE LOG (v12 -> v13):
 #   Results แสดง 'Depth checked x / y holes' (เตือนสีส้มถ้ายังกรอกความลึกเวอร์เนียร์ไม่ครบ)
 # CHANGE LOG (v11 -> v12):
@@ -75,6 +93,7 @@
 #                                แดง = มีจุดไม่ผ่าน)
 # ==============================================================================
 import os
+import re
 import customtkinter as ctk
 import tkinter.messagebox as _mb
 
@@ -112,14 +131,18 @@ class EvaluationLeftPanel:
         app.openbuilds_logger.on_status.append(self._on_logger_status)
         app.openbuilds_logger.on_saved.append(self._on_job_saved)
         app.openbuilds_logger.on_settings.append(self._on_logger_settings)
+        app.openbuilds_logger.on_event.append(self._on_ob_event)   # v15
 
     # ------------------------------------------------------------------
     def build(self, parent):
         """สร้าง widget ทั้งหมดครั้งเดียวลงใน parent (app.evaluation_left_frame)
         เรียกจาก ui/main_window.py ตอน __init__ เท่านั้น"""
-        self.parent = parent
         for w in parent.winfo_children():
             w.destroy()
+        # v15: เลื่อนได้ทั้งแผง
+        parent = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        parent.pack(fill="both", expand=True)
+        self.parent = parent
 
         ctk.CTkLabel(parent, text="🧪 Evaluation", font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(20, 10))
 
@@ -170,40 +193,63 @@ class EvaluationLeftPanel:
 
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(0, 15))
 
-        # --- Load .log ---------------------------------------------------
-        self.btn_load_log = ctk.CTkButton(
-            parent, text="📥 Load OpenBuilds .log",
+        # --- v15: G-code ตรวจรู — โหลด/ล้าง แล้วสั่งรันผ่าน OpenBuilds Control -----------
+        ctk.CTkLabel(parent, text="Inspection G-code", text_color=theme.TEXT_MUTED,
+                     font=ctk.CTkFont(size=11)).pack(anchor="w", padx=20)
+        self.lbl_gcode_info = ctk.CTkLabel(
+            parent, text="No G-code loaded", text_color=theme.TEXT_MUTED,
+            font=ctk.CTkFont(size=11), wraplength=220, justify="left")
+        self.lbl_gcode_info.pack(pady=(0, 6), padx=20, anchor="w")
+        gc_row = ctk.CTkFrame(parent, fg_color="transparent")
+        gc_row.pack(fill="x", padx=20, pady=(0, 6))
+        ctk.CTkButton(gc_row, text="📂 Load G-code", width=120,
+                      fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                      font=ctk.CTkFont(size=11), command=self._on_load_gcode).pack(side="left")
+        ctk.CTkButton(gc_row, text="✖ Clear G-code", width=100,
+                      fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                      font=ctk.CTkFont(size=11), command=self._on_clear_gcode).pack(side="right")
+
+        self.btn_record = ctk.CTkButton(
+            parent, text="▶ Run inspection",
             fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._on_load_log)
-        self.btn_load_log.pack(pady=(0, 5), padx=20, fill="x")
-
-        self.lbl_log_info = ctk.CTkLabel(
-            parent, text="No .log file loaded", text_color=theme.TEXT_MUTED,
-            font=ctk.CTkFont(size=11), wraplength=220, justify="left")
-        self.lbl_log_info.pack(pady=(0, 10), padx=20, anchor="w")
-
-        # --- v10/v11: OpenBuilds auto log + evaluate next job ----------------
-        self._auto_log_var = ctk.BooleanVar(value=self.app.openbuilds_logger.auto_log)
-        ctk.CTkCheckBox(
-            parent, text="Auto-save a log for every OpenBuilds job", variable=self._auto_log_var,
-            font=ctk.CTkFont(size=11), command=self._on_toggle_auto_log
-        ).pack(pady=(0, 6), padx=20, anchor="w")
-        self.btn_record = ctk.CTkButton(
-            parent, text="▶ Evaluate Next Job from OpenBuilds",
-            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
-            font=ctk.CTkFont(size=12, weight="bold"),
             command=self._on_toggle_record)
         self.btn_record.pack(pady=(0, 5), padx=20, fill="x")
         self.lbl_record = ctk.CTkLabel(
             parent, text=self.app.openbuilds_logger.status,
             text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11), wraplength=220, justify="left")
-        self.lbl_record.pack(pady=(0, 2), padx=20, anchor="w")
+        self.lbl_record.pack(pady=(0, 4), padx=20, anchor="w")
+
+        self._auto_log_var = ctk.BooleanVar(value=self.app.openbuilds_logger.auto_log)
+        ctk.CTkCheckBox(
+            parent, text="Auto-save a log for every OpenBuilds job", variable=self._auto_log_var,
+            font=ctk.CTkFont(size=11), command=self._on_toggle_auto_log
+        ).pack(pady=(0, 4), padx=20, anchor="w")
         ctk.CTkButton(
             parent, text="📁 Log folder…", height=22, width=110,
             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
             font=ctk.CTkFont(size=10), command=self._on_change_log_dir
         ).pack(pady=(0, 15), padx=20, anchor="w")
+
+        ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(0, 15))
+
+        # --- Load / clear .log ---------------------------------------------------
+        log_row = ctk.CTkFrame(parent, fg_color="transparent")
+        log_row.pack(fill="x", padx=20, pady=(0, 5))
+        self.btn_load_log = ctk.CTkButton(
+            log_row, text="📥 Load .log", width=120,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_load_log)
+        self.btn_load_log.pack(side="left")
+        ctk.CTkButton(log_row, text="🗑 Clear log", width=100,
+                      fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                      font=ctk.CTkFont(size=11), command=self._on_clear_log).pack(side="right")
+
+        self.lbl_log_info = ctk.CTkLabel(
+            parent, text="No .log file loaded", text_color=theme.TEXT_MUTED,
+            font=ctk.CTkFont(size=11), wraplength=220, justify="left")
+        self.lbl_log_info.pack(pady=(0, 15), padx=20, anchor="w")
 
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", padx=20, pady=(0, 15))
 
@@ -223,6 +269,12 @@ class EvaluationLeftPanel:
             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER, font=ctk.CTkFont(size=10),
             state="disabled", command=self._on_refresh_results)
         self.btn_refresh_results.pack(side="right")
+
+        # v18: Best-fit centre — แยกตำแหน่งรูเยื้องออกจากขนาด/รูปทรง
+        self._best_fit_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_best_fit', False)))
+        ctk.CTkCheckBox(self.results_frame, text="Best-fit centre (check size + form only)",
+                        variable=self._best_fit_var, font=ctk.CTkFont(size=11),
+                        command=self._on_toggle_best_fit).pack(anchor="w", padx=10, pady=(6, 0))
 
         self.lbl_failed = ctk.CTkLabel(self.results_frame, text="—",
                                        font=ctk.CTkFont(size=18, weight="bold"))
@@ -245,6 +297,15 @@ class EvaluationLeftPanel:
 
         filename = getattr(app, 'loaded_step_filename', None)
         self.lbl_step_filename.configure(text=filename or "—")
+
+        job = getattr(app, 'job_gcode', None)   # v15
+        if job:
+            self.lbl_gcode_info.configure(
+                text=f"{job['name']}\n{job['points']} probe point(s), {job['lines']} line(s)",
+                text_color=theme.TEXT)
+        else:
+            self.lbl_gcode_info.configure(text="No G-code loaded — Export G-code or Load G-code",
+                                          text_color=theme.TEXT_MUTED)
 
         if app.geo.mesh is not None:
             ext = app.geo.get_physical_dimensions()
@@ -293,6 +354,9 @@ class EvaluationLeftPanel:
                 warn += (f"\n⚠ Point count differs: log {result.get('actual_count')} vs expected "
                          f"{result.get('expected_count')} — only the first {total_pts} were compared. "
                          f"Wrong schema/log pair?")
+                if result.get('actual_count') == 2 * result.get('expected_count', -1):   # v14
+                    warn += ("\n  (exactly 2× — a double-touch log without command lines? "
+                             "Use the auto-saved log.)")
             if no_wco:
                 warn += ("\n⚠ No work offset (WCO) in this log — points are machine\n"
                          "coordinates. Use Evaluate Next Job from OpenBuilds.")
@@ -304,7 +368,10 @@ class EvaluationLeftPanel:
             if total_pts:
                 color = _COLOR_GOOD if failed == 0 else _COLOR_BAD
                 self.lbl_failed.configure(
-                    text=f"{result.get('passed_points', total_pts - failed)} / {total_pts} points passed",
+                    text=f"{result.get('passed_points', total_pts - failed)} / {total_pts} points passed"
+                         + (f"\n⚠ {result['suspect_points']} point(s): the stylus shaft may have touched"
+                            f" the wall instead of the ball tip — those values may be off"
+                            if result.get('suspect_points') else ""),   # v14/v16: เตือนเท่านั้น
                     text_color=color)
             else:
                 self.lbl_failed.configure(text="—", text_color=theme.TEXT)
@@ -319,6 +386,9 @@ class EvaluationLeftPanel:
                                " — re-export G-code + schema)",
             }.get(comp, "Tip compensation: off")
             depth_text, depth_warn = self._depth_status_text()   # v13
+            shaft_text = self._shaft_risk_text()                   # v17
+            depth_text += shaft_text + self._best_fit_text()       # v18
+            depth_warn = depth_warn or bool(shaft_text)
             self.lbl_hole_rate.configure(
                 text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text
                      + depth_text,
@@ -329,6 +399,45 @@ class EvaluationLeftPanel:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
+
+    def _on_toggle_best_fit(self):
+        """v18: เปิด/ปิด Best-fit centre (จำค่า) แล้วคำนวณผลใหม่ด้วย log ที่โหลดอยู่"""
+        from core import user_settings
+        self.app.evaluation_best_fit = bool(self._best_fit_var.get())
+        user_settings.save_section("evaluation_best_fit", self.app.evaluation_best_fit)
+        if not self._auto_refresh_if_result_exists():
+            self.refresh()
+
+    def _best_fit_text(self) -> str:
+        """v18: สรุปการเลื่อนของ Best-fit centre (มากสุดของทุกรู)"""
+        result = getattr(self.app, 'evaluation_result', None) or {}
+        if not result.get('best_fit'):
+            return ""
+        offs = [h.get('best_fit_offset') for h in (result.get('holes') or {}).values()]
+        offs = [o for o in offs if o]
+        if not offs:
+            return "\nBest-fit centre: no hole had enough directions to fit"
+        mx = max((o[0] ** 2 + o[1] ** 2 + o[2] ** 2) ** 0.5 for o in offs)
+        return (f"\nBest-fit centre ON — hole positions NOT checked "
+                f"(largest shift {mx:.3f} mm, see each hole)")
+
+    def _shaft_risk_text(self) -> str:
+        """v17: '⚠ N layer(s) deeper than X mm …' — คำนวณจากขนาดหัวโพรบ ไม่ใช่จากข้อมูลที่วัด"""
+        app = self.app
+        crit = app.probe_profile.shaft_contact_depth()
+        if crit is None:
+            return ""
+        from core.gcode_generator import layer_depths
+        n = 0
+        for gi in (getattr(app, 'evaluation_result', None) or {}).get('holes', {}) or {}:
+            try:
+                n += sum(1 for d in layer_depths(app.current_holes[gi]).values() if d > crit)
+            except Exception:
+                pass
+        if not n:
+            return ""
+        return (f"\n⚠ {n} layer(s) deeper than {crit:.1f} mm — the stylus shaft may touch the hole "
+                f"edge before the ball tip, values there may be off")
 
     def _depth_status_text(self):
         """v13: ' Depth checked x / y holes' จากแผงขวา (เวอร์เนียร์ / โพรบแตะพื้น)"""
@@ -363,6 +472,11 @@ class EvaluationLeftPanel:
             filetypes=[("Schema JSON", "*_schema.json *.json"), ("All Files", "*.*")])
         if not filepath:
             return
+        self._load_schema_path(filepath, quiet=False)
+
+    def _load_schema_path(self, filepath: str, quiet: bool) -> bool:
+        """v15: โหลด + แทนที่การตั้งค่ารูจาก schema — quiet=True (จาก Load G-code) ไม่มี popup สำเร็จ"""
+        app = self.app
 
         try:
             from core.expected_points_io import load_schema_json
@@ -376,12 +490,12 @@ class EvaluationLeftPanel:
             data = load_schema_json(filepath)
         except Exception as e:
             _mb.showerror("Load Failed", f"โหลด Schema ไม่สำเร็จ:\n{e!r}")
-            return
+            return False
 
         points = data.get('points') or []
         if not points:
             _mb.showwarning("Empty File", "ไฟล์นี้ไม่มี points อยู่เลย")
-            return
+            return False
 
         snapshot = data.get('settings_snapshot') or {}
 
@@ -395,7 +509,7 @@ class EvaluationLeftPanel:
                 _mb.showwarning(
                     "Load Schema", f"ยังไม่มี core/evaluation_engine.py::apply_settings_snapshot() ({e})",
                     parent=app.root)
-                return
+                return False
             report = apply_settings_snapshot(app.current_holes, snapshot, full_replace=True)
 
         app.loaded_schema                 = data
@@ -417,6 +531,8 @@ class EvaluationLeftPanel:
             app.evaluation_sidebar_panel.refresh()
         if app.current_tab == "Evaluation":
             app.evaluation_tab.draw_evaluation()
+        if quiet:
+            return True
 
         # popup ปกติของ Windows (tkinter.messagebox) แทน toast ของ app.notify ที่ทำให้
         # ทั้งหน้าจอมืดลง
@@ -434,6 +550,7 @@ class EvaluationLeftPanel:
                 f"โหลด Schema แล้ว: {os.path.basename(filepath)} ({len(points)} points)\n\n"
                 f"ไฟล์นี้ไม่มีข้อมูล settings ให้แทนที่ — ใช้ค่าตั้งค่าปัจจุบันต่อไป{refresh_tag}",
                 parent=app.root)
+        return True
 
     def _on_clear_schema(self):
         """only clears which points source Evaluation compares the .log
@@ -546,7 +663,8 @@ class EvaluationLeftPanel:
 
         try:
             result = evaluate_points(expected_points, actual_points, tolerance,
-                                     tip_radius_mm=app.probe_profile.effective_tip_radius)
+                                     tip_radius_mm=app.probe_profile.effective_tip_radius,
+                                     best_fit=bool(getattr(app, 'evaluation_best_fit', False)))   # v18
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลไม่สำเร็จ:\n{e!r}")
             return False
@@ -655,32 +773,158 @@ class EvaluationLeftPanel:
         color = (theme.WARN_TEXT if text.startswith("⚠") else
                  theme.ERR_TEXT if text.startswith("●") else theme.TEXT_MUTED)
         if self._waiting_for_job and not text.startswith(("⚠", "●")):
-            text, color = "Waiting for the next job — run the G-code in OpenBuilds Control.", theme.TEXT_SECONDARY
+            text, color = "Sent to OpenBuilds — starting…", theme.TEXT_SECONDARY
         self.lbl_record.configure(text=text, text_color=color)
 
     def _set_waiting(self, waiting: bool):
         self._waiting_for_job = waiting
         if waiting:
-            self.btn_record.configure(text="⏹ Cancel", fg_color=theme.BTN_SECONDARY,
-                                      hover_color=theme.BTN_SECONDARY_HOVER)
+            self.btn_record.configure(text="⏹ Stop", fg_color=theme.ERR_TEXT,
+                                      hover_color=theme.ERR_TEXT)
         else:
-            self.btn_record.configure(text="▶ Evaluate Next Job from OpenBuilds",
+            self.btn_record.configure(text="▶ Run inspection",
                                       fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER)
         self._on_logger_status(self.app.openbuilds_logger.status)
 
+    # ------------------------------------------------------------------
+    # v15: G-code ตรวจรู — โหลด / ล้าง / รัน / หยุด
+    # ------------------------------------------------------------------
+    @staticmethod
+    def make_job(path: str, text: str) -> dict:
+        """ข้อมูล G-code ที่จะรัน (app.job_gcode) — จุดโพรบ = G38.2 ลบแตะช้าของการแตะสองครั้ง"""
+        from core.log_parser import RETOUCH_MARK
+        cmds = [ln.split(";")[0].strip() for ln in text.splitlines()]
+        cmds = [c for c in cmds if c]
+        n_probe = sum(1 for c in cmds if c.upper().startswith("G38.2"))
+        n_retouch = sum(1 for c in cmds if c.upper() == RETOUCH_MARK)
+        return {'path': path, 'name': os.path.splitext(os.path.basename(path))[0],
+                'text': text, 'lines': len(cmds), 'points': n_probe - n_retouch}
+
+    def _on_load_gcode(self):
+        app = self.app
+        path = ctk.filedialog.askopenfilename(
+            title="Select inspection G-code",
+            filetypes=[("G-code Files", "*.gcode *.nc *.txt"), ("All Files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            _mb.showerror("Load G-code", f"เปิดไฟล์ไม่สำเร็จ:\n{e}")
+            return
+        job = self.make_job(path, text)
+        if job['points'] == 0:
+            _mb.showwarning("Load G-code", "ไฟล์นี้ไม่มีคำสั่งโพรบ (G38.2) — ไม่ใช่ G-code ตรวจรู")
+            return
+        app.job_gcode = job
+        app.last_gcode_name = job['name']     # ใช้ตั้งชื่อไฟล์ log
+        schema = os.path.splitext(path)[0] + "_schema.json"
+        note = ""
+        if os.path.isfile(schema) and getattr(app, 'holes_detected', False) and app.current_holes:
+            if self._load_schema_path(schema, quiet=True):
+                note = f"\n\nโหลด Schema คู่กันให้แล้ว: {os.path.basename(schema)}"
+        elif not os.path.isfile(schema):
+            note = ("\n\n⚠ ไม่พบ Schema คู่กัน — ผลตรวจจะเทียบกับค่ารูปัจจุบัน "
+                    "ต้องเป็นค่าเดียวกับตอน export G-code นี้")
+        self.refresh()
+        _mb.showinfo("G-code loaded", f"{job['name']}: {job['points']} probe point(s){note}",
+                     parent=app.root)
+
+    def _on_clear_gcode(self):
+        if self._waiting_for_job:
+            _mb.showwarning("Clear G-code", "กำลังรันอยู่ — กด Stop ก่อน")
+            return
+        self.app.job_gcode = None
+        self.refresh()
+
+    def _on_clear_log(self):
+        app = self.app
+        if getattr(app, 'evaluation_result', None) is None:
+            return
+        app.evaluation_result = None
+        self.refresh()
+        if hasattr(app, 'evaluation_sidebar_panel'):
+            app.evaluation_sidebar_panel.refresh()
+        if app.current_tab == "Evaluation":
+            app.evaluation_tab.draw_evaluation()
+
+    def _machine_state(self):
+        """(runStatus, alarm) จาก status ล่าสุดของ OpenBuilds — (None, None) ถ้ายังไม่มี"""
+        st = getattr(self.app.openbuilds_logger, 'last_status', None) or {}
+        comms = st.get("comms") or {}
+        return comms.get("runStatus"), comms.get("alarm")
+
     def _on_toggle_record(self):
         logger = self.app.openbuilds_logger
-        if self._waiting_for_job:
+        if self._waiting_for_job:          # ⏹ Stop
+            logger.stop_machine()
             self._set_waiting(False)
-            if not logger.auto_log:
-                logger.stop()
+            self.lbl_record.configure(text="⏹ Stop sent — machine halted (soft reset). "
+                                           "Clear an alarm with $X before the next run.",
+                                      text_color=theme.WARN_TEXT)
             return
         app = self.app
         if app.geo.mesh is None or app.geo.step_data is None or not app.current_holes:
             _mb.showwarning("Not Ready", "กรุณาโหลด STEP + Generate Holes (หรือโหลด Schema) ก่อน")
             return
-        logger.start()            # ถ้าปิด auto-log ไว้ ให้ต่อเฉพาะรอบนี้
+        job = getattr(app, 'job_gcode', None)
+        if not job:
+            _mb.showwarning("No G-code", "ยังไม่มี G-code — กด Export G-code หรือ 📂 Load G-code ก่อน")
+            return
+        if not logger.running:
+            logger.start()
+        if not logger.connected:
+            _mb.showwarning("OpenBuilds Control",
+                            "ยังไม่ได้เชื่อมต่อ OpenBuilds Control — เปิดโปรแกรมและต่อเครื่องให้เรียบร้อย"
+                            " แล้วลองใหม่อีกครั้ง")
+            return
+        run, alarm = self._machine_state()
+        if alarm or (run and str(run).lower() != "idle"):
+            _mb.showwarning("Machine not ready",
+                            f"เครื่องยังไม่พร้อม (สถานะ: {alarm or run}) — ต้องเป็น Idle ก่อน"
+                            + (" (ปลด alarm ด้วย $X)" if alarm else ""))
+            return
+
+        from ui.centre_check_dialog import ask_centre_ready
+        answer = ask_centre_ready(app)
+        if answer == "find_centre":
+            hw = app.hardware_setting_dialog
+            hw.show()
+            hw.dialog.show_category("work_zero")
+            return
+        if answer != "run":
+            return
+        if not _mb.askyesno(
+                "Run inspection",
+                f"รัน {job['name']} — {job['points']} จุดโพรบ\n\n"
+                f"เครื่องจะเริ่มเคลื่อนที่ทันที มือพร้อมกด ⏹ Stop / e-stop\nเริ่มเลยไหม?",
+                parent=app.root):
+            return
+
+        cmds = [ln.split(";")[0].strip() for ln in job['text'].splitlines()]
+        app.last_gcode_name = job['name']
+        logger.suppress_logs(0)            # job นี้ต้องถูกบันทึก (แม้เพิ่งรัน Find centre)
+        try:
+            logger.send_gcode("\n".join(c for c in cmds if c))
+        except Exception as e:
+            _mb.showerror("Run inspection", f"ส่ง G-code ไม่สำเร็จ:\n{e}")
+            return
         self._set_waiting(True)
+
+    def _on_ob_event(self, name, payload):
+        """v15: ALARM ระหว่างรอ job — ถ้ายังไม่มีจุดโพรบ log จะไม่ถูกบันทึก จึงต้องปลดสถานะรอเอง"""
+        if not (self._waiting_for_job and name == "status" and isinstance(payload, dict)):
+            return
+        alarm = (payload.get("comms") or {}).get("alarm")
+        if alarm:
+            self.app.root.after(1500, lambda: self._alarm_stop(alarm))
+
+    def _alarm_stop(self, alarm):
+        if self._waiting_for_job:   # ยังไม่ได้ประเมินผล (log ที่มีจุดจะมาทาง _on_job_saved ก่อน)
+            self._set_waiting(False)
+            self.lbl_record.configure(text=f"⚠ ALARM {alarm} — job stopped. Clear it with $X.",
+                                      text_color=theme.ERR_TEXT)
 
     def _on_job_saved(self, job, path):
         """callback จาก ui/openbuilds_logger.py หลังบันทึกไฟล์ของแต่ละ job"""

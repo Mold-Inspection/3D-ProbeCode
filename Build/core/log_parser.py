@@ -2,7 +2,11 @@
 # core/log_parser.py — อ่านไฟล์ .log จาก OpenBuilds Control -> รายการจุดที่
 # ถูกโพรบจริง (actual probe points) เรียงตามลำดับที่ไฟล์บันทึกไว้
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   แตะสองครั้ง (core/gcode_generator.py v13): ระหว่างแตะเร็วกับแตะช้ามีคำสั่ง RETOUCH_MARK
+#   ("G4 P0.01") — เจอบรรทัดนี้ใน log เมื่อไหร่ ทิ้งจุดก่อนหน้า (แตะเร็ว) ใช้จุดแตะช้าแทน
+#   จำนวนจุดจึงยังตรงกับ build_point_map() (log ที่ copy จาก console เองต้องมีบรรทัดคำสั่งด้วย)
 # CHANGE LOG (v01 -> v02):
 #   FIX: [PRB:...] ของ GRBL เป็นพิกัดเครื่อง (MPos) ไม่ใช่พิกัดเทียบ Set Zero —
 #   ถ้าไฟล์มีบรรทัด "; WCO: x,y,z" (เขียนโดย core/openbuilds_link.py) จะลบ work
@@ -46,6 +50,10 @@ _PRB_PATTERN = re.compile(
 _WCO_PATTERN = re.compile(
     r"^\s*;\s*WCO:\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)"
 )
+
+# v03: คำสั่งคั่นระหว่างแตะเร็ว/แตะช้า — gcode_generator ใช้ค่าเดียวกันนี้
+RETOUCH_MARK = "G4 P0.01"
+_RETOUCH_PATTERN = re.compile(r"\[\s*G4\s*P0?\.01\s*\]")
 
 # True = เก็บเฉพาะจุดที่ probe สัมผัสสำเร็จจริง (s==1) — ปรับได้
 _SKIP_SUCCESS_ONLY = True
@@ -120,6 +128,7 @@ def parse_openbuilds_log(filepath: str) -> list:
     warnings = []
     matched  = 0
     wco      = None   # v02: work offset ล่าสุดที่เจอในไฟล์
+    fast_guard = 0    # v03: จำนวนจุดหลังทิ้งแตะเร็วครั้งล่าสุด
 
     for line_no, raw_line in enumerate(raw_lines, start=1):
         line = raw_line.rstrip("\n\r")
@@ -129,6 +138,12 @@ def parse_openbuilds_log(filepath: str) -> list:
         w = _WCO_PATTERN.match(line)
         if w is not None:
             wco = (float(w.group(1)), float(w.group(2)), float(w.group(3)))
+            continue
+
+        if _RETOUCH_PATTERN.search(line):   # v03: จุดก่อนหน้าคือแตะเร็ว — ใช้แตะช้าที่ตามมาแทน
+            if len(points) > fast_guard:      # กันบรรทัด marker ซ้ำ — ทิ้งได้ครั้งเดียวต่อจุดใหม่
+                points.pop()
+                fast_guard = len(points)
             continue
 
         m = _PRB_PATTERN.search(line)
