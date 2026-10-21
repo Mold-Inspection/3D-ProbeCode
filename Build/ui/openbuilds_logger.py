@@ -2,7 +2,8 @@
 # ui/openbuilds_logger.py — ตัวบันทึก log ของ OpenBuilds Control ที่ทำงานเบื้องหลัง
 # ตั้งแต่เปิดหน้าต่างหลัก (ไม่ต้องเปิด start_openbuilds_logger.bat แยก)
 # ==============================================================================
-# VERSION: 03
+# VERSION: 04
+# CHANGE LOG (v03 -> v04): เก็บ last_status (status ล่าสุดจาก OpenBuilds) ให้ Find centre ตรวจตำแหน่ง Z
 # CHANGE LOG (v02 -> v03):
 #   on_event (ทุก event ใน main thread), send_gcode()/stop_machine() ส่งคำสั่งผ่าน
 #   OpenBuilds และ suppress_logs() — งานแตะผนังตั้ง zero (ui/wall_zero.py) ไม่ถูกบันทึก
@@ -51,6 +52,7 @@ class OpenBuildsLogger:
         self.on_settings = []   # callback() เมื่อค่าตั้ง (auto_log / log_dir / log_name) เปลี่ยน
         self.on_event = []      # v03: callback(name, payload) ทุก event จาก OpenBuilds (main thread)
         self._quiet_until = 0.0 # v03: งานที่จบก่อนเวลานี้ไม่บันทึก log (งานแตะผนังตั้ง zero)
+        self.last_status = None # v04: status ล่าสุดจาก OpenBuilds (ใช้ตรวจตำแหน่งก่อน Find centre)
 
     # ------------------------------------------------------------------
     # ค่าที่จำไว้
@@ -155,6 +157,8 @@ class OpenBuildsLogger:
                     self.connected = bool(a)
                     self._set_status(self._ready_text() if a else f"⚠ {b}")
                     continue
+                if a == "status" and isinstance(b, dict):   # v04: สถานะล่าสุด (ตำแหน่ง, alarm)
+                    self.last_status = b
                 for cb in list(self.on_event):   # v03
                     try:
                         cb(a, b)

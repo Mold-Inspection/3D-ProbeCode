@@ -1,5 +1,7 @@
 # core/gcode_export_panel.py
-# VERSION: 16
+# VERSION: 17
+# CHANGE LOG (v16 -> v17):
+#   Export G-code สำเร็จ → ตั้ง app.job_gcode, ปิด dialog แล้วสลับไปแท็บ Evaluation (รันจากที่นั่น)
 # CHANGE LOG (v15 -> v16):
 #   จุด zero ของ G-code/Schema มาจาก core/work_zero.py::machining_origin() — เลื่อน Z ลง
 #   เท่ารัศมีลูกบอลเมื่อตั้ง Z0 ด้วยก้นลูกบอล (ค่าเริ่มต้น) + หัวไฟล์บอกวิธีตั้ง Z0
@@ -762,7 +764,15 @@ class GCodeExportPanel:
             msg += f"\n\nข้ามรู {len(skipped)} รูที่ไม่มีข้อมูล STEP (mesh-only): {names}"
         if unsafe:
             msg += f"\n\nข้ามรู {len(unsafe)} รูที่หัวโพรบปัจจุบันโพรบได้ไม่ปลอดภัย: {', '.join(unsafe)}"
+        # v17: G-code นี้พร้อมรันจากแท็บ Evaluation — ปิด dialog แล้วพาไปหน้านั้นเลย
+        from ui.evaluation_left_panel import EvaluationLeftPanel
+        app.job_gcode = EvaluationLeftPanel.make_job(filepath, gcode_text)
+        msg += "\n\nไปที่แท็บ Evaluation — กด ▶ Run inspection เพื่อรันผ่านโปรแกรมนี้"
         self.dialog.showinfo("Export complete", msg)
+        self.dialog._on_close()
+        if hasattr(app, 'nav_selector'):
+            app.nav_selector.set("Evaluation")
+            app.on_nav_change("Evaluation")
 
     # ------------------------------------------------------------------
     def _backoff_for_guard(self) -> float:

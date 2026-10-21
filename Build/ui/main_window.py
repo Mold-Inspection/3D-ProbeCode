@@ -15,7 +15,13 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 22
+# VERSION: 25
+# CHANGE LOG (v24 -> v25):
+#   โหลด evaluation_best_fit (Best-fit centre ในแท็บ Evaluation) จาก settings
+# CHANGE LOG (v23 -> v24):
+#   job_gcode (G-code ตรวจรูที่รันจากแท็บ Evaluation — ล้างเมื่อโหลด STEP ใหม่) และ centre_done
+# CHANGE LOG (v22 -> v23):
+#   โหลด probe_profile.double_touch / retouch_distance / retouch_feed จาก settings
 # CHANGE LOG (v21 -> v22):
 #   โหลด self.z0_ref (วิธีตั้ง Z0: ก้นลูกบอล/จุดศูนย์กลางลูกบอล — core/work_zero.py)
 # CHANGE LOG (v20 -> v21):
@@ -154,9 +160,14 @@ class UIManager:
         _saved = user_settings.load()
         user_settings.apply_numbers(self.probe_profile, _saved.get('probe'),
                                     ('stylus_holder_height', 'stylus_length', 'tip_diameter', 'wall_clearance',
-                                     'effective_tip_diameter', 'floor_clearance'),
-                                    allow_zero=('wall_clearance', 'effective_tip_diameter', 'floor_clearance'))
+                                     'effective_tip_diameter', 'floor_clearance',
+                                     'retouch_distance', 'retouch_feed', 'stylus_shaft_diameter',
+                                     'stylus_tilt_deg'),
+                                    allow_zero=('wall_clearance', 'effective_tip_diameter', 'floor_clearance',
+                                                'stylus_tilt_deg'))
         self.probe_profile.z_trigger = bool((_saved.get('probe') or {}).get('z_trigger', False))   # v21
+        self.probe_profile.double_touch = bool((_saved.get('probe') or {}).get(
+            'double_touch', self.probe_profile.DEFAULT_DOUBLE_TOUCH))                                # v23
         set_floor_safety(self.probe_profile.tip_radius, self.probe_profile.floor_clearance)      # v21
         user_settings.apply_numbers(self.machine_profile, _saved.get('machine'),
                                     ('x_travel', 'y_travel', 'z_travel', 'z_height'))
@@ -167,6 +178,9 @@ class UIManager:
 
         # v12: Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
         self.loaded_step_filepath  = None   # เต็ม path ของไฟล์ STEP ที่โหลดล่าสุด (None ถ้ายังไม่โหลด)
+        self.evaluation_best_fit = bool(user_settings.get('evaluation_best_fit', False))   # v25
+        self.job_gcode   = None   # v24: G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
+        self.centre_done = None   # v24: {'model': path STEP, 'time': datetime} — Find centre สำเร็จล่าสุด
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel
         self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
         self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
@@ -553,6 +567,7 @@ class UIManager:
             return
 
         self.loaded_step_filepath = filepath
+        self.job_gcode = None   # v24: G-code ของไฟล์ก่อนหน้าใช้กับชิ้นนี้ไม่ได้
         self.loaded_step_filename = os.path.basename(filepath)
         self.lbl_file.configure(text=self.loaded_step_filename, text_color=theme.TEXT)
 
