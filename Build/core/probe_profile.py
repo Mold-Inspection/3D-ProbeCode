@@ -1,7 +1,9 @@
 # ==============================================================================
 # core/probe_profile.py — ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
 # ==============================================================================
-# VERSION: 05
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   ตัด stylus_holder_height ออก — ใช้คำนวณ Padding Height อย่างเดียว ซึ่งตัดออกแล้ว
 # CHANGE LOG (v04 -> v05):
 #   stylus_shaft_diameter / stylus_tilt_deg + shaft_contact_depth(): ความลึก (ศูนย์กลางลูกบอลใต้
 #   ปากรู) ที่ก้านโพรบเริ่มแตะขอบปากรูก่อนหัวโพรบทริก — ดูสูตรใน docstring
@@ -34,11 +36,8 @@
 # เข้าไปวัดรู (ความลึก/ขนาด) ที่ต้องการได้จริงหรือไม่ ก่อนจะสั่งวิ่งจริง
 #
 # ตัวแปรสำคัญที่ปรับจูนได้:
-#   stylus_holder_height = ความสูงของตัวจับก้านโพรบ (mm) — ระยะจากใต้ก้นแกน Z
-#                           ลงมาถึงจุดที่ก้านโพรบเริ่มต้น (ไม่รวมก้าน) — v02
 #   stylus_length  = ความยาวก้านโพรบ (mm) — ระยะลึกสุดที่โพรบลงไปวัดได้
 #   tip_diameter   = เส้นผ่าศูนย์กลางหัวโพรบทรงกลม (mm)
-#   DEFAULT_HOLDER_HEIGHT = ค่าความสูงตัวจับเริ่มต้นเมื่อกด "Reset to Default" — v02
 #   DEFAULT_LENGTH = ค่าความยาวก้านเริ่มต้นเมื่อกด "Reset to Default"
 #   DEFAULT_TIP_D  = ค่าเส้นผ่าศูนย์กลางหัวเริ่มต้นเมื่อกด "Reset to Default"
 # ==============================================================================
@@ -47,7 +46,6 @@ from dataclasses import dataclass, field
  
 @dataclass
 class ProbeProfile:
-    stylus_holder_height: float = 20.0  # mm — ความสูงตัวจับก้านโพรบ ปรับได้ (v02)
     stylus_length: float = 50.0   # mm — ความยาวก้านโพรบ ปรับได้
     tip_diameter:  float = 2.0    # mm — เส้นผ่าศูนย์กลางหัวโพรบ ปรับได้
     # ระยะว่างขั้นต่ำระหว่างหัวโพรบกับผนังรู (วัดจากจุดศูนย์กลาง layer) — หัวโพรบต้องมีที่
@@ -68,7 +66,6 @@ class ProbeProfile:
     stylus_shaft_diameter: float = 1.0   # mm — ⌀ ก้านตรงส่วนที่ลงไปในรู (วัดด้วยเวอร์เนียร์)
     stylus_tilt_deg: float = 0.0         # องศา — ก้านเอียงจากแนวดิ่ง (0 = ตั้งตรง)
  
-    DEFAULT_HOLDER_HEIGHT: float = field(default=20.0, init=False, repr=False)  # v02
     DEFAULT_LENGTH: float = field(default=50.0, init=False, repr=False)
     DEFAULT_TIP_D:  float = field(default=2.0,  init=False, repr=False)
     DEFAULT_CLEARANCE: float = field(default=0.5, init=False, repr=False)

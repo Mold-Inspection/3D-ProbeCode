@@ -2,7 +2,22 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 18
+# VERSION: 21
+# CHANGE LOG (v20 -> v21):
+#   ตัดช่องขนาดเวอร์เนียร์ของการแตะผนังนอก — Effective Tip มาจาก Set up (Hardware Setting) เสมอ
+#   (log เก่าที่มีจุดแตะผนังนอก: ยังประเมินได้ แต่ไม่เอาค่าจากจุดเหล่านั้นมาใช้ชดเชย)
+# CHANGE LOG (v19 -> v20):
+#   ▶ Run inspection: ยังไม่ได้ Set up กับ CAD นี้ → เตือนแล้วเปิด Hardware Setting → Work Zero ที่เตรียมค่าไว้
+#   (HardwareSettingDialog.open_setup) — Set up เสร็จ (Effective Tip ตั้งแล้ว) กลับมารันต่อเอง (_start_job)
+#   Work zero = Mesh centroid → ห้ามรัน (ตั้งบนเครื่องไม่ได้) ให้เลือกจุดอื่นแล้ว export ใหม่
+#   รันเสร็จ → หน้าต่างแจ้ง "รันเสร็จเรียบร้อย" + สรุปผล; สวิตช์ Tip compensation ย้ายไปแผงขวา
+# CHANGE LOG (v18 -> v19):
+#   Results: checkbox "Tip compensation" (ปิด = ดูผลดิบ ศูนย์กลางลูกบอลเทียบผิว CAD), ช่องขนาดจริง
+#   ชิ้นงาน (เวอร์เนียร์) X/Y สำหรับคาลิเบรตหัวโพรบจากผนังนอก, สรุป Effective Tip ⌀ ของรอบนี้
+#   ปุ่ม "💾 Save results CSV" — ค่าดิบ + ค่าชดเชยรายจุด (core/evaluation_engine.py::export_results_csv)
+#   และเขียน "<log>_results.csv" ข้าง log ให้อัตโนมัติหลังรันจากโปรแกรม
+#   expected points แบบ live ส่ง probe_r + กรอบคาลิเบรต (core/gcode_generator.py v17)
+#   evaluation_kwargs(app) — ค่าที่ส่งเข้า evaluate_points() ใช้ร่วมกับแผงขวา (Apply tolerance)
 # CHANGE LOG (v17 -> v18):
 #   checkbox "Best-fit centre" ใน Results (app.evaluation_best_fit, จำค่า) — ประเมินขนาด/รูปทรง
 #   หลังเลื่อนจุดวัดแต่ละรูให้เข้ากับ CAD (evaluation_engine v11) แล้วรีเฟรชผลทันที
@@ -101,6 +116,16 @@ from ui import theme
 
 _COLOR_GOOD = theme.OK_TEXT
 _COLOR_BAD  = theme.ERR_TEXT
+
+
+def evaluation_kwargs(app) -> dict:
+    """v19: ค่าที่ทุกที่ส่งเข้า evaluate_points() — ชดเชยหรือไม่, Effective Tip, ขนาดจริงชิ้นงาน"""
+    return dict(tip_radius_mm=app.probe_profile.effective_tip_radius,
+                best_fit=bool(getattr(app, 'evaluation_best_fit', False)),
+                compensate=bool(getattr(app, 'evaluation_compensate', True)),
+                use_run_calib=False,   # v21: Effective Tip มาจาก Set up เท่านั้น
+                tip_d_max=float(app.probe_profile.tip_diameter),
+                pretravel='travel' if getattr(app, 'evaluation_pretravel_travel', False) else 'normal')
 
 
 def _remap_holes_by_gi(result: dict, current_holes: list) -> None:
@@ -276,12 +301,23 @@ class EvaluationLeftPanel:
                         variable=self._best_fit_var, font=ctk.CTkFont(size=11),
                         command=self._on_toggle_best_fit).pack(anchor="w", padx=10, pady=(6, 0))
 
+        # v19: แบบจำลองระยะทริกบนผนังเอียง (ผนังตรงได้เท่ากัน) — ให้ข้อมูลจริงตัดสิน
+        self._travel_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_pretravel_travel', False)))
+        ctk.CTkCheckBox(self.results_frame, text="Sloped walls: pretravel along the probing direction",
+                        variable=self._travel_var, font=ctk.CTkFont(size=11),
+                        command=self._on_toggle_travel).pack(anchor="w", padx=10, pady=(4, 0))
+
         self.lbl_failed = ctk.CTkLabel(self.results_frame, text="—",
                                        font=ctk.CTkFont(size=18, weight="bold"))
         self.lbl_failed.pack(anchor="w", padx=10, pady=(4, 2))
         self.lbl_hole_rate = ctk.CTkLabel(self.results_frame, text="",
                                           text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11))
-        self.lbl_hole_rate.pack(anchor="w", padx=10, pady=(0, 8))
+        self.lbl_hole_rate.pack(anchor="w", padx=10, pady=(0, 4))
+        self.btn_save_csv = ctk.CTkButton(
+            self.results_frame, text="💾 Save results CSV (raw + compensated)", height=26,
+            fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+            font=ctk.CTkFont(size=11), state="disabled", command=self._on_save_csv)
+        self.btn_save_csv.pack(fill="x", padx=10, pady=(0, 10))
 
         self._built = True
         self.refresh()
@@ -343,6 +379,7 @@ class EvaluationLeftPanel:
         # recompute against (i.e. a .log has been parsed at least once).
         can_refresh = bool(result and result.get('_actual_points'))
         self.btn_refresh_results.configure(state="normal" if can_refresh else "disabled")
+        self.btn_save_csv.configure(state="normal" if result else "disabled")   # v19
 
         if result:
             log_name  = result.get('log_filename', '—')
@@ -380,11 +417,15 @@ class EvaluationLeftPanel:
             n_holes = len(holes_r)
             n_pass  = sum(1 for hv in holes_r.values() if hv.get('passed'))
             comp = result.get('compensation')
+            src = (" (this run's outer walls)" if result.get('tip_source') == 'run'
+                   else " (Hardware Setting)") + (
+                ", pretravel along probing dir" if result.get('pretravel') == 'travel' else "")   # v19
             comp_text = {
-                'on': f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm",
+                'on': f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm{src}",
                 'unavailable': "Tip compensation: unavailable (schema has no probe directions"
                                " — re-export G-code + schema)",
-            }.get(comp, "Tip compensation: off")
+            }.get(comp, "Tip compensation: off (raw ball centre vs CAD)")
+            comp_text += self._calib_text(result)                  # v19
             depth_text, depth_warn = self._depth_status_text()   # v13
             shaft_text = self._shaft_risk_text()                   # v17
             depth_text += shaft_text + self._best_fit_text()       # v18
@@ -399,6 +440,49 @@ class EvaluationLeftPanel:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
+
+    @staticmethod
+    def _calib_text(result) -> str:
+        """v19: สรุป Effective Tip ⌀ จากจุดแตะผนังนอกของรอบนี้"""
+        cal = result.get('calibration') or {}
+        axes = cal.get('axes') or {}
+        if not axes:
+            return ""
+        parts = []
+        for ax, v in axes.items():
+            ref = "caliper" if v.get('width_true') else "CAD"
+            parts.append(f"{ax} {v['d_eff']:.3f} (span {v['span']:.3f} − {ref} "
+                         f"{v['width_true'] or v['width_cad']:.3f})" + ("" if v['ok'] else " ⚠ out of range"))
+        return "\nOuter-wall Effective Tip ⌀: " + ", ".join(parts)
+
+    def _on_toggle_travel(self):
+        """v19: แบบจำลองระยะทริกบนผนังเอียง (จำค่า) แล้วคำนวณผลใหม่"""
+        from core import user_settings
+        self.app.evaluation_pretravel_travel = bool(self._travel_var.get())
+        user_settings.save_section("evaluation_pretravel_travel", self.app.evaluation_pretravel_travel)
+        if not self._auto_refresh_if_result_exists():
+            self.refresh()
+
+    def _on_save_csv(self):
+        """v19: บันทึกผลรายจุด — ค่าดิบและค่าหลังชดเชย"""
+        result = getattr(self.app, 'evaluation_result', None)
+        if not result:
+            return
+        log_path = result.get('log_path')
+        init_dir = os.path.dirname(log_path) if log_path else None
+        base = os.path.splitext(result.get('log_filename') or "results")[0]
+        path = ctk.filedialog.asksaveasfilename(
+            title="Save results CSV", defaultextension=".csv", initialdir=init_dir,
+            initialfile=f"{base}_results.csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            from core.evaluation_engine import export_results_csv
+            export_results_csv(result, path)
+        except Exception as e:
+            _mb.showerror("Save failed", f"บันทึก CSV ไม่สำเร็จ:\n{e!r}")
+            return
+        self.app.notify.show(f"Saved {os.path.basename(path)}", severity="info", duration_ms=4000)
 
     def _on_toggle_best_fit(self):
         """v18: เปิด/ปิด Best-fit centre (จำค่า) แล้วคำนวณผลใหม่ด้วย log ที่โหลดอยู่"""
@@ -611,7 +695,7 @@ class EvaluationLeftPanel:
         self.app.notify.show("คำนวณผลลัพธ์ใหม่แล้ว (ใช้ .log เดิม เทียบกับ config ปัจจุบัน)",
                              severity="success")
 
-    def _evaluate_and_apply(self, actual_points: list, log_filename: str) -> bool:
+    def _evaluate_and_apply(self, actual_points: list, log_filename: str, log_path: str = None) -> bool:
         """แกนกลางที่แท้จริงของการ "ประเมินผลแล้วอัปเดต app.evaluation_result"
         — ใช้ actual_points ที่ได้มาแล้ว (parse ใหม่จาก .log หรือ cache ไว้
         ก็ได้) คำนวณ expected points ตามแหล่งปัจจุบัน (schema ที่โหลดไว้ หรือ
@@ -654,7 +738,8 @@ class EvaluationLeftPanel:
                 rot = getattr(app, 'screen_rotation', 0)
                 origin = machining_origin(app, view_name, rot)   # รวมการเลื่อน Z ตามวิธีตั้ง Z0
                 expected_points = build_point_map(selected, view_name, rot, origin,
-                                                  z_trigger=app.probe_profile.z_trigger)
+                                                  z_trigger=app.probe_profile.z_trigger,
+                                                  probe_r=app.probe_profile.tip_radius)   # v19
             except Exception as e:
                 _mb.showerror("Expected Point Build Failed", f"คำนวณจุดที่คาดหวังไม่สำเร็จ:\n{e!r}")
                 return False
@@ -663,13 +748,15 @@ class EvaluationLeftPanel:
 
         try:
             result = evaluate_points(expected_points, actual_points, tolerance,
-                                     tip_radius_mm=app.probe_profile.effective_tip_radius,
-                                     best_fit=bool(getattr(app, 'evaluation_best_fit', False)))   # v18
+                                     **evaluation_kwargs(app))   # v18/v19
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลไม่สำเร็จ:\n{e!r}")
             return False
 
         result['log_filename']         = log_filename
+        prev = getattr(app, 'evaluation_result', None) or {}   # v19: refresh ใช้ log เดิม
+        result['log_path']             = log_path or (prev.get('log_path')
+                                                      if prev.get('log_filename') == log_filename else None)
         result['tolerance_mm']         = tolerance
         result['expected_source']      = 'json' if using_json else 'live'
         result['expected_source_name'] = getattr(app, 'loaded_expected_points_source', None) if using_json else None
@@ -744,7 +831,7 @@ class EvaluationLeftPanel:
             _mb.showerror("Parse Failed", f"อ่านไฟล์ .log ไม่สำเร็จ:\n{e!r}")
             return
 
-        self._evaluate_and_apply(actual_points, os.path.basename(filepath))
+        self._evaluate_and_apply(actual_points, os.path.basename(filepath), filepath)
 
     # ------------------------------------------------------------------
     # v10/v11: OpenBuilds — ตัวบันทึก log ทำงานเบื้องหลังตั้งแต่เปิดโปรแกรม
@@ -886,18 +973,44 @@ class EvaluationLeftPanel:
                             + (" (ปลด alarm ด้วย $X)" if alarm else ""))
             return
 
+        if getattr(app, 'work_zero', 'centroid') not in ("center", "upper_left", "upper_right",
+                                                         "lower_left", "lower_right"):   # v20
+            _mb.showwarning("Work zero",
+                            "Work zero เป็น Mesh centroid ซึ่งตั้งบนเครื่องไม่ได้ — เลือก Center หรือมุมใน "
+                            "Hardware Setting → Work Zero แล้ว Export G-code ใหม่ก่อน", parent=app.root)
+            return
+
         from ui.centre_check_dialog import ask_centre_ready
         answer = ask_centre_ready(app)
-        if answer == "find_centre":
-            hw = app.hardware_setting_dialog
-            hw.show()
-            hw.dialog.show_category("work_zero")
+        if answer == "find_centre":   # v20: Set up (ศูนย์ + repeatability + Effective Tip) แล้วกลับมารันต่อ
+            app.hardware_setting_dialog.open_setup(on_ready=self._after_setup)
             return
         if answer != "run":
             return
+        self._start_job()
+
+    def _after_setup(self):
+        """v20: Set up เสร็จ — ตรวจเครื่องอีกรอบแล้วรันตรวจรูต่อ"""
+        run, alarm = self._machine_state()
+        if alarm or (run and str(run).lower() != "idle"):
+            _mb.showwarning("Machine not ready",
+                            f"Set up เสร็จแล้ว แต่เครื่องยังไม่พร้อม (สถานะ: {alarm or run}) — "
+                            f"รอให้เป็น Idle แล้วกด ▶ Run inspection อีกครั้ง", parent=self.app.root)
+            return
+        self._start_job(after_setup=True)
+
+    def _start_job(self, after_setup: bool = False):
+        """v20: ยืนยันแล้วส่ง G-code ตรวจรูให้ OpenBuilds"""
+        app, logger = self.app, self.app.openbuilds_logger
+        job = getattr(app, 'job_gcode', None)
+        if not job:
+            return
+        pp = app.probe_profile
+        head = (f"Set up เสร็จ — Effective Tip ⌀ = {pp.effective_tip_diameter:.3f} มม.\n"
+                f"ลูกบอลค้างอยู่เหนือกึ่งกลาง ห้ามขยับชิ้นงาน\n\n" if after_setup else "")
         if not _mb.askyesno(
                 "Run inspection",
-                f"รัน {job['name']} — {job['points']} จุดโพรบ\n\n"
+                head + f"รัน {job['name']} — {job['points']} จุดโพรบ\n\n"
                 f"เครื่องจะเริ่มเคลื่อนที่ทันที มือพร้อมกด ⏹ Stop / e-stop\nเริ่มเลยไหม?",
                 parent=app.root):
             return
@@ -942,4 +1055,28 @@ class EvaluationLeftPanel:
         self.lbl_record.configure(text=f"Job {job.result} — {job.probe_count} point(s), evaluated:\n{path}",
                                   text_color=theme.OK_TEXT if job.result.startswith("completed")
                                   else theme.WARN_TEXT)
-        self._evaluate_and_apply(actual_points, os.path.basename(path))
+        if self._evaluate_and_apply(actual_points, os.path.basename(path), path):
+            csv_path = os.path.splitext(path)[0] + "_results.csv"
+            try:   # v19: ผลรายจุด (ดิบ + ชดเชย) ข้าง log ทุกครั้งที่รันจากโปรแกรม
+                from core.evaluation_engine import export_results_csv
+                export_results_csv(self.app.evaluation_result, csv_path)
+            except Exception as e:
+                print(f"[evaluation] results CSV not written: {e!r}")
+                csv_path = None
+            self.app.root.after(100, lambda: self._notify_done(job, path, csv_path))   # v20
+
+    def _notify_done(self, job, log_path, csv_path):
+        """v20: หน้าต่างแจ้งรันเสร็จ + สรุปผล"""
+        res = getattr(self.app, 'evaluation_result', None) or {}
+        done = str(job.result).startswith("completed")
+        comp = (f"r = {res.get('tip_radius_mm', 0):.3f} mm"
+                + (" (outer walls of this run)" if res.get('tip_source') == 'run' else " (Effective Tip from Set up)")
+                if res.get('compensation') == 'on' else "off")
+        _mb.showinfo(
+            "Inspection finished" if done else "Inspection stopped",
+            ("รันเสร็จเรียบร้อย ✔" if done else f"รันไม่จบ ({job.result}) — ผลด้านล่างเป็นเท่าที่วัดได้") +
+            f"\n\n{res.get('passed_points', 0)} / {res.get('total_points', 0)} จุดผ่าน "
+            f"(tolerance {res.get('tolerance_mm', 0):g} มม.)\n"
+            f"Tip compensation: {comp}\n\nLog: {log_path}" + (f"\nCSV: {csv_path}" if csv_path else "") +
+            "\n\nสลับดูผลแบบชดเชย/ไม่ชดเชย และที่มาของค่าชดเชยได้ที่แผงขวา",
+            parent=self.app.root)

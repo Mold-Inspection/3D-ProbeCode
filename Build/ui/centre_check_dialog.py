@@ -2,7 +2,9 @@
 # ui/centre_check_dialog.py — ถามก่อนรันตรวจรูจากแท็บ Evaluation ว่าตั้ง X0 Y0 Z0
 # (Find centre) ให้ชิ้นงานนี้แล้วหรือยัง
 # ==============================================================================
-# VERSION: 01
+# VERSION: 02
+# CHANGE LOG (v01 -> v02):
+#   ยังไม่ได้ Set up กับ CAD นี้ → ขึ้นเสมอ (ไม่สน "ไม่ต้องแสดงอีก") ปุ่มหลัก = Set up now
 # ขึ้นทุกครั้งที่กด Run จนกว่าผู้ใช้จะติ๊ก "ไม่ต้องแสดงหน้านี้อีก" (จำใน settings.json
 # section "prompts" → skip_centre_check) — ข้อความบอกด้วยว่าไฟล์ CAD นี้เพิ่งโหลดเข้ามา
 # และยังไม่ได้รัน Find centre (app.centre_done ไม่ตรงกับไฟล์ที่โหลดอยู่) หรือรันไปแล้วเมื่อไหร่
@@ -27,16 +29,16 @@ def centre_done_for_current(app):
 
 
 def ask_centre_ready(app):
-    if (user_settings.get(_SECTION, {}) or {}).get(_KEY):
-        return "run"
     when = centre_done_for_current(app)
+    if when is not None and (user_settings.get(_SECTION, {}) or {}).get(_KEY):
+        return "run"   # "ไม่ต้องแสดงอีก" มีผลเฉพาะเมื่อ Set up กับ CAD นี้แล้ว
     name = getattr(app, 'loaded_step_filename', None) or "this part"
     if when is None:
-        head = "⚠ Find centre has not been run for this CAD file yet"
-        body = (f"{name} was just loaded and X0 Y0 Z0 have not been set with Find centre "
-                f"(Hardware Setting → Work Zero) since then.\n\n"
-                f"The G-code assumes the work zero is exactly at the point it was exported for. "
-                f"A wrong zero sends the probe into the part.")
+        head = "⚠ Set up the zero first"
+        body = (f"{name}: X0 Y0 Z0 have not been set for this CAD file yet.\n\n"
+                f"Set up opens Hardware Setting → Work Zero with everything filled in — enter the caliper "
+                f"size X / Y and press Find centre. It sets the zero, checks repeatability and the "
+                f"Effective Tip ⌀, then comes back here and starts the inspection.")
         color = theme.WARN_TEXT
     else:
         head = f"Find centre was run for this CAD file at {when:%H:%M}"
@@ -55,8 +57,9 @@ def ask_centre_ready(app):
     ctk.CTkLabel(top, text=body, font=ctk.CTkFont(size=12), wraplength=420,
                  justify="left").pack(anchor="w", padx=20, pady=(0, 12))
     skip_var = ctk.BooleanVar(value=False)
-    ctk.CTkCheckBox(top, text="ไม่ต้องแสดงหน้านี้อีก (Don't show this again)", variable=skip_var,
-                    font=ctk.CTkFont(size=12)).pack(anchor="w", padx=20, pady=(0, 14))
+    if when is not None:   # ยังไม่ Set up = ต้องเห็นทุกครั้ง
+        ctk.CTkCheckBox(top, text="ไม่ต้องแสดงหน้านี้อีก (Don't show this again)", variable=skip_var,
+                        font=ctk.CTkFont(size=12)).pack(anchor="w", padx=20, pady=(0, 14))
 
     def close(value):
         result["value"] = value
@@ -69,7 +72,8 @@ def ask_centre_ready(app):
 
     row = ctk.CTkFrame(top, fg_color="transparent")
     row.pack(fill="x", padx=20, pady=(0, 18))
-    ctk.CTkButton(row, text="Run Find centre first", fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+    ctk.CTkButton(row, text="Set up now" if when is None else "Set up again",
+                  fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                   command=lambda: close("find_centre")).pack(side="left", padx=(0, 8))
     ctk.CTkButton(row, text="Zero is set — Run", fg_color=theme.BTN_SECONDARY,
                   hover_color=theme.BTN_SECONDARY_HOVER,

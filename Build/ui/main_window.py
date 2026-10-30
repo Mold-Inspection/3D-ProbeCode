@@ -15,7 +15,9 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 25
+# VERSION: 26
+# CHANGE LOG (v25 -> v26):
+#   evaluation_compensate (Tip compensation ในแท็บ Evaluation, จำค่า) + calib_true_size
 # CHANGE LOG (v24 -> v25):
 #   โหลด evaluation_best_fit (Best-fit centre ในแท็บ Evaluation) จาก settings
 # CHANGE LOG (v23 -> v24):
@@ -159,7 +161,7 @@ class UIManager:
         # ค่าที่ผู้ใช้ตั้งไว้ครั้งก่อน (%APPDATA%\3D ProbeCode\settings.json — core/user_settings.py)
         _saved = user_settings.load()
         user_settings.apply_numbers(self.probe_profile, _saved.get('probe'),
-                                    ('stylus_holder_height', 'stylus_length', 'tip_diameter', 'wall_clearance',
+                                    ('stylus_length', 'tip_diameter', 'wall_clearance',
                                      'effective_tip_diameter', 'floor_clearance',
                                      'retouch_distance', 'retouch_feed', 'stylus_shaft_diameter',
                                      'stylus_tilt_deg'),
@@ -170,7 +172,7 @@ class UIManager:
             'double_touch', self.probe_profile.DEFAULT_DOUBLE_TOUCH))                                # v23
         set_floor_safety(self.probe_profile.tip_radius, self.probe_profile.floor_clearance)      # v21
         user_settings.apply_numbers(self.machine_profile, _saved.get('machine'),
-                                    ('x_travel', 'y_travel', 'z_travel', 'z_height'))
+                                    ('x_travel', 'y_travel', 'z_travel'))
         self.appearance_mode = (_saved.get('appearance')
                                 if _saved.get('appearance') in ("Light", "Dark") else theme.DEFAULT_MODE)
         _zero = _saved.get('work_zero')
@@ -179,6 +181,8 @@ class UIManager:
         # v12: Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
         self.loaded_step_filepath  = None   # เต็ม path ของไฟล์ STEP ที่โหลดล่าสุด (None ถ้ายังไม่โหลด)
         self.evaluation_best_fit = bool(user_settings.get('evaluation_best_fit', False))   # v25
+        self.evaluation_compensate = bool(user_settings.get('evaluation_compensate', True))   # v26
+        self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', False))   # v26
         self.job_gcode   = None   # v24: G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
         self.centre_done = None   # v24: {'model': path STEP, 'time': datetime} — Find centre สำเร็จล่าสุด
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel

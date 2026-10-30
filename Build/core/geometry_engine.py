@@ -37,6 +37,8 @@ class MoldGeometry:
     def load_file(self, filepath):
         self.mesh, self.step_data, self._mesh_centroid = self.loader.load(filepath)
         self.projector.update_mesh(self.mesh)
+        from core import surface_oracle   # จุดแตะลูกบอลจาก B-Rep ตรง ๆ (core/surface_oracle.py)
+        surface_oracle.set_model(self.step_data, self._mesh_centroid)
         if self.step_data:
             self.extractor.extract(self.step_data, self._mesh_centroid)
 

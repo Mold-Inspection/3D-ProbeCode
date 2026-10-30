@@ -3,7 +3,12 @@
 # ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
 # comparison_v02.md)
 # ==============================================================================
-# VERSION: 09
+# VERSION: 11
+# CHANGE LOG (v10 -> v11):
+#   การ์ด "Tip compensation" ใต้ Tolerance: สวิตช์เปิด/ปิดการชดเชย (จำค่า, คำนวณผลใหม่ทันที), r ที่ใช้
+#   + ที่มา และปุ่ม ⓘ Details → ui/compensation_info_dialog.py (ย้ายมาจากแผงซ้าย)
+# CHANGE LOG (v09 -> v10):
+#   Apply tolerance ใช้ evaluation_kwargs(app) ตัวเดียวกับแผงซ้าย (ชดเชย/คาลิเบรตผนังนอก)
 # CHANGE LOG (v08 -> v09):
 #   Best-fit centre: การ์ดรูแสดงระยะที่เลื่อน (ตำแหน่งรูเยื้องจาก CAD) + Apply tolerance ส่ง best_fit
 # CHANGE LOG (v07 -> v08):
@@ -109,6 +114,23 @@ class EvaluationSidebarPanel:
         ctk.CTkButton(row, text="Apply", width=70, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      command=self._on_apply_tolerance).pack(side="left")
 
+        # v11: สวิตช์ชดเชยรัศมีหัวโพรบ + ค่าที่ใช้ + ปุ่มที่มาของค่า
+        comp = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
+        comp.pack(padx=20, pady=(0, 5), fill="x")
+        crow = ctk.CTkFrame(comp, fg_color="transparent")
+        crow.pack(fill="x", padx=10, pady=(8, 0))
+        self._comp_switch = ctk.CTkSwitch(crow, text="Tip compensation", font=ctk.CTkFont(size=12, weight="bold"),
+                                          command=self._on_toggle_comp)
+        self._comp_switch.pack(side="left")
+        if getattr(self.app, 'evaluation_compensate', True):
+            self._comp_switch.select()
+        ctk.CTkButton(crow, text="ⓘ Details", width=80, height=24, font=ctk.CTkFont(size=11),
+                      fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
+                      command=self._on_comp_details).pack(side="right")
+        self.lbl_comp = ctk.CTkLabel(comp, text="", anchor="w", justify="left", wraplength=300,
+                                     font=ctk.CTkFont(size=11), text_color=theme.TEXT_SECONDARY)
+        self.lbl_comp.pack(fill="x", padx=10, pady=(2, 8))
+
         # v05: pack เฉพาะเมื่อมีข้อความเตือน (_pack_warning_frame)
         self.warning_frame = ctk.CTkFrame(parent, fg_color="transparent", height=1)
         self._depth_banner = None
@@ -136,6 +158,7 @@ class EvaluationSidebarPanel:
         self._hole_widgets = {}
 
         result = getattr(app, 'evaluation_result', None)
+        self._refresh_comp(result)   # v11
         if not result:
             # v04: ยังแสดงการ์ดรูได้ (ส่วน Depth + กรอกค่าเวอร์เนียร์) แม้ยังไม่มี .log
             ctk.CTkLabel(
@@ -162,6 +185,41 @@ class EvaluationSidebarPanel:
                 text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12)
             ).pack(pady=20, padx=10)
         self._update_depth_prompts()   # v05: แบนเนอร์ความลึก + แสดง/ซ่อนพื้นที่เตือน
+
+    def _refresh_comp(self, result):
+        """v11: ข้อความใต้สวิตช์ — r ที่ใช้และมาจากไหน"""
+        app = self.app
+        on = bool(getattr(app, 'evaluation_compensate', True))
+        if on:
+            self._comp_switch.select()
+        else:
+            self._comp_switch.deselect()
+        pp = app.probe_profile
+        if not result:
+            txt = (f"Will compensate r = {pp.effective_tip_radius:.3f} mm (Effective Tip ⌀ "
+                   f"{pp.effective_tip_diameter:.3f})" if on else "Off — raw ball centre vs CAD")
+        elif result.get('compensation') == 'on':
+            src = ("this run's outer walls" if result.get('tip_source') == 'run'
+                   else "Effective Tip from Set up / Hardware Setting")
+            txt = (f"Compensating r = {result.get('tip_radius_mm', 0):.3f} mm  (⌀ {2 * result.get('tip_radius_mm', 0):.3f})"
+                   f"\nfrom {src}")
+        elif result.get('compensation') == 'unavailable':
+            txt = "Unavailable — schema has no probe directions (re-export G-code + schema)"
+        else:
+            txt = "Off — deviations are raw ball centre vs CAD (≈ −r on a perfect part)"
+        self.lbl_comp.configure(text=txt, text_color=theme.TEXT_SECONDARY if on else theme.WARN_TEXT)
+
+    def _on_toggle_comp(self):
+        """v11: เปิด/ปิดการชดเชย (จำค่า) แล้วคำนวณผลใหม่ด้วย log ที่โหลดอยู่"""
+        self.app.evaluation_compensate = bool(self._comp_switch.get())
+        user_settings.save_section("evaluation_compensate", self.app.evaluation_compensate)
+        left = getattr(self.app, 'evaluation_left_panel', None)
+        if left is None or not left._auto_refresh_if_result_exists():
+            self.refresh()
+
+    def _on_comp_details(self):
+        from ui.compensation_info_dialog import show_compensation_info
+        show_compensation_info(self.app)
 
     def _build_warning_banner(self, result: dict):
         # v03: the §6 stale-settings guard has nothing to warn about when
@@ -673,14 +731,15 @@ class EvaluationSidebarPanel:
             return
 
         try:
+            from ui.evaluation_left_panel import evaluation_kwargs
             new_result = evaluate_points(expected_points, actual_points, tol,
-                                         tip_radius_mm=app.probe_profile.effective_tip_radius,
-                                         best_fit=bool(getattr(app, 'evaluation_best_fit', False)))   # v09
+                                         **evaluation_kwargs(app))   # v09/v10
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลใหม่ไม่สำเร็จ:\n{e!r}")
             return
 
         new_result['log_filename']           = result.get('log_filename')
+        new_result['log_path']               = result.get('log_path')   # v10
         new_result['tolerance_mm']           = tol
         new_result['settings_mismatch']      = result.get('settings_mismatch', [])
         new_result['expected_source']        = result.get('expected_source')        # v03

@@ -1,7 +1,12 @@
 # ==============================================================================
 # core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# VERSION: 05
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   FIX: ความลึกพื้นก้นรูวัดก่อนรู้ว่าปลายไหนคือปากรู — ถ้า B-Rep ให้ปลายพื้นเป็น open_3d (เช่น
+#   taper test.STEP) ยิงเส้นจากพื้นออกทางปากรู ไม่ชนอะไร → รูตันกลายเป็น "รูทะลุ" (floor_depth=None)
+#   ระยะเผื่อพื้นและการแตะพื้นจึงหายไป — ตอนนี้วัดทั้งสองทาง (floor_depth / floor_depth_rev)
+#   แล้วสลับตามตอนกลับปากรูใน get_step_holes_in_view() / _orient_segments_by_mesh()
 # CHANGE LOG (v04 -> v05):
 #   FIX: หลุมทรงกลม (sphere cap) ที่ CAD แบ่งเป็นหลายผิว (เช่น ซ้าย/ขวา) ถูกตรวจเป็นหลายรู
 #   ที่เยื้องกัน — _sphere_groups() จับกลุ่มผิวที่จุดศูนย์กลาง + รัศมีเดียวกัน แล้ว
@@ -347,6 +352,7 @@ def _orient_segments_by_mesh(h, mesh):
         h.open_3d, h.deep_3d         = h.deep_3d, h.open_3d
         h.radius_open, h.radius_deep = h.radius_deep, h.radius_open
         h.radius                     = h.radius_open
+        _swap_floor_depths(h)   # v06
 
 def _order_segments_deepest_first(h):
     """เรียง h.segments ใหม่เสมอให้ index 0 = segment ที่ลึกที่สุด (ไกลจากปากรู
@@ -602,6 +608,12 @@ def _measure_radius_profiles(holes, step_data, mesh_centroid):
             _dbg(f"radius profile failed for hole at {h.open_3d}: {e!r}")
 
 
+def _swap_floor_depths(h):
+    """v06: สลับความลึกพื้นตอนกลับด้านปากรู/ก้นรู (วัดไว้ทั้งสองทางใน _measure_floor_depths)"""
+    if hasattr(h, 'floor_depth') or hasattr(h, 'floor_depth_rev'):
+        h.floor_depth, h.floor_depth_rev = getattr(h, 'floor_depth_rev', None), getattr(h, 'floor_depth', None)
+
+
 def _measure_floor_depths(holes, step_data, mesh_centroid):
     """v04: ความลึกจากปากรูถึง "ผิวแรกที่อยู่ใต้กลางรู" ตามแกนรู — ยิงเส้นจากปากรูลงไป
     เก็บที่ h.floor_depth (mm) หรือ None ถ้าไม่ชนอะไร (รูทะลุ)
@@ -630,6 +642,9 @@ def _measure_floor_depths(holes, step_data, mesh_centroid):
             eps = min(0.05, 0.01 * length)
             hit = rays.dist(o + eps * axis, axis, max_d=3.0 * length + 50.0)
             h.floor_depth = None if hit is None else float(hit + eps)
+            # v06: วัดอีกทาง (จากปลาย deep ย้อนไปทางปลาย open) — ใช้เมื่อปากรูจริงอยู่ฝั่ง deep_3d
+            hit = rays.dist(d - eps * axis, -axis, max_d=3.0 * length + 50.0)
+            h.floor_depth_rev = None if hit is None else float(hit + eps)
         except Exception as e:
             _dbg(f"floor depth failed for hole at {h.open_3d}: {e!r}")
 
@@ -1155,6 +1170,7 @@ class StepExtractor:
                 hc.radius_open, hc.radius_deep = hc.radius_deep, hc.radius_open
                 hc.radius = hc.radius_open   # FIX: ขนาดที่แสดง (hole list/Properties) ต้องเป็นปากรูฝั่งกล้อง
                 flip_radius_profile(hc)
+                _swap_floor_depths(hc)       # v06: ความลึกพื้นวัดจากปากรูฝั่งกล้อง
                 
                 # 2. แก้ไขจุดที่เป็นบั๊ก: สลับ Segment ย่อยทั้งหมดให้ตรงกับปากรูใหม่
                 hc.segments.reverse() # สลับ Segment เดิมที่ลึกสุด ให้ขึ้นมาตื้นสุด

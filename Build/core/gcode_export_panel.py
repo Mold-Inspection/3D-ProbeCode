@@ -1,5 +1,13 @@
 # core/gcode_export_panel.py
-# VERSION: 17
+# VERSION: 20
+# CHANGE LOG (v19 -> v20):
+#   ตัดตัวเลือก "Calibrate tip on outer walls first" — Set up (Find centre + เวอร์เนียร์) หา Effective Tip
+#   และตั้ง zero ไปแล้วก่อนรัน การแตะผนังนอกซ้ำใน G-code ตรวจรูจึงไม่จำเป็น (และดันชิ้นงานที่ไม่ได้ยึดให้เลื่อน)
+# CHANGE LOG (v18 -> v19):
+#   ตัวเลือก "Calibrate tip on outer walls" (จำค่า) → G-code แตะผนังนอก 4 ด้านก่อนเข้ารู
+#   (core/gcode_generator.py v17) Schema ใช้ point map ชุดเดียวกับ G-code (ตารางจุดแตะ B-Rep)
+# CHANGE LOG (v17 -> v18):
+#   ตัดช่อง Padding Height + ปุ่ม Suggest ออก (Z0 อยู่ที่ผิวบนชิ้นงานเสมอ)
 # CHANGE LOG (v16 -> v17):
 #   Export G-code สำเร็จ → ตั้ง app.job_gcode, ปิด dialog แล้วสลับไปแท็บ Evaluation (รันจากที่นั่น)
 # CHANGE LOG (v15 -> v16):
@@ -84,7 +92,7 @@
 import os
 import customtkinter as ctk
 
-from core.gcode_generator import (GCodeSettings, generate_gcode, suggest_safe_z, suggest_padding_height,
+from core.gcode_generator import (GCodeSettings, generate_gcode, suggest_safe_z,
                                   probe_safety_report, gcode_extents, contact_plan_report)
 from core.expected_points_io import export_schema_json
 from core.axis_test import (AxisTestSettings, generate_axis_test_gcode,
@@ -133,7 +141,7 @@ class GCodeExportPanel:
     # จำค่าที่กรอกไว้ข้ามการเปิดโปรแกรม (core/user_settings.py)
     # Safe Z และขนาดชิ้นงานของ Axis Test ไม่จำ — ขึ้นกับชิ้นงานแต่ละชิ้น
     # ------------------------------------------------------------------
-    _REMEMBER_EXPORT = ("padding_height", "entry_clearance", "probe_feedrate", "overtravel", "backoff")
+    _REMEMBER_EXPORT = ("entry_clearance", "probe_feedrate", "overtravel", "backoff")
     _REMEMBER_AXIS   = ("z_lift", "feedrate", "dwell_s")
     _REMEMBER_PROBE  = ("distance", "feedrate", "backoff")
 
@@ -171,7 +179,6 @@ class GCodeExportPanel:
         saved = user_settings.get("export", {}) or {}
         fields = [
             ("safe_z",          "Safe Z (mm):",             ""),
-            ("padding_height",  "Padding Height (mm):",     "0.0"),
             ("entry_clearance", "Entry Clearance (mm):",    "2.0"),
             ("probe_feedrate",  "Probe Feedrate (mm/min):", "100.0"),
             ("overtravel",      "Overtravel (mm):",         "0.8"),
@@ -199,11 +206,6 @@ class GCodeExportPanel:
                              fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                              font=ctk.CTkFont(size=11),
                              command=self._suggest_safe_z).pack(side="left", padx=(8, 0))
-            elif key == "padding_height":
-                ctk.CTkButton(entry_row, text="↻ Suggest", width=90, height=30,
-                             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
-                             font=ctk.CTkFont(size=11),
-                             command=self._suggest_padding_height).pack(side="left", padx=(8, 0))
 
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
@@ -556,19 +558,6 @@ class GCodeExportPanel:
         self._entries["safe_z"].insert(0, f"{z:.2f}")
 
     # ------------------------------------------------------------------
-    def _suggest_padding_height(self):
-        """fill Padding Height from machine_profile.z_height +
-        probe_profile.stylus_holder_height/stylus_length + machine_profile
-        .z_travel — see core/gcode_generator.py::suggest_padding_height().
-        Only needs the machine/probe profiles (always present), unlike
-        Safe Z's suggest which needs a loaded mesh."""
-        app = self.app
-        padding = suggest_padding_height(app.machine_profile, app.probe_profile)
-
-        self._entries["padding_height"].delete(0, "end")
-        self._entries["padding_height"].insert(0, f"{padding:.2f}")
-
-    # ------------------------------------------------------------------
     def _read_settings(self):
         try:
             safe_z          = float(self._entries["safe_z"].get().strip())
@@ -576,8 +565,6 @@ class GCodeExportPanel:
             probe_feedrate  = float(self._entries["probe_feedrate"].get().strip())
             overtravel      = float(self._entries["overtravel"].get().strip())
             backoff         = float(self._entries["backoff"].get().strip())
-            padding_str     = self._entries["padding_height"].get().strip()
-            padding_height  = float(padding_str) if padding_str else 0.0
         except ValueError:
             self.dialog.showerror("Invalid Input", "กรุณากรอกตัวเลขให้ครบทุกช่อง")
             return None
@@ -586,14 +573,9 @@ class GCodeExportPanel:
             self.dialog.showerror("Invalid Input", "ค่าต้องมากกว่า 0 (Overtravel อนุญาต 0 ได้)")
             return None
 
-        if padding_height < 0:
-            self.dialog.showerror("Invalid Input", "Padding Height ต้องไม่ติดลบ")
-            return None
-
         return GCodeSettings(
             safe_z=safe_z, entry_clearance=entry_clearance,
-            probe_feedrate=probe_feedrate, overtravel=overtravel, backoff=backoff,
-            padding_height=padding_height)
+            probe_feedrate=probe_feedrate, overtravel=overtravel, backoff=backoff)
 
     # ------------------------------------------------------------------
     def _get_selected_holes_or_warn(self):
@@ -657,6 +639,28 @@ class GCodeExportPanel:
             "These probe points fall in an opening of the wall even after rotating the pattern, "
             "so they are left out of the G-code:\n\n" + "\n".join(lines[:12]) +
             "\n\nChange Points/Layer or Zigzag in Properties to place them on a wall. Export anyway?")
+
+    def _exact_ok(self, point_map) -> bool:
+        """v19: เตือนจุดที่ตารางจุดแตะ B-Rep บอกว่าลูกบอลจริงจะแตะขอบ/ขั้นก่อนผนัง หรือชนตั้งแต่จุดเริ่ม"""
+        from core.gcode_generator import exact_touch_report
+        rep = exact_touch_report(point_map)
+        if not rep:
+            return True
+        lines = []
+        for hid, d in list(rep.items())[:12]:
+            parts = []
+            if d['start']:
+                parts.append(f"{d['start']} point(s): the ball already touches the model at the layer centre")
+            if d['edge']:
+                parts.append(f"{d['edge']} point(s): the ball hits a step/edge/floor before the wall")
+            if d['none']:
+                parts.append(f"{d['none']} point(s): no wall within reach (layer radius used)")
+            lines.append(f"• Hole {hid}: " + "; ".join(parts))
+        return self.dialog.askyesno(
+            "Probe ball vs. model (from the STEP file)",
+            "Checked against the STEP surfaces with the real ball size:\n\n" + "\n".join(lines) +
+            "\n\nThose readings will not be the wall. Fewer layers / a smaller tip usually fixes it. "
+            "Export anyway?")
 
     def _travel_ok(self, gcode_text: str) -> bool:
         """เตือนถ้าโปรแกรมสั่งเดินไกลกว่าระยะเดินของเครื่อง (Hardware Setting → Machine
@@ -729,7 +733,7 @@ class GCodeExportPanel:
             self.dialog.showerror("Generation Failed", f"สร้าง G-code ไม่สำเร็จ:\n{e!r}")
             return
 
-        if not self._travel_ok(gcode_text):
+        if not self._travel_ok(gcode_text) or not self._exact_ok(point_map):
             return
 
         filepath = self.dialog.run_native(
@@ -747,7 +751,8 @@ class GCodeExportPanel:
             return
 
         self._remember_gcode_name(filepath)                                         # v14
-        schema_report = self._capture_export_record(selected, view_name, filepath)   # v09/v10
+        schema_report = self._capture_export_record(selected, view_name, filepath,
+                                                    points=point_map)   # v09/v10 (+ v19 point map เดียวกัน)
 
         # popup ยืนยันว่า export เสร็จ — ใช้ messagebox ที่มี dialog นี้เป็นเจ้าของ
         # (toast ของ app.notify วางอยู่บนหน้าต่างหลัก จึงถูก dialog นี้บังไว้)
@@ -821,7 +826,8 @@ class GCodeExportPanel:
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
                 screen_rot=getattr(self.app, 'screen_rotation', 0),
                 origin=self._zero_origin(view_name), work_zero=self._work_zero(),
-                z_trigger=app.probe_profile.z_trigger)   # v15: + จุดพื้นก้นรู
+                z_trigger=app.probe_profile.z_trigger,   # v15: + จุดพื้นก้นรู
+                probe_r=app.probe_profile.tip_radius)   # v19
         except Exception as e:
             self.dialog.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
@@ -860,7 +866,7 @@ class GCodeExportPanel:
             return None
 
     # ------------------------------------------------------------------
-    def _capture_export_record(self, selected_holes, view_name, gcode_filepath) -> dict:
+    def _capture_export_record(self, selected_holes, view_name, gcode_filepath, points=None) -> dict:
         """หลัง export G-code สำเร็จ — สร้าง settings snapshot จากรูทั้งหมด
         (app.current_holes ไม่ใช่แค่ selected_holes) ครั้งเดียว แล้วเขียน
         ไฟล์ Schema "<name>_schema.json" ไฟล์เดียว — best-effort, ความ
@@ -887,7 +893,8 @@ class GCodeExportPanel:
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
                 screen_rot=getattr(self.app, 'screen_rotation', 0),
                 origin=self._zero_origin(view_name), work_zero=self._work_zero(),
-                z_trigger=app.probe_profile.z_trigger)   # v15: + จุดพื้นก้นรู
+                z_trigger=app.probe_profile.z_trigger,   # v15: + จุดพื้นก้นรู
+                probe_r=app.probe_profile.tip_radius, points=points)   # v19: point map ชุดเดียวกับ G-code ที่เพิ่งเขียน
             print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")

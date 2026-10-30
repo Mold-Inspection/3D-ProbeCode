@@ -1,5 +1,8 @@
 # core/expected_points_io.py
-# VERSION: 05
+# VERSION: 06
+# CHANGE LOG (v05 -> v06):
+#   export_schema_json() รับ points ที่คำนวณแล้ว (point map ชุดเดียวกับ G-code — ไม่คำนวณซ้ำ)
+#   หรือ probe_r / calib ส่งต่อให้ build_point_map() (ตารางจุดแตะ B-Rep + จุดคาลิเบรตผนังนอก)
 # CHANGE LOG (v04 -> v05):
 #   export_schema_json() รับ screen_rot (การหมุนจอ) ส่งต่อให้ build_point_map()
 #   และบันทึก "screen_rotation" ลงไฟล์ — ไม่เปลี่ยน schema_version (key ใหม่
@@ -72,7 +75,8 @@ def export_schema_json(holes: list, view_name: str, filepath: str,
                         source_step_filename: str = None,
                         tolerance_mm_at_export: float = None,
                         screen_rot: int = 0,
-                        origin=None, work_zero: str = None, z_trigger: bool = False) -> dict:
+                        origin=None, work_zero: str = None, z_trigger: bool = False,
+                        probe_r: float = None, calib=None, points: list = None) -> dict:
     """คำนวณ expected points ผ่าน build_point_map() แล้วเขียนรวมกับ
     settings_snapshot (มาจาก core/evaluation_engine.py::
     build_settings_snapshot() เสมอ — ผู้เรียกเป็นคนสร้างแล้วส่งเข้ามา ไม่
@@ -114,7 +118,9 @@ def export_schema_json(holes: list, view_name: str, filepath: str,
            ในแอปต่อได้ทันที โดยไม่ต้องเปิดไฟล์กลับมาอ่านหรือคำนวณ
            build_point_map() ซ้ำ
     """
-    points = build_point_map(holes, view_name, screen_rot, origin, z_trigger=z_trigger)   # + จุดพื้นก้นรู
+    if points is None:   # v06: ปกติส่ง point map ของ generate_gcode() มาเลย (ลำดับ/ค่าเดียวกันแน่นอน)
+        points = build_point_map(holes, view_name, screen_rot, origin, z_trigger=z_trigger,
+                                 probe_r=probe_r, calib=calib)   # + จุดพื้นก้นรู + คาลิเบรต
 
     payload = {
         "schema_version":         _SCHEMA_VERSION,
