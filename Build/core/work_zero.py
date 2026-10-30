@@ -1,7 +1,12 @@
 # ==============================================================================
 # core/work_zero.py — ตำแหน่ง Work Zero (X0 Y0 Z0) ของ G-code
 # ==============================================================================
-# VERSION: 03
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   ตัด calib_enabled()/calib_box() — ไม่มีการแตะผนังนอกใน G-code ตรวจรูแล้ว
+# CHANGE LOG (v03 -> v04):
+#   calib_box(): กรอบชิ้นงานในพิกัด G-code (ลบ machining_origin แล้ว) สำหรับจุดแตะผนังนอก
+#   คาลิเบรตหัวโพรบ (core/gcode_generator.py v17) — None ถ้าไม่ได้ติ๊ก "Calibrate tip on outer walls"
 # CHANGE LOG (-> v03):
 #   machining_origin(): เลื่อน Z ตามวิธีตั้ง Z0 (app.z0_ref: 'tip' = ก้นลูกบอลแตะผิวบน —
 #   ค่าเริ่มต้น, 'center' = จุดศูนย์กลางลูกบอลอยู่ที่ผิวบน) + z0_note() สำหรับหัว G-code

@@ -1,7 +1,26 @@
 # ==============================================================================
 # ui/wall_zero.py — หา X0 Y0 = กึ่งกลางชิ้นงาน (+ Z0 = ผิวบน) ด้วยการแตะผนังด้านนอก 4 ด้าน
 # ==============================================================================
-# VERSION: 05
+# VERSION: 10
+# CHANGE LOG (v09 -> v10):
+#   ถอยออกหลังแตะแต่ละผนัง (ก่อนยก Z) ตั้งได้: CentreSettings.backoff (เดิมค่าคงที่ _BACKOFF = 2.0)
+# CHANGE LOG (v08 -> v09):
+#   repeatability: ผนังที่ขยับไปทางเดียวกับที่โพรบดันทุกครั้ง (drift > _REP_TOL) = ชิ้นงานเลื่อนเมื่อถูกดัน
+#   (ไม่ได้ยึด / ฐานไม่เรียบ) แจ้งแยกจาก 'ไม่ซ้ำ' ทั่วไป — เก็บที่ rep[wall]['drift'] / ['slides']
+# CHANGE LOG (v07 -> v08):
+#   zero_mode: ขั้นสุดท้ายตั้ง X0 Y0 ที่จุด Work zero ที่เลือก (กึ่งกลาง หรือมุมของชิ้นงาน) — มุมคิดจาก
+#   กึ่งกลางที่วัดได้ ± ครึ่งขนาด (ขนาดเวอร์เนียร์ถ้ากรอก ไม่งั้นขนาดที่วัดได้)
+#   keep_zero: รันซ้ำโดยใช้ Z0 เดิม (ลูกบอลค้างอยู่เหนือกึ่งกลางที่ Z+lift จากรอบก่อน) — ตั้ง X0 Y0
+#   ชั่วคราวที่ตำแหน่งปัจจุบันอย่างเดียว ไม่ต้อง jog ลงแตะผิวใหม่ (ใช้ยืนยัน Effective Tip ที่เพิ่งเปลี่ยน)
+# CHANGE LOG (v06 -> v07):
+#   Repeatability ในปุ่มเดียวกัน: ต่อผนัง หลังแตะหาครั้งแรก (feed ค้นหา) ถอย rep_back แล้วแตะซ้ำ
+#   repeats ครั้งที่ rep_feed (feed ที่ใช้วัดจริง = แตะช้าของ double touch) → ต่อผนัง: ช่วง, SD,
+#   ผลต่างแตะเร็ว−แตะช้า, ผ่าน/ไม่ผ่าน (_REP_TOL) — กึ่งกลางและ Effective Tip ⌀ ใช้ค่าเฉลี่ยแตะซ้ำ
+#   บันทึกทุกจุดเป็น Find_centre_<เวลา>.csv ในโฟลเดอร์ log (ใช้ในบท 4.6 ได้)
+# CHANGE LOG (v05 -> v06):
+#   ขนาดจริงจากเวอร์เนียร์ (ไม่บังคับ) → คำนวณ Effective Tip ⌀ แยกแกนจากการแตะขอบนอก:
+#   D_eff = span − W_จริง (span = ระยะระหว่างศูนย์กลางลูกบอลสองฝั่ง) เก็บที่ self.deff
+#   (ถือว่า steps/mm ถูกแล้ว — สเกลแกนคลาด 0.1% บนชิ้น 200 มม. = D_eff คลาด 0.2 มม.)
 # CHANGE LOG (v04 -> v05):
 #   ลำดับใหม่ตามที่ผู้ใช้กำหนด: (1) แตะผนัง 4 ด้าน แล้วประเมินขนาด X/Y เทียบแบบ (2) กลับจุดเริ่ม
 #   โดย Z ยังยกอยู่ (3) ไปกึ่งกลางที่วัดได้จริง (G53 — พิกัดเครื่อง) (4) ตั้ง X0 Y0 ตรงนั้น (Z0 คง
@@ -32,7 +51,7 @@
 # ตัวแปรสำคัญที่ปรับจูนได้:
 #   _TIMEOUT_S   = เวลาสูงสุดทั้งงาน (วินาที)
 #   _SEARCH_PAD  = ระยะค้นหา = gap + ค่านี้ (เผื่อวางไม่ตรงกลาง/ขนาดคลาด)
-#   _BACKOFF     = ถอยออกหลังแตะ (มม.)
+#   _BACKOFF     = ค่าเริ่มต้นของการถอยออกหลังแตะ (มม.) — ตั้งได้ที่ Hardware Setting → Work Zero
 # ==============================================================================
 import re
 import time
@@ -46,15 +65,39 @@ _END_MARK = "G4 P0"
 _SETTING = re.compile(r"\$(\d+)=([-\d.]+)")
 # ขนาดที่วัดได้คลาดจากแบบเกินนี้ → แนะนำให้ตรวจ steps/mm (มม. หรือสัดส่วน ใช้ค่าที่มากกว่า)
 _SIZE_TOL_MM, _SIZE_TOL_FRAC = 0.2, 0.001
+_REP_TOL = 0.02   # v07: ช่วง (สูงสุด − ต่ำสุด) ของการแตะซ้ำต่อผนังที่ถือว่าผ่าน (มม.) — ปรับได้
+_WALLS = (("X", -1, "left"), ("X", +1, "right"), ("Y", -1, "front"), ("Y", +1, "back"))
+# v08: ตำแหน่งจุด zero เทียบกึ่งกลางชิ้นงาน เป็นสัดส่วนของ (กว้าง X, ยาว Y) — บน = Y+ เหมือนบนจอ
+_ZERO_FROM_CENTRE = {"center": (0.0, 0.0), "upper_left": (-0.5, 0.5), "upper_right": (0.5, 0.5),
+                     "lower_left": (-0.5, -0.5), "lower_right": (0.5, -0.5)}
+_ZERO_TEXT = {"center": "the measured centre", "upper_left": "the upper-left corner",
+              "upper_right": "the upper-right corner", "lower_left": "the lower-left corner",
+              "lower_right": "the lower-right corner"}
 _COORD_P = {"G54": 1, "G55": 2, "G56": 3, "G57": 4, "G58": 5, "G59": 6}
 
 
 class CentreSettings:
     def __init__(self, width: float, length: float, tip_d: float, gap: float = 30.0, lift: float = 5.0,
-                 depth: float = 4.0, feed: float = 100.0):
+                 depth: float = 4.0, feed: float = 100.0, true_x: float = None, true_y: float = None,
+                 repeats: int = 0, rep_feed: float = 20.0, rep_back: float = 1.0,
+                 zero_mode: str = "center", keep_zero: bool = False, backoff: float = _BACKOFF):
         # tip_d = ⌀ ลูกบอลที่ใช้หักออกจากระยะที่วัด (Effective Tip ⌀ ถ้า calibrate แล้ว)
         self.width, self.length, self.tip_d = float(width), float(length), float(tip_d)
+        # v06: ขนาดจริงที่วัดด้วยเวอร์เนียร์ (None = ไม่ calibrate) — ใช้หา Effective Tip ⌀
+        self.true = {"X": None if true_x is None else float(true_x),
+                     "Y": None if true_y is None else float(true_y)}
         self.gap, self.lift, self.depth, self.feed = float(gap), float(lift), float(depth), float(feed)
+        # v07: แตะซ้ำต่อผนัง (0 = ไม่ตรวจ repeatability) ที่ feed / ระยะถอย ของการแตะช้า
+        self.repeats, self.rep_feed, self.rep_back = max(0, int(repeats)), float(rep_feed), float(rep_back)
+        # v08: จุดที่จะตั้ง X0 Y0 ตอนจบ (core/work_zero.py) และรันซ้ำโดยใช้ Z0 เดิม
+        self.zero_mode = zero_mode if zero_mode in _ZERO_FROM_CENTRE else "center"
+        self.keep_zero = bool(keep_zero)
+        self.backoff = float(backoff)   # v10: ถอยออกหลังแตะผนัง ก่อนยก Z
+
+    @property
+    def per_wall(self) -> int:
+        """v07: จำนวนจุดแตะต่อผนัง (ค้นหา 1 + แตะซ้ำ)"""
+        return 1 + self.repeats
 
     @property
     def search(self) -> float:
@@ -71,6 +114,10 @@ class CentreSettings:
             return "Gap ควรอย่างน้อย 10 มม. (เผื่อวางไม่ตรงกลาง)"
         if self.lift < 2.0 or self.depth <= 0 or self.feed <= 0:
             return "Z lift ≥ 2 มม., Probe depth และ Feed ต้องมากกว่า 0"
+        if not 0 < self.backoff <= self.gap:
+            return "Back-off ต้องมากกว่า 0 และไม่เกิน Gap"
+        if self.repeats and (self.rep_feed <= 0 or self.rep_back <= 0):
+            return "Repeat feed / back-off ต้องมากกว่า 0"
         return ""
 
 
@@ -83,7 +130,10 @@ def side_gcode(axis: str, sign: int, s: CentreSettings) -> str:
         f"G0 {a}{sign * s.outside(a):.3f}",            # ไปนอกผนัง (ที่ความสูงยก)
         f"G0 Z{-s.depth:.3f}",                          # ลดลงข้างผนัง
         f"G91 G38.2 {a}{-sign * s.search:.3f} F{s.feed:.0f}",   # แตะเข้าหาชิ้นงาน
-        f"G0 {a}{sign * _BACKOFF:.3f}",
+        *[ln for _ in range(s.repeats) for ln in (                # v07: แตะซ้ำที่ feed วัดจริง
+            f"G0 {a}{sign * s.rep_back:.3f}",
+            f"G38.2 {a}{-sign * (s.rep_back + 2.0):.3f} F{s.rep_feed:.0f}")],
+        f"G0 {a}{sign * s.backoff:.3f}",
         "G90",
         f"G0 Z{s.lift:.3f}",
     ])
@@ -113,24 +163,30 @@ class CentreRun:
         self._steps = [
             # 1) zero ชั่วคราวที่จุดเริ่ม (Z0 = ผิวบน) + อ่าน steps/mm ปัจจุบัน แล้วยกก่อนเสมอ
             ("Read $$, set zero at the start point, lift",
-             lambda: f"$$\nG10 L20 P{p()} X0 Y0 Z0\nG90\nG0 Z{s.lift:.3f}", 0),
-            ("X: left wall", lambda: side_gcode("X", -1, s), 1),
-            ("X: right wall", lambda: side_gcode("X", +1, s), 1),
+             lambda: f"$$\nG10 L20 P{p()} X0 Y0 Z0\nG90\nG0 Z{s.lift:.3f}", 0) if not s.keep_zero else
+            # v08: รันซ้ำ — Z0 เดิม, X0 Y0 ชั่วคราวที่ตำแหน่งปัจจุบัน (เหนือกึ่งกลางจากรอบก่อน)
+            ("Read $$, keep Z0, temporary X0 Y0 here, lift",
+             lambda: f"$$\nG10 L20 P{p()} X0 Y0\nG90\nG0 Z{s.lift:.3f}", 0),
+            ("X: left wall", lambda: side_gcode("X", -1, s), s.per_wall),
+            ("X: right wall", lambda: side_gcode("X", +1, s), s.per_wall),
             # แตะผนังหน้า/หลังที่แนว X กึ่งกลางที่วัดได้ (พิกัดเครื่อง — ไม่ขึ้นกับ offset)
             ("Y: front wall", lambda: f"G90\nG0 Z{s.lift:.3f}\nG53 G0 X{self._mid('X'):.3f}\n"
-                                      + side_gcode("Y", -1, s), 1),
-            ("Y: back wall", lambda: side_gcode("Y", +1, s), 1),
+                                      + side_gcode("Y", -1, s), s.per_wall),
+            ("Y: back wall", lambda: side_gcode("Y", +1, s), s.per_wall),
             # 2) กลับจุดเริ่ม (Z ยังยกอยู่) — 3) ไปกึ่งกลางจริง — 4) ตั้ง X0 Y0 ตรงนั้น (Z0 คงเดิม)
             ("Back to the start point (Z lifted)", lambda: f"G90\nG0 Z{s.lift:.3f}\nG0 X0 Y0\nG4 P1", 0),
             ("Move to the measured centre",
              lambda: f"G53 G0 X{self._mid('X'):.3f} Y{self._mid('Y'):.3f}\nG4 P1", 0),
-            ("Set X0 Y0 at the centre", lambda: f"G10 L20 P{p()} X0 Y0", 0),
+            ("Set X0 Y0 at the work zero", lambda: "G10 L20 P{} X{:.4f} Y{:.4f}".format(p(), *self._zero_xy()), 0),
         ]
         self.active, self.prb, self.result, self._i = True, [], {}, -1
+        self.deff = {}   # v06
         self.steps_mm = {}
-        self._deadline = time.monotonic() + _TIMEOUT_S
+        self.rep = {}    # v07
+        timeout = _TIMEOUT_S + 60.0 * s.repeats   # แตะซ้ำที่ feed ช้าใช้เวลาเพิ่ม
+        self._deadline = time.monotonic() + timeout
         self.logger.on_event.append(self._on_event)
-        self.logger.suppress_logs(_TIMEOUT_S + 30)
+        self.logger.suppress_logs(timeout + 30)
         self._next()
         self.app.root.after(500, self._watchdog)
 
@@ -142,12 +198,34 @@ class CentreRun:
                 self._end("Stopped — the machine was halted." + self._done_note(), ok=False)
 
     # ------------------------------------------------------------------
+    def _wall_touches(self, w: int) -> list:
+        """v07: จุดแตะทั้งหมดของผนังลำดับ w (0..3 ตาม _WALLS) — [0] = แตะค้นหา, ที่เหลือ = แตะซ้ำ"""
+        k = self.s.per_wall
+        return self.prb[w * k:(w + 1) * k]
+
+    def _wall_value(self, w: int, i: int) -> float:
+        """v07: ตำแหน่งผนัง (แกน i, พิกัดเครื่อง) = ค่าเฉลี่ยแตะซ้ำ ถ้ามี ไม่งั้นแตะค้นหา"""
+        pts = self._wall_touches(w)
+        rep = pts[1:] or pts[:1]
+        return sum(p[i] for p in rep) / len(rep)
+
     def _mid(self, axis: str) -> float:
-        """กึ่งกลางสองผนังของแกน (พิกัดเครื่อง) — X ใช้จุดแตะที่ 1–2, Y ใช้ 3–4"""
+        """กึ่งกลางสองผนังของแกน (พิกัดเครื่อง) — X ใช้ผนัง 0–1, Y ใช้ 2–3"""
         i, k = {"X": (0, 0), "Y": (1, 2)}[axis]
-        lo, hi = sorted((self.prb[k][i], self.prb[k + 1][i]))
+        lo, hi = sorted((self._wall_value(k, i), self._wall_value(k + 1, i)))
         self.result[axis] = (lo, hi, (lo + hi) / 2.0, hi - lo)
         return (lo + hi) / 2.0
+
+    def _sizes(self):
+        """v08: ขนาดชิ้นงานที่ใช้ตั้งมุม — เวอร์เนียร์ถ้ากรอก ไม่งั้น span − ⌀ลูกบอล"""
+        return {a: (self.s.true.get(a) or (self.result[a][3] - self.s.tip_d)) for a in ("X", "Y")}
+
+    def _zero_xy(self):
+        """v08: พิกัดงานของกึ่งกลางชิ้นงาน (ตำแหน่งปัจจุบัน) เมื่อ X0 Y0 อยู่ที่จุด zero ที่เลือก"""
+        size = self._sizes()
+        fx, fy = _ZERO_FROM_CENTRE[self.s.zero_mode]
+        self.zero_set = (self.s.zero_mode, -fx * size["X"], -fy * size["Y"])
+        return -fx * size["X"], -fy * size["Y"]
 
     def _next(self):
         self._i += 1
@@ -227,7 +305,8 @@ class CentreRun:
 
     def _finish(self):
         s = self.s
-        lines = ["✔ X0 Y0 set at the measured centre — Z0 = top surface (set at the start).",
+        lines = [f"✔ X0 Y0 set at {_ZERO_TEXT[s.zero_mode]} — Z0 = top surface "
+                 f"({'kept from before' if s.keep_zero else 'set at the start'}).",
                  f"   The ball is waiting at Z+{s.lift:g} above the centre."]
         for a, cad, key in (("X", s.width, 100), ("Y", s.length, 101)):
             lo, hi, mid, span = self.result[a]
@@ -248,7 +327,85 @@ class CentreRun:
                 else:
                     lines.append(f"   ⚠ differs from CAD — check ${key} (steps/mm) with a 200 mm jog")
         lines.append(f"(sizes use ball ⌀ {s.tip_d:g} mm)")
+        lines += self._repeat_lines()   # v07
+        # v06: Effective Tip ⌀ จากขอบนอก — span ยาวกว่าชิ้นงานจริงเท่า ⌀ ลูกบอลที่ใช้งานจริง
+        self.deff = {}
+        for a in ("X", "Y"):
+            w = s.true.get(a)
+            if w:
+                span = self.result[a][3]
+                self.deff[a] = span - w
+        if self.deff:
+            lines.append("Effective Tip ⌀ from the measured size (assumes steps/mm are right):")
+            for a, d in self.deff.items():
+                lines.append(f"   {a}: span {self.result[a][3]:.3f} − measured {s.true[a]:.3f} = {d:.3f} mm"
+                             + ("   ⚠ outside 0–Tip ⌀ — check the measured size / steps/mm"
+                                if not 0 <= d <= 2.5 else ""))
+            if len(self.deff) == 2:
+                lines.append(f"   X−Y difference {self.deff['X'] - self.deff['Y']:+.3f} mm "
+                             f"(probe pre-travel differs per axis)")
         self._end("\n".join(lines), ok=True)
+
+    def _repeat_lines(self) -> list:
+        """v07: สรุป repeatability ต่อผนัง + เขียน CSV ทุกจุดแตะ"""
+        s = self.s
+        if not s.repeats:
+            return []
+        out = [f"Repeatability: {s.repeats} touches per wall at F{s.rep_feed:g} "
+               f"(back-off {s.rep_back:g} mm), pass if range ≤ {_REP_TOL:g} mm"]
+        ok_all, any_slide = True, False
+        for w, (axis, sign, name) in enumerate(_WALLS):
+            i = 0 if axis == "X" else 1
+            pts = self._wall_touches(w)
+            vals = [p[i] for p in pts[1:]]
+            if not vals:
+                continue
+            mean = sum(vals) / len(vals)
+            sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else 0.0
+            rng = max(vals) - min(vals)
+            fast = (pts[0][i] - mean) * -sign   # แตะเร็วเลยแตะช้าไปตามทิศที่โพรบเดินเท่าไหร่ (+ = เลยไป)
+            # v09: ผนังถอยไปตามทิศที่ดันทุกครั้ง = ชิ้นงานเลื่อน (ไม่ใช่หัวโพรบ)
+            steps = [(b - a) * -sign for a, b in zip(vals, vals[1:])]
+            drift = (vals[-1] - vals[0]) * -sign
+            slides = drift > _REP_TOL and sum(1 for d in steps if d > -0.005) >= len(steps) - 1
+            ok = rng <= _REP_TOL
+            ok_all &= ok
+            any_slide = any_slide or slides
+            self.rep[f"{axis}{'+' if sign > 0 else '-'}"] = {'mean': mean, 'sd': sd, 'range': rng,
+                                                             'fast_minus_slow': fast, 'ok': ok,
+                                                             'drift': drift, 'slides': slides}
+            out.append(f"   {name:5s} ({axis}{'+' if sign > 0 else '-'}): range {rng:.4f}  SD {sd:.4f}  "
+                       f"fast overshoot {fast:+.4f}  " + ("✔" if ok else "⚠")
+                       + (f"  ← wall moved {drift:+.3f} along the push: the PART SLIDES" if slides else ""))
+        out.append("   ✔ probe + holder repeat well" if ok_all else
+                   ("   ⚠ the part moves when pushed — clamp it / fix the base, then run again"
+                    if any_slide else
+                    "   ⚠ not repeatable — tighten the probe holder / clamp the part, then run again"))
+        path = self._write_csv()
+        if path:
+            out.append(f"   touches saved: {path}")
+        return out
+
+    def _write_csv(self):
+        """v07: ทุกจุดแตะของรอบนี้ (พิกัดเครื่อง) → Find_centre_<เวลา>.csv ในโฟลเดอร์ log"""
+        import csv
+        import datetime
+        import os
+        try:
+            folder = getattr(self.logger, 'log_dir', None) or "."
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, f"Find_centre_{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}.csv")
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                wr = csv.writer(f)
+                wr.writerow(["wall", "touch", "feed", "machine_x", "machine_y", "machine_z"])
+                for w, (axis, sign, name) in enumerate(_WALLS):
+                    for j, p in enumerate(self._wall_touches(w)):
+                        wr.writerow([f"{axis}{'+' if sign > 0 else '-'} ({name})", j,
+                                     self.s.feed if j == 0 else self.s.rep_feed] + [f"{c:.3f}" for c in p])
+            return path
+        except Exception as e:
+            print(f"[wall_zero] repeatability CSV not written: {e!r}")
+            return None
 
     def _end(self, text, ok):
         self.active = False

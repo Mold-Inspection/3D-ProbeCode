@@ -4,7 +4,21 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 11
+# VERSION: 12
+# CHANGE LOG (v11 -> v12):
+#   FIX (ผนังเอียง/โค้ง): ใช้ตารางจุดแตะจาก B-Rep ('trig' — core/gcode_generator.py v17) ถ้ามี:
+#   ศูนย์กลางลูกบอลที่คาด P(r) = S + s(r)·n, จุดแตะบน CAD = P(r) + r·m(r), จุดวัด = PRB−WCO + r·m(r)
+#   (r = Effective Tip ⌀/2, m(r) = ทิศตั้งฉากผิวจริงตรงจุดที่ลูกบอลรัศมี r แตะ)
+#   FIX (ระยะเบี่ยง): 'distance_mm' = |ระยะเบี่ยงตามทิศตั้งฉากผิว| (a − e)·m แบบ CMM แทนระยะ 3 มิติ
+#   — ผนังตั้งตรงได้ค่าเท่าเดิม ผนังเอียง θ ค่าเดิมโตเกิน 1/cos θ (taper 15° +3.5%, ทรงกลม 45° +41%)
+#   เก็บระยะ 3 มิติไว้ที่ 'euclid_mm' และค่ามีเครื่องหมายที่ 'dev' (+ = ผิวจริงลึกเข้าไปในเนื้อกว่า CAD)
+#   FEATURE (คาลิเบรตผนังนอก): จุด shape='calib' → result['calibration'] = Effective Tip ⌀ ของรอบนี้
+#   (span − ขนาดจริงต่อแกน) และใช้แทนค่าใน Hardware Setting ถ้า use_run_calib (ค่าเริ่มต้น)
+#   FEATURE (pretravel='travel'): ทางเลือกแบบจำลองระยะทริก — เครื่องเดินต่อ p = R − r ตามทิศที่โพรบเดิน
+#   หลังลูกบอลแตะ (แทนการกดเข้าผิวตามทิศตั้งฉาก) ผนังตรงได้ค่าเท่ากันทุกประการ ต่างกันเฉพาะผนังเอียง
+#   (taper 15° ต่าง 0.03 มม., หลุมทรงกลมชั้นลึกต่างได้ 0.3 มม.) — ใช้ข้อมูลจริงตัดสินว่าแบบไหนตรง
+#   FEATURE: compensate=False ประเมินแบบไม่ชดเชย (จุดดิบ = ศูนย์กลางลูกบอล เทียบผิว CAD ตรง ๆ)
+#   ทุกจุดเก็บ raw_log / wco / cad / dev_nocomp / exp_center / normal — export_results_csv()
 # CHANGE LOG (v10 -> v11):
 #   FEATURE (Best-fit centre): evaluate_points(best_fit=True) — ต่อรู หาการเลื่อนในระนาบตั้งฉากแกนรู
 #   (least squares ของระยะเบี่ยงตามทิศตั้งฉากผิว) ที่ทำให้จุดวัดเข้ากับ CAD ที่สุด แล้วเลื่อนจุดวัดทั้งรู
@@ -156,11 +170,70 @@ def _layer_circle(points: list, tolerance_mm: float):
     }
 
 
+def _trig_at(exp, r: float):
+    """v12: (s, m) จากตารางจุดแตะ B-Rep ที่รัศมีลูกบอล r (interpolate เชิงเส้น) — None ถ้าไม่มีตาราง"""
+    t = exp.get('trig')
+    if not t:
+        return None
+    t = np.asarray(t, dtype=float)
+    r = float(np.clip(r, t[0, 0], t[-1, 0]))
+    s = float(np.interp(r, t[:, 0], t[:, 1]))
+    m = np.array([np.interp(r, t[:, 0], t[:, k]) for k in (2, 3, 4)])
+    return s, m / np.linalg.norm(m)
+
+
+def _table_dist(exp, s_meas: float) -> float:
+    """v12: ระยะจากศูนย์กลางลูกบอล (ที่ระยะเดิน s_meas) ถึงผิว CAD — ย้อนตาราง s(r) (s ลดลงเมื่อ r โต)
+    นอกช่วงตาราง ต่อเส้นตรงจากปลาย (ค่าลบ = ศูนย์กลางลูกบอลเลยผิว CAD เข้าไปในเนื้อ)"""
+    t = np.asarray(exp['trig'], dtype=float)
+    r, sv = t[:, 0], t[:, 1]
+    if s_meas > sv[0]:
+        return float(r[0] + (s_meas - sv[0]) * (r[1] - r[0]) / (sv[1] - sv[0]))
+    if s_meas < sv[-1]:
+        return float(r[-1] + (s_meas - sv[-1]) * (r[-1] - r[-2]) / (sv[-1] - sv[-2]))
+    return float(np.interp(s_meas, sv[::-1], r[::-1]))
+
+
+def _table_dev(exp, raw, r_tip: float, comp_on) -> float:
+    """v12: ระยะเบี่ยงตามทิศตั้งฉากผิวแบบแม่นตรง = รัศมีที่ชดเชย − ระยะจริงจากศูนย์กลางลูกบอลถึงผิว CAD
+    ผิวจริงเลื่อนเข้าเนื้อ δ → ลูกบอลรัศมี r ทริกเมื่อห่างผิว CAD r − δ ⇒ δ = r − ระยะ (ถูกแม้ผิวโค้งมาก)
+    'travel': ศูนย์กลางลูกบอลจริงตอนเริ่มแตะ = ดิบ − (R − r)·n แล้วเทียบกับ R"""
+    n = np.asarray(_probe_dir(exp), dtype=float)
+    s_meas = float(np.dot(np.asarray(raw, dtype=float)
+                          - np.array([float(exp['sx']), float(exp['sy']), float(exp['sz'])]), n))
+    if comp_on == 'travel':
+        r_ball = float(exp['trig'][-1][0])
+        return r_ball - _table_dist(exp, s_meas - max(0.0, r_ball - r_tip))
+    return (r_tip if comp_on else 0.0) - _table_dist(exp, s_meas)
+
+
 def _contact_pair(exp, raw, r_tip: float, comp_on: bool):
-    """(จุดบนผิวตาม CAD, จุดที่วัดได้หลังชดเชยรัศมี) ของจุดเดียว — v11 แยกออกมาให้ best-fit ใช้ร่วม"""
+    """(จุดบนผิวตาม CAD, จุดที่วัดได้หลังชดเชยรัศมี, ทิศตั้งฉากผิวที่ใช้วัดระยะเบี่ยง) ของจุดเดียว
+    v12: มีตาราง B-Rep → P(r) = S + s(r)·n คือศูนย์กลางลูกบอลที่คาด, e = P(r) + r·m, a = ดิบ + r·m
+    ไม่ชดเชย (comp_on False) = ตารางที่ r = 0: e = จุดที่เส้นทางทะลุผิว CAD, a = ศูนย์กลางลูกบอลดิบ
+    comp_on == 'travel': ลูกบอลจริง R แตะผิวแล้วเครื่องเดินต่อ p = R − r ตามทิศ n ก่อนทริก →
+    e = S + s(R)·n + R·m(R), a = ดิบ − p·n + R·m(R) (ผนังตรงได้เท่ากับแบบปกติ)"""
     ex, ey, ez = float(exp['x']), float(exp['y']), float(exp['z'])
-    m = _surface_dir(exp) if comp_on else None
-    if m is not None:   # v09: ผนังเอียง — ลูกบอลแตะผิวตามทิศตั้งฉากผิว m (ไม่ใช่ทิศที่เดิน)
+    r = r_tip if comp_on else 0.0
+    g = _trig_at(exp, r)
+    if g is not None and 'sx' in exp:
+        s_, m = g
+        n = np.asarray(_probe_dir(exp), dtype=float)
+        start = np.array([float(exp['sx']), float(exp['sy']), float(exp['sz'])])
+        if comp_on == 'travel':   # v12: ระยะทริกตามทิศที่เดิน
+            r_ball = float(exp['trig'][-1][0])
+            s_b, m_b = _trig_at(exp, r_ball)
+            pre = max(0.0, r_ball - r)
+            e = tuple(start + s_b * n + r_ball * m_b)
+            a = tuple(np.asarray(raw, dtype=float) - pre * n + r_ball * m_b)
+            return e, a, tuple(m_b)
+        pexp = start + s_ * n
+        e = tuple(pexp + r * m)
+        a = tuple(np.asarray(raw, dtype=float) + r * m)
+        return e, a, tuple(m)
+    m = _surface_dir(exp)
+    w = m or _probe_dir(exp) or (0.0, 0.0, 0.0)
+    if m is not None and comp_on:   # v09: ผนังเอียง (schema ก่อน v12) — ลูกบอลแตะตามทิศตั้งฉากผิว m
         n = _probe_dir(exp)
         k = r_tip / max(1e-6, m[0] * n[0] + m[1] * n[1] + m[2] * n[2])
         e = (ex - k * n[0] + r_tip * m[0], ey - k * n[1] + r_tip * m[1],
@@ -172,7 +245,42 @@ def _contact_pair(exp, raw, r_tip: float, comp_on: bool):
         a = (raw[0] + r_tip * n[0], raw[1] + r_tip * n[1], raw[2] + r_tip * n[2])
     else:
         e, a = (ex, ey, ez), raw
-    return e, a
+    return e, a, w
+
+
+def run_calibration(expected_points: list, actual_points: list, true_size: dict = None,
+                    tip_d_max: float = None) -> dict:
+    """v12: Effective Tip ⌀ จากจุดแตะผนังนอก (shape='calib') — ต่อแกน: span ระหว่างศูนย์กลาง
+    ลูกบอลสองฝั่ง − ขนาดชิ้นงาน (เวอร์เนียร์ใน true_size ถ้ามี ไม่งั้นขนาด CAD ระหว่างจุดผิวสองฝั่ง)
+    คืน {} ถ้าไม่มีจุดคาลิเบรต; {'axes': {...}, 'd_eff': ค่าเฉลี่ยแกนที่ใช้ได้ หรือ None}"""
+    total = min(len(expected_points), len(actual_points))
+    sides = {}
+    for i in range(total):
+        exp = expected_points[i]
+        if exp.get('shape') != 'calib':
+            continue
+        act = actual_points[i]
+        sides.setdefault(exp.get('cal_axis'), {})[int(exp.get('cal_side', 0))] = (
+            np.array([float(exp['x']), float(exp['y']), float(exp['z'])]),
+            np.array([float(act['x']), float(act['y']), float(act['z'])]))
+    if not sides:
+        return {}
+    axes = {}
+    for ax, pair in sorted(sides.items()):
+        if -1 not in pair or +1 not in pair:
+            continue
+        k = 0 if ax == 'X' else 1
+        span = float(pair[+1][1][k] - pair[-1][1][k])
+        w_cad = float(pair[+1][0][k] - pair[-1][0][k])
+        w_true = (true_size or {}).get(ax)
+        width = float(w_true) if w_true else w_cad
+        d = span - width
+        ok = 0.0 < d <= (float(tip_d_max) if tip_d_max else 10.0) + 1e-9
+        axes[ax] = {'span': span, 'width_cad': w_cad, 'width_true': float(w_true) if w_true else None,
+                    'd_eff': d, 'ok': ok,
+                    'centre': 0.5 * float(pair[+1][1][k] + pair[-1][1][k])}   # กึ่งกลางที่วัดได้ (ศูนย์เทียบ X0/Y0)
+    good = [v['d_eff'] for v in axes.values() if v['ok']]
+    return {'axes': axes, 'd_eff': (sum(good) / len(good)) if good else None}
 
 
 def _best_fit_shifts(expected_points, actual_points, total: int, r_tip: float, comp_on: bool,
@@ -184,7 +292,7 @@ def _best_fit_shifts(expected_points, actual_points, total: int, r_tip: float, c
     for i in range(total):
         exp = expected_points[i]
         n = _probe_dir(exp)
-        if n is None or exp.get('shape') == 'floor':
+        if n is None or exp.get('shape') in ('floor', 'calib'):
             continue
         groups.setdefault(str(exp.get('hole_id', '?')), []).append(i)
     shifts = {}
@@ -200,8 +308,8 @@ def _best_fit_shifts(expected_points, actual_points, total: int, r_tip: float, c
         for i in idx:
             exp, act = expected_points[i], actual_points[i]
             raw = (float(act['x']), float(act['y']), float(act['z']))
-            e, a = _contact_pair(exp, raw, r_tip, comp_on)
-            w = np.array(_surface_dir(exp) or _probe_dir(exp), dtype=float)
+            e, a, w = _contact_pair(exp, raw, r_tip, comp_on)
+            w = np.array(w, dtype=float)
             s = float(np.dot(np.subtract(a, e), w))       # ระยะเบี่ยงตามทิศตั้งฉากผิว
             w_lat = w - float(np.dot(w, axis)) * axis    # เลื่อนได้เฉพาะในระนาบตั้งฉากแกนรู
             rows.append(w_lat)
@@ -248,7 +356,7 @@ def _nominal_circles(expected_points, total: int, r_tip: float, comp_on: bool) -
         if exp.get('shape', 'circle') != 'circle' or _probe_dir(exp) is None:
             continue
         key = (str(exp.get('hole_id', '?')), int(exp.get('seg_idx', 0)), int(exp.get('layer_idx', 0)))
-        e, _a = _contact_pair(exp, (0.0, 0.0, 0.0), r_tip, comp_on)
+        e, _a, _w = _contact_pair(exp, (0.0, 0.0, 0.0), r_tip, comp_on)
         groups.setdefault(key, []).append(e)
     out = {}
     for key, pts in groups.items():
@@ -302,7 +410,9 @@ def _mark_shaft_contacts(layers: list) -> list:
 # 1) evaluate_points()
 # ==============================================================================
 def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: float,
-                    tip_radius_mm: float = 0.0, best_fit: bool = False) -> dict:
+                    tip_radius_mm: float = 0.0, best_fit: bool = False, compensate: bool = True,
+                    use_run_calib: bool = True, calib_true: dict = None,
+                    tip_d_max: float = None, pretravel: str = 'normal') -> dict:
     """จับคู่ EXPECTED[i] กับ ACTUAL[i] ด้วย sequence index แล้วประเมินผลผ่าน/
     ไม่ผ่านของแต่ละจุดเทียบกับ tolerance (mm, ระยะ 3D Euclidean) จากนั้น
     รวมผลขึ้นเป็นโครงสร้าง layer -> segment -> hole -> รายการจุดที่ไม่ผ่านแบบ
@@ -319,6 +429,12 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
     tolerance_mm    : ระยะเบี่ยงเบนสูงสุดที่ยังถือว่า "ผ่าน" (mm)
     tip_radius_mm   : v07 — รัศมีหัวโพรบ (ใช้ค่าที่ calibrate แล้วถ้ามี) สำหรับชดเชย
                        จุดที่วัดได้ (ศูนย์กลางลูกบอล) ให้เป็นจุดบนผิวชิ้นงาน — 0 = ไม่ชดเชย
+    compensate      : v12 — False = ไม่ชดเชยรัศมี (ดูผลดิบ)
+    use_run_calib   : v12 — มีจุดแตะผนังนอก (shape='calib') → ใช้ Effective Tip ของรอบนี้แทน tip_radius_mm
+    calib_true      : v12 — {'X': ขนาดจริงเวอร์เนียร์, 'Y': ...} (ไม่ใส่ = ขนาด CAD)
+    tip_d_max       : v12 — ⌀ ลูกบอลจริง ใช้ตรวจว่า Effective Tip ⌀ ที่ได้อยู่ในช่วง 0 – ⌀ จริง
+    pretravel       : v12 — 'normal' (ทริกเมื่อกดเข้าผิวตามทิศตั้งฉาก = รัศมี r คงที่ แบบ CMM ทั่วไป)
+                       หรือ 'travel' (เครื่องเดินต่อ R − r ตามทิศที่โพรบเดิน) — ผนังตรงเท่ากัน
 
     Returns
     -------
@@ -329,32 +445,60 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
       failed_point_refs, expected_count, actual_count,
       sequence_mismatch, settings_mismatch, holes
     """
-    total_points = min(len(expected_points), len(actual_points))
+    matched = min(len(expected_points), len(actual_points))
+    idx_all = [i for i in range(matched) if expected_points[i].get('shape') != 'calib']   # v12
+    total_points = len(idx_all)
     passed_points = 0
 
-    # v07: ชดเชยรัศมีหัวโพรบ — ทำได้เมื่อ schema มีทิศที่โพรบเดินครบทุกจุด
+    # v12: Effective Tip จากผนังนอกของรอบนี้ (ถ้ามีจุดคาลิเบรตใน G-code)
+    calibration = run_calibration(expected_points, actual_points, calib_true, tip_d_max)
     r_tip = max(0.0, float(tip_radius_mm or 0.0))
-    has_dirs = total_points > 0 and all(_probe_dir(expected_points[i]) is not None
-                                        for i in range(total_points))
-    comp_on = r_tip > 0.0 and has_dirs
-    compensation = 'on' if comp_on else ('unavailable' if r_tip > 0.0 else 'off')
+    tip_source = 'setting'
+    if use_run_calib and calibration.get('d_eff'):
+        r_tip, tip_source = calibration['d_eff'] / 2.0, 'run'
+
+    # v07: ชดเชยรัศมีหัวโพรบ — ทำได้เมื่อ schema มีทิศที่โพรบเดินครบทุกจุด
+    has_dirs = total_points > 0 and all(_probe_dir(expected_points[i]) is not None for i in idx_all)
+    comp_on = bool(compensate) and r_tip > 0.0 and has_dirs
+    if comp_on:   # v12: แบบจำลองระยะทริก ส่งต่อผ่าน comp_on ('normal' / 'travel')
+        comp_on = 'travel' if pretravel == 'travel' else 'normal'
+    compensation = 'on' if comp_on else ('unavailable' if compensate and r_tip > 0.0 else 'off')
 
     holes: dict = {}
     # v11: Best-fit centre — เลื่อนจุดวัดทั้งรูก่อนประเมิน (ไม่ตรวจตำแหน่งรู ตรวจขนาด + รูปทรง)
-    circles = _nominal_circles(expected_points, total_points, r_tip, comp_on) if best_fit else {}
-    shifts = (_best_fit_shifts(expected_points, actual_points, total_points, r_tip, comp_on, circles)
+    circles = _nominal_circles(expected_points, matched, r_tip, comp_on) if best_fit else {}
+    shifts = (_best_fit_shifts(expected_points, actual_points, matched, r_tip, comp_on, circles)
               if best_fit else {})
 
-    for i in range(total_points):
+    for i in idx_all:
         exp = expected_points[i]
         act = actual_points[i]
 
         raw = (float(act['x']), float(act['y']), float(act['z']))
+        raw_log = raw                                            # v12: ค่า PRB − WCO ก่อนเลื่อน best-fit
+        e0, _a0, w0 = _contact_pair(exp, raw_log, 0.0, False)    # v12: ไม่ชดเชย — ศูนย์กลางลูกบอล vs ผิว CAD
+        dev_nocomp = float(np.dot(np.subtract(raw_log, e0), w0))
+        exact = bool(exp.get('trig')) and 'sx' in exp and _probe_dir(exp) is not None   # v12
+        if exact:
+            dev_nocomp = _table_dev(exp, raw_log, 0.0, False)
         sh_ = shifts.get(str(exp.get('hole_id', '?')))
         if sh_ is not None:
             raw = (raw[0] + sh_[0], raw[1] + sh_[1], raw[2] + sh_[2])
-        (ex, ey, ez), (ax_, ay_, az_) = _contact_pair(exp, raw, r_tip, comp_on)
+        (ex, ey, ez), (ax_, ay_, az_), w = _contact_pair(exp, raw, r_tip, comp_on)
         dx, dy, dz = ax_ - ex, ay_ - ey, az_ - ez
+        dev = float(dx * w[0] + dy * w[1] + dz * w[2])   # v12: ระยะเบี่ยงตามทิศตั้งฉากผิว (มีเครื่องหมาย)
+        if exact:   # v12: ย้อนตาราง B-Rep — แม่นแม้ผนังโค้งมาก/แตะแบบเฉียด (ผนังเรียบได้ค่าเดียวกัน)
+            dev = _table_dev(exp, raw, r_tip, comp_on)
+        euclid = math.sqrt(dx * dx + dy * dy + dz * dz)
+        r_used = r_tip if comp_on else 0.0
+        exp_center = (ex - r_used * w[0], ey - r_used * w[1], ez - r_used * w[2])
+        if comp_on == 'travel' and exp.get('trig') and 'sx' in exp:   # ศูนย์กลางลูกบอลตอนทริก
+            s_b = _trig_at(exp, float(exp['trig'][-1][0]))[0] + max(0.0, float(exp['trig'][-1][0]) - r_tip)
+            exp_center = tuple(np.array([float(exp['sx']), float(exp['sy']), float(exp['sz'])])
+                               + s_b * np.asarray(_probe_dir(exp), dtype=float))
+        extra = {'raw_log': raw_log, 'wco': act.get('wco'), 'cad': e0, 'dev_nocomp': dev_nocomp,
+                 'exp_center': exp_center, 'normal': tuple(float(c) for c in w), 'dev': dev,
+                 'euclid_mm': euclid}
         is_floor = exp.get('shape') == 'floor'
         if is_floor:   # v08: พื้นก้นรู — เทียบความลึกตามแกนรูอย่างเดียว
             n = _probe_dir(exp) or (0.0, 0.0, -1.0)
@@ -371,7 +515,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                 w = _surface_dir(exp) or _probe_dir(exp)
                 distance = abs(float(dx * w[0] + dy * w[1] + dz * w[2]))
         else:
-            distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+            distance = abs(dev)   # v12: ตามทิศตั้งฉากผิว (ผนังตรง = ค่าเดิม)
         passed = distance <= tolerance_mm
         if passed:
             passed_points += 1
@@ -401,6 +545,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                 'depth_error': depth_err,
                 'distance_mm': distance,
                 'passed':      passed,
+                **extra,
             }
             if not passed:
                 hole_entry['_floor_failed'] = True
@@ -423,6 +568,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             'distance_mm': distance,   # "Offset (mm)" in the UI
             'passed':      passed,
             'dir':         _probe_dir(exp),   # v09: ใช้ตรวจก้านชน
+            **extra,                          # v12
         })
 
     holes_out = {}
@@ -483,18 +629,70 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         'tolerance_mm':       tolerance_mm,
         'tip_radius_mm':      r_tip if comp_on else 0.0,   # v07
         'compensation':       compensation,                # 'on' / 'off' / 'unavailable'
+        'tip_source':         tip_source,                  # v12: 'run' (ผนังนอกรอบนี้) / 'setting'
+        'pretravel':          comp_on or None,             # v12: 'normal' / 'travel' / None (ไม่ชดเชย)
+        'calibration':        calibration,                 # v12: {} ถ้า G-code ไม่มีจุดคาลิเบรต
+        'calib_points':       matched - total_points,      # v12
         'best_fit':           bool(best_fit),              # v11
         'total_points':       total_points,
         'passed_points':      passed_points,
         'failed_points':      failed_points,
         'failed_point_refs':  failed_point_refs,
         'suspect_points':     suspect_total,               # v10 — ก้านโพรบอาจแตะผนัง (เตือนเท่านั้น)
-        'expected_count':     len(expected_points),
-        'actual_count':       len(actual_points),
+        'expected_count':     len(expected_points) - (matched - total_points),
+        'actual_count':       len(actual_points) - (matched - total_points),
         'sequence_mismatch':  len(expected_points) != len(actual_points),
         'settings_mismatch':  [],   # เติมทีหลังโดยผู้เรียก (diff_snapshots())
         'holes':              holes_out,
     }
+
+
+def export_results_csv(result: dict, filepath: str) -> None:
+    """v12: บันทึกผลรายจุดเป็น CSV — ทั้งค่าดิบ (ไม่ชดเชย) และค่าหลังชดเชยในแถวเดียวกัน
+    raw = PRB − WCO (ศูนย์กลางลูกบอล), cad = จุดที่เส้นทางโพรบทะลุผิว CAD,
+    dev_nocomp = (raw − cad)·m0 (ถือว่าศูนย์กลางลูกบอลคือผิว), exp_center = ศูนย์กลางลูกบอลที่คาดที่ r,
+    comp = raw + r·m (จุดแตะที่วัดได้), cad_contact = จุดแตะตาม CAD, dev = (comp − cad_contact)·m"""
+    import csv
+
+    def xyz(v):
+        return ["" if v is None else f"{float(c):.4f}" for c in (v if v is not None else (None,) * 3)]
+
+    r = result.get('tip_radius_mm', 0.0)
+    cal = result.get('calibration') or {}
+    with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["# log", result.get('log_filename', '')])
+        w.writerow(["# compensation", result.get('compensation'), "r_eff (mm)", f"{r:.4f}",
+                    "source", result.get('tip_source', 'setting'),
+                    "tolerance (mm)", result.get('tolerance_mm'), "best_fit", result.get('best_fit')])
+        for ax, v in (cal.get('axes') or {}).items():
+            w.writerow([f"# calibration {ax}", "span", f"{v['span']:.4f}", "width CAD", f"{v['width_cad']:.4f}",
+                        "width caliper", "" if v['width_true'] is None else f"{v['width_true']:.4f}",
+                        "Effective Tip dia", f"{v['d_eff']:.4f}", "ok", v['ok'],
+                        "measured centre", f"{v['centre']:.4f}"])
+        w.writerow(["hole", "seg", "layer", "point", "shape",
+                    "n_x", "n_y", "n_z", "wco_x", "wco_y", "wco_z",
+                    "raw_x", "raw_y", "raw_z", "cad_x", "cad_y", "cad_z", "dev_nocomp",
+                    "r_used", "m_x", "m_y", "m_z", "exp_centre_x", "exp_centre_y", "exp_centre_z",
+                    "comp_x", "comp_y", "comp_z", "cad_contact_x", "cad_contact_y", "cad_contact_z",
+                    "dev", "abs_dev", "euclid", "passed"])
+        for gi, hole in (result.get('holes') or {}).items():
+            hid = hole.get('display_id', gi)
+            rows = []
+            for seg in hole.get('segments', []):
+                for lyr in seg.get('layers', []):
+                    for pt in lyr.get('points', []):
+                        rows.append((seg['seg_idx'], lyr['layer_idx'], pt))
+            if hole.get('floor'):
+                rows.append((0, -1, dict(hole['floor'], point_idx=0, shape='floor', dir=None)))
+            for seg_idx, lyr_idx, pt in rows:
+                w.writerow([hid, seg_idx, lyr_idx, pt.get('point_idx'), pt.get('shape')]
+                           + xyz(pt.get('dir')) + xyz(pt.get('wco')) + xyz(pt.get('raw_log'))
+                           + xyz(pt.get('cad')) + [f"{pt.get('dev_nocomp', 0.0):+.4f}", f"{r:.4f}"]
+                           + xyz(pt.get('normal')) + xyz(pt.get('exp_center'))
+                           + xyz(pt.get('actual')) + xyz(pt.get('expected'))
+                           + [f"{pt.get('dev', 0.0):+.4f}", f"{pt.get('distance_mm', 0.0):.4f}",
+                              f"{pt.get('euclid_mm', 0.0):.4f}", pt.get('passed')])
 
 
 # ==============================================================================

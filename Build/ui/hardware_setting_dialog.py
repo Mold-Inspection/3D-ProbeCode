@@ -2,7 +2,29 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 13
+# VERSION: 19
+# CHANGE LOG (v18 -> v19):
+#   Find centre: ช่อง "Back-off after touch" (ค่าเริ่มต้น 2) — ถอยออกจากผนังหลังแตะ ก่อนยก Z
+# CHANGE LOG (v17 -> v18):
+#   Set up: เตือนเมื่อชิ้นงานเลื่อนตอนแตะซ้ำ (wall_zero v09) และเมื่อ Effective Tip ⌀ แกน X กับ Y ต่างกัน
+#   เกิน _DEFF_XY_TOL ก่อนตั้งค่า (ค่าเฉลี่ยของสองแกนที่ต่างกันมากใช้ไม่ได้)
+# CHANGE LOG (v16 -> v17):
+#   FIX: กด Find centre ซ้ำขณะลูกบอลยังยกค้างจากรอบก่อน (work Z > 0.2 + Set up กับ CAD นี้แล้ว) เดิมตั้ง Z0
+#   ที่ความสูงนั้น (Z0 ลอยเท่า Z lift) — ตอนนี้ถามแล้วรันแบบใช้ Z0 เดิม (keep_zero) หรือยกเลิก
+# CHANGE LOG (v15 -> v16):
+#   Set up ก่อนตรวจรู (open_setup — เรียกจากปุ่ม ▶ Run inspection): เปิดหน้า Work Zero ที่กรอกขนาดชิ้นงาน
+#   จากโมเดลไว้แล้ว เหลือกรอกเวอร์เนียร์ X/Y → Find centre (+ repeatability) → แจ้ง Effective Tip ⌀ ใหม่
+#   และตั้งให้ทันที → ถ้าเปลี่ยนเกิน _DEFF_RERUN_TOL แนะนำรันซ้ำ 1 ครั้ง (ใช้ Z0 เดิม ไม่ต้อง jog)
+#   → ปิดหน้านี้แล้วกลับไปรันตรวจรูต่อ (on_ready)
+#   Find centre ตั้ง X0 Y0 ที่ Work zero ที่เลือก (กึ่งกลางหรือมุม) — เปลี่ยนเป็น Center เฉพาะเมื่อเป็น
+#   Mesh centroid (ui/wall_zero.py v08) และเก็บผลไว้ที่ app.setup_info (หน้าต่าง Compensation details)
+# CHANGE LOG (v14 -> v15):
+#   Find centre: ช่อง "Repeat touches / wall" (ค่าเริ่มต้น 5, 0 = ปิด) — ตรวจ repeatability
+#   ในปุ่มเดียวกัน ที่ feed / ระยะถอยของแตะช้า (Probe Stylus) — ui/wall_zero.py v07
+# CHANGE LOG (v13 -> v14):
+#   Find centre: ช่องขนาดจริง (เวอร์เนียร์) X/Y ไม่บังคับ → จบแล้วแสดง Effective Tip ⌀ แยกแกน
+#   และปุ่มตั้งค่าเฉลี่ยเป็น Effective Tip ⌀ (ui/wall_zero.py v06)
+#   ตัด Stylus Holder Height และ Machine Z Height (ใช้กับ Padding Height อย่างเดียว ซึ่งตัดแล้ว)
 # CHANGE LOG (v12 -> v13):
 #   Probe: ⌀ ก้านโพรบ + มุมเอียงก้าน → สรุป "ก้านอาจแตะขอบปากรูเมื่อลึกเกิน X มม."
 # CHANGE LOG (v11 -> v12):
@@ -90,6 +112,9 @@ from core.models import set_floor_safety
 from core.work_zero import (WORK_ZERO_CHOICES, Z0_REF_CHOICES, label_of, mode_of_label, zero_hint_text,
                             z0_ref_label, z0_ref_of_label)
 from ui.wall_zero import CentreRun, CentreSettings
+
+_DEFF_XY_TOL = 0.10     # v18: Effective Tip ⌀ X กับ Y ต่างกันเกินนี้ (มม.) → เตือนก่อนตั้งค่า — ปรับได้
+_DEFF_RERUN_TOL = 0.01   # v16: Effective Tip ⌀ เปลี่ยนเกินนี้ (มม.) → แนะนำรัน Set up ซ้ำ 1 ครั้ง — ปรับได้
 from core.openbuilds_link import LOG_NAME_CHOICES, log_file_name
 
 
@@ -102,7 +127,6 @@ class HardwareSettingDialog:
         self.dialog.add_category("work_zero", "Work Zero",            self._build_work_zero_fields)
         self.dialog.add_category("auto_log", "Auto Log (OpenBuilds)", self._build_auto_log_fields)
 
-        self._probe_holder_entry = None   # v02 — Stylus Holder Height
         self._probe_length_entry = None
         self._probe_tip_entry    = None
         self._probe_clear_entry  = None   # ระยะว่างหัวโพรบ-ผนังขั้นต่ำ
@@ -114,12 +138,34 @@ class HardwareSettingDialog:
         self._machine_x_entry     = None
         self._machine_y_entry     = None
         self._machine_z_entry     = None
-        self._machine_zh_entry    = None   # v02 — Machine Z Height
         self._lbl_machine_summary = None
+        self._flow = None   # v16: Set up ก่อนตรวจรู {'on_ready': fn, 'reruns': n}
 
     # ------------------------------------------------------------------
     def show(self):
         self.dialog.show()
+
+    def open_setup(self, on_ready):
+        """v16: Set up ก่อนตรวจรู — หน้า Work Zero พร้อมค่า เหลือกรอกเวอร์เนียร์แล้วกด Find centre
+        เสร็จแล้วปิดหน้านี้และเรียก on_ready() (ปิดหน้าต่างเองกลางทาง = ยกเลิก)"""
+        self._flow = {'on_ready': on_ready, 'reruns': 0}
+        self.dialog.on_close = self._cancel_flow
+        self.dialog.show()
+        self.dialog.show_category("work_zero")
+        self._fill_wall_size(quiet=True)
+        try:   # เลื่อนหน้าลงให้เห็นช่องเวอร์เนียร์ + ปุ่ม Find centre แล้ววางเคอร์เซอร์ที่ช่อง X
+            ent = self._wall_true["X"]
+            frame = ent.master.master   # CTkScrollableFrame ของหน้า Work Zero
+            self.app.root.update_idletasks()
+            total = max(1, frame.winfo_height())
+            frame._parent_canvas.yview_moveto(max(0.0, (ent.winfo_rooty() - frame.winfo_rooty() - 380) / total))
+            ent.focus_set()
+        except Exception:
+            pass
+
+    def _cancel_flow(self):
+        self._flow = None
+        self.dialog.on_close = None
 
     # ==================================================================
     # v03: Auto Log category — ไฟล์ log ของทุก job ใน OpenBuilds Control
@@ -237,6 +283,15 @@ class HardwareSettingDialog:
     # มีผลทันทีที่เลือก (ไม่มีปุ่ม Apply) + จำข้ามการเปิดโปรแกรม
     # ==================================================================
     def _build_work_zero_fields(self, parent):
+        if self._flow:   # v16: มาจากปุ่ม Run inspection
+            ctk.CTkLabel(
+                parent, anchor="w", justify="left", wraplength=360, font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=theme.BG_CARD, corner_radius=6, text_color=theme.WARN_TEXT,
+                text=("Set up before the inspection run:\n"
+                      "1. Jog the ball over the part centre, ball bottom touching the top surface.\n"
+                      "2. Enter the caliper size X / Y below (part size is already filled from the model).\n"
+                      "3. Press ⌖ Find centre. When it finishes, the new Effective Tip ⌀ is set and the "
+                      "inspection continues.")).pack(fill="x", pady=(0, 10), ipadx=8, ipady=6)
         ctk.CTkLabel(parent, text="Work zero (X0 Y0 Z0):", font=ctk.CTkFont(size=13),
                      text_color=theme.TEXT_SECONDARY).pack(anchor="w")
         self._wz_menu = ctk.CTkOptionMenu(
@@ -274,7 +329,7 @@ class HardwareSettingDialog:
 
         # --- v07: หา X0 Y0 (กึ่งกลาง) + Z0 ด้วยการแตะผนัง 4 ด้าน (ui/wall_zero.py) ---------------
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(10, 10))
-        ctk.CTkLabel(parent, text="Find centre (X0 Y0) + Z0 by touching the walls", anchor="w",
+        ctk.CTkLabel(parent, text="Set up: Find centre (X0 Y0) + Z0 + repeatability", anchor="w",
                      font=ctk.CTkFont(size=13, weight="bold")).pack(fill="x")
         ctk.CTkLabel(
             parent, anchor="w", justify="left", wraplength=360, font=ctk.CTkFont(size=11),
@@ -285,7 +340,10 @@ class HardwareSettingDialog:
                   "front and back walls from outside, checks the part size against the CAD, goes back "
                   "to the start point (Z lifted), moves to the measured centre and sets X0 Y0 there. "
                   "It stays lifted — lower it yourself.\n"
-                  "Needs OpenBuilds Control connected. Work zero becomes Center of object.")
+                  "Each wall is then touched again N times at the slow (measuring) feed to check that the "
+                  "probe and holder repeat (0 = skip).\n"
+                  "Needs OpenBuilds Control connected. X0 Y0 goes to the Work zero chosen above (centre or a "
+                  "corner; Mesh centroid becomes Center).")
         ).pack(fill="x", pady=(2, 8))
         self._wall_entries = {}
         grid = ctk.CTkFrame(parent, fg_color="transparent")
@@ -293,7 +351,9 @@ class HardwareSettingDialog:
         saved = user_settings.get("wall_zero", {}) or {}
         fields = [("width_x", "Part width X (mm)", ""), ("length_y", "Part length Y (mm)", ""),
                   ("gap", "Gap outside wall (mm)", "30"), ("lift", "Z lift (mm)", "5"),
-                  ("depth", "Probe depth (mm)", "4"), ("feed", "Probe feed (mm/min)", "100")]
+                  ("depth", "Probe depth (mm)", "4"), ("feed", "Probe feed (mm/min)", "100"),
+                  ("repeats", "Repeat touches / wall", "5"),   # v15
+                  ("backoff", "Back-off after touch (mm)", "2")]   # v19
         for i, (key, label, default) in enumerate(fields):
             cell = ctk.CTkFrame(grid, fg_color="transparent")
             cell.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 14), pady=(0, 6))
@@ -308,6 +368,19 @@ class HardwareSettingDialog:
         ctk.CTkButton(parent, text="↻ Part size from model", width=160, height=26,
                       fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                       font=ctk.CTkFont(size=11), command=self._fill_wall_size).pack(anchor="w", pady=(0, 8))
+        # v14: ขนาดจริง (เวอร์เนียร์) — ไม่บังคับ ใช้หา Effective Tip ⌀ จากการแตะขอบนอก
+        ctk.CTkLabel(parent, anchor="w", font=ctk.CTkFont(size=11), text_color=theme.TEXT_SECONDARY,
+                     text="Measured size (caliper, optional) → Effective Tip ⌀:").pack(fill="x")
+        true_row = ctk.CTkFrame(parent, fg_color="transparent")
+        true_row.pack(fill="x", pady=(2, 8))
+        self._wall_true = {}
+        for key, label in (("X", "X"), ("Y", "Y")):
+            ctk.CTkLabel(true_row, text=label, font=ctk.CTkFont(size=11),
+                         text_color=theme.TEXT_SECONDARY).pack(side="left", padx=(0, 4))
+            ent = ctk.CTkEntry(true_row, width=90, height=28, font=ctk.CTkFont(size=12),
+                               placeholder_text="blank = skip")
+            ent.pack(side="left", padx=(0, 12))
+            self._wall_true[key] = ent
         btns = ctk.CTkFrame(parent, fg_color="transparent")
         btns.pack(fill="x")
         self._btn_wall = ctk.CTkButton(btns, text="⌖ Find centre", width=150, height=32,
@@ -320,6 +393,9 @@ class HardwareSettingDialog:
                                       font=ctk.CTkFont(family=theme.FONT_MONO, size=10),
                                       text_color=theme.TEXT_MUTED)
         self._lbl_wall.pack(fill="x", pady=(8, 0))
+        self._btn_use_deff = ctk.CTkButton(parent, text="", height=28, fg_color=theme.ACCENT,
+                                           hover_color=theme.ACCENT_HOVER, command=self._use_wall_deff)
+        self._deff_value = None   # v14: ค่าที่ปุ่มจะตั้ง (ซ่อนปุ่มจนกว่าจะมีผล)
         self._wall_run = None
         self._fill_wall_size(quiet=True)
 
@@ -348,7 +424,7 @@ class HardwareSettingDialog:
         except Exception:
             pass
 
-    def _start_wall_zero(self):
+    def _start_wall_zero(self, keep_zero: bool = False):
         app = self.app
         if self._wall_run is not None and self._wall_run.active:
             return
@@ -371,19 +447,46 @@ class HardwareSettingDialog:
                     if app.geo.mesh is not None else "ขนาดที่พิมพ์เอง")
         pp = app.probe_profile   # ⌀ ที่หักออกจากระยะวัด: Effective Tip ⌀ ถ้า calibrate แล้ว
         tip_d = pp.effective_tip_diameter if pp.effective_tip_diameter > 0 else pp.tip_diameter
+        true = {}
+        for key, ent in self._wall_true.items():   # v14: ขนาดจริงจากเวอร์เนียร์ (ไม่บังคับ)
+            txt = ent.get().strip()
+            if txt:
+                try:
+                    true[key] = float(txt)
+                except ValueError:
+                    self.dialog.showerror("Invalid Input", f"ขนาดจริง {key} ต้องเป็นตัวเลข (หรือเว้นว่าง)")
+                    return
+        # v17: กด Find centre ซ้ำหลังรอบก่อน — ลูกบอลยังยกค้างที่ Z+lift ถ้าตั้ง Z0 ตรงนี้ Z0 จะลอย
+        # → ใช้ Z0 เดิมแทน (เหมือนรันซ้ำที่โปรแกรมแนะนำ)
+        from ui.centre_check_dialog import centre_done_for_current
+        z_work = ((((logger.last_status or {}).get("machine") or {}).get("position") or {})
+                  .get("work") or {}).get("z")
+        if not keep_zero and z_work is not None and float(z_work) > 0.2 and centre_done_for_current(app):
+            if not self.dialog.askyesno(
+                    "Find centre again",
+                    f"ลูกบอลอยู่เหนือ Z0 {float(z_work):.2f} มม. — ค้างจาก Find centre รอบก่อน\n\n"
+                    f"Yes = รันซ้ำโดยใช้ Z0 เดิม (แนะนำ ไม่ต้อง jog)\n"
+                    f"No = ยกเลิก — ถ้าต้องการตั้ง Z0 ใหม่ ให้ jog ลงจนก้นลูกบอลแตะผิวบนก่อนแล้วกดอีกครั้ง"):
+                return
+            keep_zero = True
         st = CentreSettings(vals["width_x"], vals["length_y"], tip_d,
-                            vals["gap"], vals["lift"], vals["depth"], vals["feed"])
+                            vals["gap"], vals["lift"], vals["depth"], vals["feed"],
+                            true_x=true.get("X"), true_y=true.get("Y"),
+                            repeats=int(vals.get("repeats", 0)),          # v15: repeatability
+                            backoff=vals.get("backoff", 2.0),             # v19
+                            rep_feed=float(pp.retouch_feed), rep_back=float(pp.retouch_distance),
+                            zero_mode=self._setup_zero_mode(), keep_zero=keep_zero)   # v16
         err = st.validate()
         if err:
             self.dialog.showerror("Invalid Input", err)
             return
-        user_settings.save_section("wall_zero", {k: vals[k] for k in ("gap", "lift", "depth", "feed")})
+        user_settings.save_section("wall_zero", {k: vals[k] for k in ("gap", "lift", "depth", "feed", "repeats", "backoff")})
         ox, oy = st.outside("X"), st.outside("Y")
         # v09: ขั้นแรกตั้ง Z0 ที่ตำแหน่งปัจจุบัน — ถ้าลูกบอลไม่ได้แตะผิวจริง จะลงไปแตะผนังที่ระดับขอบบน
         # (แรงดันลูกบอลขึ้น หัวโพรบด้านข้างไม่ทริก = ไถข้ามขอบ) จึงแสดง Z ปัจจุบันและเตือนถ้าไม่ใช่ Z0 เดิม
         z_txt = ""
         work = (((logger.last_status or {}).get("machine") or {}).get("position") or {}).get("work") or {}
-        if "z" in work:
+        if "z" in work and not keep_zero:   # v16: รันซ้ำ — ลูกบอลยกค้างไว้ตั้งใจ
             z_now = float(work["z"])
             z_txt = f"Z ตอนนี้ = {z_now:+.3f} (เทียบ Z0 เดิม)\n"
             if abs(z_now) > 0.2:
@@ -397,21 +500,29 @@ class HardwareSettingDialog:
                 f"ต้องตรงกับที่วางบนเครื่อง — ถ้าไม่ตรง ให้ยกเลิก แล้วกด Rotate บนจอให้รูปชิ้นงานหันเหมือน"
                 f"บนเครื่องก่อน (G-code และจุด zero ใช้มุมเดียวกันนี้)\n\n"
                 f"ก่อนเริ่ม: ลูกบอลอยู่ใกล้กลางชิ้นงาน (คลาดไม่เกิน ~{st.gap - 10:g} มม.) และก้นลูกบอลแตะผิวบนพอดี\n\n"
-                f"เครื่องจะ: ตั้ง X0 Y0 Z0 ที่จุดนี้ → ยก Z{st.lift:g} → ไป X−{ox:.1f} → ลง Z−{st.depth:g} → "
+                + ("รันซ้ำ: ใช้ Z0 เดิม ลูกบอลอยู่เหนือกึ่งกลางจากรอบก่อนแล้ว\n" if keep_zero else "") +
+                f"เครื่องจะ: ตั้ง X0 Y0{'' if keep_zero else ' Z0'} ที่จุดนี้ → ยก Z{st.lift:g} → ไป X−{ox:.1f} → ลง Z−{st.depth:g} → "
                 f"แตะผนังซ้าย → ยก → ไป X+{ox:.1f} → ลง → แตะผนังขวา → "
                 f"ทำแบบเดียวกันที่ Y ±{oy:.1f} → ประเมินขนาดเทียบแบบ → กลับจุดเริ่ม (Z ยกไว้) → "
-                f"ไปกึ่งกลางที่วัดได้ → ตั้ง X0 Y0 ตรงนั้น (ค้างไว้ที่ Z+{st.lift:g})\n\n"
+                f"ไปกึ่งกลางที่วัดได้ → ตั้ง X0 Y0 ที่ {label_of(st.zero_mode)} (ค้างไว้เหนือกึ่งกลางที่ Z+{st.lift:g})\n"
+                + (f"แต่ละผนังแตะซ้ำ {st.repeats} ครั้งที่ F{st.rep_feed:g} (ถอย {st.rep_back:g} มม.) "
+                   f"เพื่อตรวจ repeatability\n" if st.repeats else "") + "\n" +
                 f"ต้องมีที่เดินจากจุดนี้อย่างน้อย X ±{ox + 5:.0f} และ Y ±{oy + 5:.0f} มม. "
                 f"(เครื่องไม่มี soft limit) และไม่มี clamp สูงเกิน Z+{st.lift:g} ตามทางที่ข้าม\n"
                 f"มือพร้อมกดปุ่ม Stop / e-stop — เริ่มเลยไหม?"):
             return
-        if getattr(app, 'work_zero', None) != "center":
-            self._wz_menu.set(label_of("center"))
-            self._on_work_zero_change(label_of("center"))
+        if getattr(app, 'work_zero', None) != st.zero_mode:   # v16: เฉพาะ Mesh centroid → Center
+            self._wz_menu.set(label_of(st.zero_mode))
+            self._on_work_zero_change(label_of(st.zero_mode))
         self._btn_wall.configure(state="disabled")
         self._wall_run = CentreRun(app, logger, st, on_status=self._set_wall_status,
                                    on_done=self._on_wall_done)
         self._wall_run.start()
+
+    def _setup_zero_mode(self) -> str:
+        """v16: จุด zero ที่ Find centre ตั้งให้ = Work zero ที่เลือก (Mesh centroid ตั้งบนเครื่องไม่ได้ → Center)"""
+        mode = getattr(self.app, 'work_zero', "center")
+        return mode if mode in ("center", "upper_left", "upper_right", "lower_left", "lower_right") else "center"
 
     def _stop_wall_zero(self):
         if self._wall_run is not None and self._wall_run.active:
@@ -424,11 +535,134 @@ class HardwareSettingDialog:
 
     def _on_wall_done(self, text, ok):
         self._btn_wall.configure(state="normal")
+        deff = getattr(self._wall_run, 'deff', None) if ok else None   # v14
+        if deff:
+            self._deff_value = round(sum(deff.values()) / len(deff), 3)
+            src = " + ".join(deff) if len(deff) > 1 else next(iter(deff))
+            self._btn_use_deff.configure(
+                text=f"Use {self._deff_value:.3f} as Effective Tip ⌀ ({'mean of ' if len(deff) > 1 else ''}{src})")
+            self._btn_use_deff.pack(anchor="w", pady=(6, 0))
+        else:
+            self._deff_value = None
+            self._btn_use_deff.pack_forget()
         if ok:   # v12: ให้แท็บ Evaluation รู้ว่าตั้ง zero ให้ไฟล์ CAD นี้แล้ว (ui/centre_check_dialog.py)
             import datetime
             self.app.centre_done = {'model': getattr(self.app, 'loaded_step_filepath', None),
                                     'time': datetime.datetime.now()}
+            run = self._wall_run
+            self.app.setup_info = {   # v16: หน้าต่าง Compensation details
+                'time': self.app.centre_done['time'], 'model': getattr(self.app, 'loaded_step_filename', None),
+                'tip_d_used': run.s.tip_d, 'true': dict(run.s.true), 'deff': dict(run.deff or {}),
+                'spans': {a: run.result[a][3] for a in ("X", "Y") if a in run.result},
+                'rep': dict(getattr(run, 'rep', {}) or {}), 'repeats': run.s.repeats,
+                'rep_feed': run.s.rep_feed, 'zero': getattr(run, 'zero_set', None),
+                'keep_zero': run.s.keep_zero,
+                'eff_before': (self.app.setup_info['eff_before']   # รันซ้ำ: เทียบกับค่าก่อน Set up รอบแรก
+                               if run.s.keep_zero and getattr(self.app, 'setup_info', None)
+                               else self.app.probe_profile.effective_tip_diameter),
+                'eff_after': None, 'text': text}
         self._set_wall_status(("✔ " if ok else "⚠ ") + text, theme.OK_TEXT if ok else theme.WARN_TEXT)
+        if ok and self._flow:   # v16: Set up ก่อนตรวจรู — ไปต่อหลังข้อความขึ้นแล้ว
+            self.app.root.after(150, self._flow_after_centre)
+
+    def _flow_after_centre(self):
+        """v16: หลัง Find centre ในโหมด Set up — repeatability → Effective Tip ใหม่ → (รันซ้ำ) → ไปตรวจรู"""
+        flow, run, pp = self._flow, self._wall_run, self.app.probe_profile
+        if not flow or run is None:
+            return
+        rep = getattr(run, 'rep', {}) or {}
+        bad = [k for k, v in rep.items() if not v['ok']]
+        slid = [f"{k} ({v['drift']:+.2f} มม.)" for k, v in rep.items() if v.get('slides')]
+        if slid and not self.dialog.askyesno(   # v18
+                "The part moves",
+                f"ผนัง {', '.join(slid)} ถอยไปตามทิศที่โพรบดันทุกครั้ง = ชิ้นงานเลื่อน/เผยอเมื่อถูกดัน\n"
+                f"Effective Tip และศูนย์ที่ได้จะผิด และจุดตรวจรูที่ดันทางเดียวกันจะเพี้ยนด้วย\n\n"
+                f"แนะนำ: ยึดชิ้นงาน (เทปกาวสองหน้า + clamp ที่มุม) แล้วกด Find centre ใหม่\n\n"
+                f"ใช้ผลนี้ต่อไหม?"):
+            return
+        if bad and not slid and not self.dialog.askyesno(
+                "Repeatability",
+                f"แตะซ้ำที่ผนัง {', '.join(bad)} ได้ช่วงเกิน 0.02 มม. — ที่จับหัวโพรบหรือชิ้นงานอาจยังขยับ "
+                f"(ดูตัวเลขในหน้านี้)\n\nใช้ผลนี้และไปต่อไหม? (No = แก้แล้วกด Find centre ใหม่)"):
+            return
+        old = float(pp.effective_tip_diameter)
+        deff = getattr(run, 'deff', None) or {}
+        if len(deff) == 2 and abs(deff['X'] - deff['Y']) > _DEFF_XY_TOL and not self.dialog.askyesno(   # v18
+                "Effective Tip ⌀ X ≠ Y",
+                f"X = {deff['X']:.3f}, Y = {deff['Y']:.3f} มม. ต่างกัน {abs(deff['X'] - deff['Y']):.3f} — "
+                f"ปกติควรใกล้กัน (ไม่เกิน {_DEFF_XY_TOL:g})\n"
+                f"สาเหตุที่พบบ่อย: ชิ้นงานเลื่อนตอนแตะ, กรอกเวอร์เนียร์สลับแกน, หรือหัวโพรบไวไม่เท่ากันแต่ละทิศ\n\n"
+                f"ใช้ค่าเฉลี่ย {(deff['X'] + deff['Y']) / 2:.3f} ต่อไหม? (No = แก้แล้วกด Find centre ใหม่)"):
+            return
+        if deff:
+            new = round(sum(deff.values()) / len(deff), 3)
+            if not 0 < new <= pp.tip_diameter:
+                self.dialog.showerror("Effective Tip ⌀",
+                                      f"ได้ {new:.3f} มม. อยู่นอกช่วง 0 – {pp.tip_diameter:g} — ตรวจขนาดเวอร์เนียร์ "
+                                      f"(แกน X = ซ้าย-ขวาบนเครื่อง) แล้วกด Find centre ใหม่")
+                return
+            self._apply_deff(new)
+            if getattr(self.app, 'setup_info', None):
+                self.app.setup_info['eff_after'] = new
+            axes = "   ".join(f"{a}: {d:.3f}" for a, d in deff.items())
+            msg = (f"Effective Tip ⌀ ใหม่ = {new:.3f} มม.  (เดิม {old:.3f}, เปลี่ยน {new - old:+.3f})\n"
+                   f"{axes}\nตั้งค่าให้แล้ว")
+            if abs(new - old) > _DEFF_RERUN_TOL and flow['reruns'] == 0:
+                if self.dialog.askyesno(
+                        "Effective Tip ⌀ changed",
+                        msg + f"\n\nค่าเปลี่ยนเกิน {_DEFF_RERUN_TOL:g} มม. — แนะนำรัน Set up อีก 1 ครั้งเพื่อยืนยัน "
+                              f"(ใช้ Z0 เดิม ลูกบอลอยู่เหนือกึ่งกลางแล้ว ไม่ต้อง jog)\n\nรันอีกครั้งเลยไหม?"):
+                    flow['reruns'] += 1
+                    self._start_wall_zero(keep_zero=True)
+                    return
+            else:
+                self.dialog.showinfo("Effective Tip ⌀", msg)
+        else:
+            self.dialog.showinfo("Effective Tip ⌀",
+                                 f"ไม่ได้กรอกขนาดเวอร์เนียร์ — ใช้ Effective Tip ⌀ เดิม {old:.3f} มม.")
+        on_ready = flow['on_ready']
+        self._flow = None
+        self.dialog.on_close = None
+        self.dialog._on_close()
+        self.app.root.after(200, on_ready)
+
+    def _use_wall_deff(self):
+        """v14: ตั้ง Effective Tip ⌀ จากผล Find centre + ขนาดจริง"""
+        d = self._deff_value
+        if d is None:
+            return
+        if not 0 < d <= self.app.probe_profile.tip_diameter:
+            self.dialog.showerror("Effective Tip ⌀",
+                                  f"{d:.3f} มม. อยู่นอกช่วง 0 – Tip ⌀ — ตรวจขนาดจริงหรือ steps/mm ก่อน")
+            return
+        if not self.dialog.askyesno("Effective Tip ⌀",
+                                    f"ตั้ง Effective Tip ⌀ = {d:.3f} มม. "
+                                    f"(เดิม {self.app.probe_profile.effective_tip_diameter:g})?\n\n"
+                                    f"มีผลกับการชดเชยในหน้า Evaluation ทันที และกับ Find centre รอบถัดไป"):
+            return
+        self._apply_deff(d)
+        if getattr(self.app, 'setup_info', None):
+            self.app.setup_info['eff_after'] = d
+
+    def _apply_deff(self, d: float):
+        """v16: ตั้ง + บันทึก Effective Tip ⌀ (ไม่ถาม — ผู้เรียกยืนยันเอง)"""
+        self.app.probe_profile.effective_tip_diameter = d
+        if self._probe_eff_entry is not None:
+            try:
+                self._probe_eff_entry.delete(0, "end")
+                self._probe_eff_entry.insert(0, str(d))
+            except Exception:
+                pass
+        if self._lbl_probe_summary is not None:
+            try:
+                self._lbl_probe_summary.configure(text=self._probe_summary_text())
+            except Exception:
+                pass
+        self._after_probe_change()
+        self._save_probe()
+        self._btn_use_deff.pack_forget()
+        self._set_wall_status(self._lbl_wall.cget("text") + f"\n✔ Effective Tip ⌀ set to {d:.3f} mm",
+                              theme.OK_TEXT)
 
     def _on_work_zero_change(self, label: str):
         self.app.work_zero = mode_of_label(label)
@@ -445,21 +679,6 @@ class HardwareSettingDialog:
     # ==================================================================
     def _build_probe_fields(self, parent):
         app = self.app
-
-        # v02: Stylus Holder Height — placed above Stylus Length since the
-        # holder physically sits between the Z-axis carriage and the rod.
-        holder_row = ctk.CTkFrame(parent, fg_color="transparent")
-        holder_row.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(holder_row, text="Stylus Holder Height (mm):", font=ctk.CTkFont(size=13),
-                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
-        holder_entry_row = ctk.CTkFrame(holder_row, fg_color="transparent")
-        holder_entry_row.pack(fill="x", pady=(4, 0))
-        self._probe_holder_entry = ctk.CTkEntry(holder_entry_row, width=110, height=30,
-                                                 placeholder_text="20.0", font=ctk.CTkFont(size=13))
-        self._probe_holder_entry.insert(0, str(app.probe_profile.stylus_holder_height))
-        self._probe_holder_entry.pack(side="left")
-        ctk.CTkLabel(holder_entry_row, text="mm", font=ctk.CTkFont(size=11),
-                    text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
 
         len_row = ctk.CTkFrame(parent, fg_color="transparent")
         len_row.pack(fill="x", pady=(0, 10))
@@ -612,8 +831,7 @@ class HardwareSettingDialog:
 
     def _probe_summary_text(self) -> str:
         p = self.app.probe_profile
-        return (f"Holder : {p.stylus_holder_height:.1f} mm\n"   # v02
-                f"Length : {p.stylus_length:.1f} mm\n"
+        return (f"Length : {p.stylus_length:.1f} mm\n"
                 f"Tip ⌀  : {p.tip_diameter:.1f} mm  (r = {p.tip_radius:.2f} mm)\n"
                 f"Clearance : {p.wall_clearance:.2f} mm (wall)  {p.floor_clearance:.2f} mm (floor)\n"
                 f"Z trigger : {'yes — floor depth can be probed' if p.z_trigger else 'no — side touches only'}\n"
@@ -631,8 +849,6 @@ class HardwareSettingDialog:
     def _apply_probe_profile(self):
         app = self.app
         try:
-            new_holder = float(self._probe_holder_entry.get().strip())   # v02
-            if new_holder <= 0: raise ValueError("ความสูงตัวจับต้องมากกว่า 0")
             new_length = float(self._probe_length_entry.get().strip())
             if new_length <= 0: raise ValueError("ความยาวต้องมากกว่า 0")
             new_tip_d = float(self._probe_tip_entry.get().strip())
@@ -655,7 +871,6 @@ class HardwareSettingDialog:
             self.dialog.showerror("Invalid Input", f"Profile ไม่ถูกต้อง:\n{e}")
             return
 
-        app.probe_profile.stylus_holder_height = new_holder   # v02
         app.probe_profile.stylus_length = new_length
         app.probe_profile.tip_diameter  = new_tip_d
         app.probe_profile.wall_clearance = new_clear
@@ -700,7 +915,6 @@ class HardwareSettingDialog:
     def _save_probe(self):
         p = self.app.probe_profile
         user_settings.save_section("probe", {
-            "stylus_holder_height": p.stylus_holder_height,
             "stylus_length": p.stylus_length, "tip_diameter": p.tip_diameter,
             "wall_clearance": p.wall_clearance,
             "effective_tip_diameter": p.effective_tip_diameter,
@@ -713,11 +927,10 @@ class HardwareSettingDialog:
         m = self.app.machine_profile
         user_settings.save_section("machine", {
             "x_travel": m.x_travel, "y_travel": m.y_travel,
-            "z_travel": m.z_travel, "z_height": m.z_height})
+            "z_travel": m.z_travel})
 
     def _reset_probe_profile(self):
         app = self.app
-        app.probe_profile.stylus_holder_height = app.probe_profile.DEFAULT_HOLDER_HEIGHT   # v02
         app.probe_profile.stylus_length = app.probe_profile.DEFAULT_LENGTH
         app.probe_profile.tip_diameter  = app.probe_profile.DEFAULT_TIP_D
         app.probe_profile.wall_clearance = app.probe_profile.DEFAULT_CLEARANCE
@@ -747,9 +960,6 @@ class HardwareSettingDialog:
         if self._probe_clear_entry is not None:
             self._probe_clear_entry.delete(0, "end")
             self._probe_clear_entry.insert(0, str(app.probe_profile.wall_clearance))
-        if self._probe_holder_entry is not None:   # v02
-            self._probe_holder_entry.delete(0, "end")
-            self._probe_holder_entry.insert(0, str(app.probe_profile.stylus_holder_height))
         if self._probe_length_entry is not None:
             self._probe_length_entry.delete(0, "end")
             self._probe_length_entry.insert(0, str(app.probe_profile.stylus_length))
@@ -786,19 +996,6 @@ class HardwareSettingDialog:
                         text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
             setattr(self, entry_attr, entry)
 
-        # v02: Machine Z Height — 4th row, after X/Y/Z Travel.
-        zh_row = ctk.CTkFrame(parent, fg_color="transparent")
-        zh_row.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(zh_row, text="Machine Z Height (mm):", font=ctk.CTkFont(size=13),
-                    text_color=theme.TEXT_SECONDARY).pack(anchor="w")
-        zh_entry_row = ctk.CTkFrame(zh_row, fg_color="transparent")
-        zh_entry_row.pack(fill="x", pady=(4, 0))
-        self._machine_zh_entry = ctk.CTkEntry(zh_entry_row, width=110, height=30, font=ctk.CTkFont(size=13))
-        self._machine_zh_entry.insert(0, str(app.machine_profile.z_height))
-        self._machine_zh_entry.pack(side="left")
-        ctk.CTkLabel(zh_entry_row, text="mm", font=ctk.CTkFont(size=11),
-                    text_color=theme.TEXT_MUTED).pack(side="left", padx=(6, 0))
-
         ctk.CTkFrame(parent, height=1, fg_color=theme.BORDER).pack(fill="x", pady=(6, 14))
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -815,21 +1012,16 @@ class HardwareSettingDialog:
             text_color=theme.TEXT_MUTED, justify="left")
         self._lbl_machine_summary.pack(anchor="w", pady=(14, 0))
 
-        # v02: reworded — Machine Z Height now feeds
-        # core/gcode_generator.py::suggest_padding_height(), so it is no
-        # longer accurate to call the whole category "reference only".
         ctk.CTkLabel(
             parent, text="X/Y/Z Travel are checked when you export G-code:\n"
                          "you are warned if the program moves farther than the\n"
-                         "machine can travel. Machine Z Height and Z Travel also\n"
-                         "drive G-code Export's Padding Height suggestion.",
+                         "machine can travel.",
             font=ctk.CTkFont(size=10), text_color=theme.TEXT_MUTED, justify="left"
         ).pack(anchor="w", pady=(10, 0))
 
     def _machine_summary_text(self) -> str:
         m = self.app.machine_profile
-        return (f"X : {m.x_travel:.1f} mm   Y : {m.y_travel:.1f} mm   Z : {m.z_travel:.1f} mm\n"
-                f"Z Height : {m.z_height:.1f} mm")   # v02
+        return f"X : {m.x_travel:.1f} mm   Y : {m.y_travel:.1f} mm   Z : {m.z_travel:.1f} mm"
 
     def _apply_machine_profile(self):
         app = self.app
@@ -840,8 +1032,6 @@ class HardwareSettingDialog:
             if new_y <= 0: raise ValueError("Y travel ต้องมากกว่า 0")
             new_z = float(self._machine_z_entry.get().strip())
             if new_z <= 0: raise ValueError("Z travel ต้องมากกว่า 0")
-            new_zh = float(self._machine_zh_entry.get().strip())   # v02
-            if new_zh <= 0: raise ValueError("Machine Z Height ต้องมากกว่า 0")
         except ValueError as e:
             self.dialog.showerror("Invalid Input", f"Machine profile ไม่ถูกต้อง:\n{e}")
             return
@@ -849,7 +1039,6 @@ class HardwareSettingDialog:
         app.machine_profile.x_travel = new_x
         app.machine_profile.y_travel = new_y
         app.machine_profile.z_travel = new_z
-        app.machine_profile.z_height = new_zh   # v02
         if self._lbl_machine_summary is not None:
             self._lbl_machine_summary.configure(text=self._machine_summary_text())
         self._save_machine()
@@ -859,15 +1048,12 @@ class HardwareSettingDialog:
         app.machine_profile.x_travel = app.machine_profile.DEFAULT_X
         app.machine_profile.y_travel = app.machine_profile.DEFAULT_Y
         app.machine_profile.z_travel = app.machine_profile.DEFAULT_Z
-        app.machine_profile.z_height = app.machine_profile.DEFAULT_Z_HEIGHT   # v02
         if self._machine_x_entry is not None:
             self._machine_x_entry.delete(0, "end"); self._machine_x_entry.insert(0, str(app.machine_profile.x_travel))
         if self._machine_y_entry is not None:
             self._machine_y_entry.delete(0, "end"); self._machine_y_entry.insert(0, str(app.machine_profile.y_travel))
         if self._machine_z_entry is not None:
             self._machine_z_entry.delete(0, "end"); self._machine_z_entry.insert(0, str(app.machine_profile.z_travel))
-        if self._machine_zh_entry is not None:   # v02
-            self._machine_zh_entry.delete(0, "end"); self._machine_zh_entry.insert(0, str(app.machine_profile.z_height))
         if self._lbl_machine_summary is not None:
             self._lbl_machine_summary.configure(text=self._machine_summary_text())
         self._save_machine()
