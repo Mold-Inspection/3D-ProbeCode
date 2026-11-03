@@ -2,7 +2,10 @@
 # core/log_parser.py — อ่านไฟล์ .log จาก OpenBuilds Control -> รายการจุดที่
 # ถูกโพรบจริง (actual probe points) เรียงตามลำดับที่ไฟล์บันทึกไว้
 # ==============================================================================
-# VERSION: 03
+# VERSION: 04
+# CHANGE LOG (v03 -> v04):
+#   REPEAT_MARK (G4 P0.02) ก่อนแตะช้าครั้งที่ 2+ ของจุดเดียวกัน → ค่าของจุด = มัธยฐาน,
+#   'touches' (ทุกครั้ง) และ 'spread' (ช่วงสูงสุดของแกนใดแกนหนึ่ง) — log เก่าได้ผลเหมือนเดิม
 # CHANGE LOG (v02 -> v03):
 #   แตะสองครั้ง (core/gcode_generator.py v13): ระหว่างแตะเร็วกับแตะช้ามีคำสั่ง RETOUCH_MARK
 #   ("G4 P0.01") — เจอบรรทัดนี้ใน log เมื่อไหร่ ทิ้งจุดก่อนหน้า (แตะเร็ว) ใช้จุดแตะช้าแทน
@@ -53,7 +56,10 @@ _WCO_PATTERN = re.compile(
 
 # v03: คำสั่งคั่นระหว่างแตะเร็ว/แตะช้า — gcode_generator ใช้ค่าเดียวกันนี้
 RETOUCH_MARK = "G4 P0.01"
+# v04: ก่อนแตะช้าครั้งที่ 2, 3, … ของจุดเดียวกัน — PRB ถัดไปรวมเข้าจุดก่อนหน้า (ค่าที่ใช้ = มัธยฐาน)
+REPEAT_MARK = "G4 P0.02"
 _RETOUCH_PATTERN = re.compile(r"\[\s*G4\s*P0?\.01\s*\]")
+_REPEAT_PATTERN = re.compile(r"\[\s*G4\s*P0?\.02\s*\]")
 
 # True = เก็บเฉพาะจุดที่ probe สัมผัสสำเร็จจริง (s==1) — ปรับได้
 _SKIP_SUCCESS_ONLY = True
@@ -129,6 +135,7 @@ def parse_openbuilds_log(filepath: str) -> list:
     matched  = 0
     wco      = None   # v02: work offset ล่าสุดที่เจอในไฟล์
     fast_guard = 0    # v03: จำนวนจุดหลังทิ้งแตะเร็วครั้งล่าสุด
+    repeat_next = False   # v04: PRB ถัดไปเป็นการแตะช้าซ้ำของจุดก่อนหน้า
 
     for line_no, raw_line in enumerate(raw_lines, start=1):
         line = raw_line.rstrip("\n\r")
@@ -138,6 +145,10 @@ def parse_openbuilds_log(filepath: str) -> list:
         w = _WCO_PATTERN.match(line)
         if w is not None:
             wco = (float(w.group(1)), float(w.group(2)), float(w.group(3)))
+            continue
+
+        if _REPEAT_PATTERN.search(line):    # v04: แตะช้าซ้ำ — รวมเข้าจุดก่อนหน้า
+            repeat_next = bool(points)
             continue
 
         if _RETOUCH_PATTERN.search(line):   # v03: จุดก่อนหน้าคือแตะเร็ว — ใช้แตะช้าที่ตามมาแทน
@@ -165,12 +176,24 @@ def parse_openbuilds_log(filepath: str) -> list:
 
         if wco is not None:   # v02: พิกัดเครื่อง → พิกัดเทียบ Set Zero
             x, y, z = x - wco[0], y - wco[1], z - wco[2]
+        if repeat_next:       # v04: ค่าของจุด = มัธยฐานของการแตะช้าทุกครั้ง
+            repeat_next = False
+            p = points[-1]
+            p['touches'].append((x, y, z))
+            t = p['touches']
+            p['x'], p['y'], p['z'] = (sorted(c)[len(c) // 2] if len(c) % 2 else
+                                      0.5 * (sorted(c)[len(c) // 2 - 1] + sorted(c)[len(c) // 2])
+                                      for c in zip(*t))
+            p['spread'] = max(max(c) - min(c) for c in zip(*t))
+            continue
         points.append({
             'seq_idx': len(points),
             'x': x, 'y': y, 'z': z,
             'wco': wco,
             'status': status,
             'raw': line,
+            'touches': [(x, y, z)],   # v04: ทุกการแตะช้าของจุดนี้
+            'spread': 0.0,
         })
 
     _write_debug_log(filepath, len(raw_lines), matched, warnings)

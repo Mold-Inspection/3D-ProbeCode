@@ -2,7 +2,12 @@
 # ui/openbuilds_logger.py — ตัวบันทึก log ของ OpenBuilds Control ที่ทำงานเบื้องหลัง
 # ตั้งแต่เปิดหน้าต่างหลัก (ไม่ต้องเปิด start_openbuilds_logger.bat แยก)
 # ==============================================================================
-# VERSION: 04
+# VERSION: 05
+# CHANGE LOG (v04 -> v05):
+#   เก็บค่า GRBL ($N=ค่า) จากทุกคำตอบ (self.grbl) — อ่าน $$ เองครั้งเดียวเมื่อเครื่อง Idle หลังเชื่อมต่อ
+#   check_idle_delay(): ถามก่อนงานที่เครื่องขยับ (Find centre / Run inspection) ถ้า $1 ≠ 255
+#   ($1 = step idle delay — มอเตอร์ดับหลังหยุด ก้านโพรบที่งอดันแกนไปได้ แล้วแกนดีดไป 4 full steps
+#   ~0.4 มม. ตอนจ่ายไฟกลับ — ทดสอบ 2026-11-03: $1=25 เสีย 0.40 มม./ครั้ง, $1=255 เหลือ 0.003)
 # CHANGE LOG (v03 -> v04): เก็บ last_status (status ล่าสุดจาก OpenBuilds) ให้ Find centre ตรวจตำแหน่ง Z
 # CHANGE LOG (v02 -> v03):
 #   on_event (ทุก event ใน main thread), send_gcode()/stop_machine() ส่งคำสั่งผ่าน
@@ -30,12 +35,15 @@
 # ==============================================================================
 import os
 import queue
+import re
 import time
+from tkinter import messagebox as _mb
 
 from core import user_settings
 from core.openbuilds_link import JobRecorder, OpenBuildsLink, default_log_dir, write_job_log
 
 _POLL_MS = 250
+_SETTING = re.compile(r"\$(\d+)=([-\d.]+)")
 
 
 class OpenBuildsLogger:
@@ -53,6 +61,8 @@ class OpenBuildsLogger:
         self.on_event = []      # v03: callback(name, payload) ทุก event จาก OpenBuilds (main thread)
         self._quiet_until = 0.0 # v03: งานที่จบก่อนเวลานี้ไม่บันทึก log (งานแตะผนังตั้ง zero)
         self.last_status = None # v04: status ล่าสุดจาก OpenBuilds (ใช้ตรวจตำแหน่งก่อน Find centre)
+        self.grbl = {}          # v05: ค่า GRBL ล่าสุด {เลข $: float} จากคำตอบของ $$
+        self._asked_settings = False
 
     # ------------------------------------------------------------------
     # ค่าที่จำไว้
@@ -133,6 +143,7 @@ class OpenBuildsLogger:
         self.link = None
         self.recorder = None
         self.connected = False
+        self._asked_settings = False
         self._set_status("Auto-log off")
 
     # ------------------------------------------------------------------
@@ -159,6 +170,11 @@ class OpenBuildsLogger:
                     continue
                 if a == "status" and isinstance(b, dict):   # v04: สถานะล่าสุด (ตำแหน่ง, alarm)
                     self.last_status = b
+                    self._read_settings_once(b)
+                elif a == "data" and isinstance(b, dict):    # v05: $N=ค่า จาก $$ (ของใครก็ได้)
+                    m = _SETTING.match(str(b.get("response") or "").strip())
+                    if m:
+                        self.grbl[int(m.group(1))] = float(m.group(2))
                 for cb in list(self.on_event):   # v03
                     try:
                         cb(a, b)
@@ -183,6 +199,38 @@ class OpenBuildsLogger:
         if self.link is None:
             raise ConnectionError("OpenBuilds link is not running")
         self.link.send("runCommand", text)
+
+    def _read_settings_once(self, status: dict):
+        """v05: อ่าน $$ ครั้งเดียวหลังเชื่อมต่อ — เฉพาะตอน Idle และไม่มีคิว (ไม่ทำให้เครื่องขยับ)"""
+        comms = status.get("comms") or {}
+        if self._asked_settings or self.grbl or not self.connected:
+            return
+        if str(comms.get("runStatus", "")).lower() != "idle" or comms.get("alarm") or comms.get("queue"):
+            return
+        self._asked_settings = True
+        self.suppress_logs(5)
+        self.send_gcode("$$")
+
+    def check_idle_delay(self, parent=None, run_native=None) -> bool:
+        """v05: ก่อนงานที่เครื่องขยับ — $1 ≠ 255 ถามว่าจะตั้ง $1=255 ไหม (False = ผู้ใช้ยกเลิก)
+        run_native = SettingsDialogBase.run_native ถ้าถามจากใน dialog (popup ไม่หลุดไปหลังหน้าต่างหลัก)"""
+        idle = self.grbl.get(1)
+        if idle is None or idle == 255:
+            return True
+        ask = run_native or (lambda fn, *a, **k: fn(*a, parent=parent, **k))
+        ans = ask(
+            _mb.askyesnocancel, "GRBL $1 (step idle delay)",
+            f"$1 = {idle:g} — มอเตอร์ดับหลังหยุดทุกครั้ง ก้านโพรบที่งอหลังแตะดันแกนไปได้ "
+            f"แล้วแกนดีดไป 4 full steps (~0.4 มม.) ตอนจ่ายไฟกลับ ทำให้ค่าวัดเลื่อน\n\n"
+            f"ตั้ง $1=255 (มอเตอร์จ่ายไฟค้างไว้) ก่อนรันไหม?\n"
+            f"Yes = ตั้งแล้วรัน   No = รันต่อโดยไม่ตั้ง   Cancel = ยกเลิก", icon="warning")
+        if ans is None:
+            return False
+        if ans:
+            self.suppress_logs(5)
+            self.send_gcode("$1=255\n$$")
+            self.grbl[1] = 255.0
+        return True
 
     def stop_machine(self):
         """เหมือนปุ่ม Stop ของ OpenBuilds: พักการเคลื่อนที่ ล้างคิว แล้ว soft reset"""

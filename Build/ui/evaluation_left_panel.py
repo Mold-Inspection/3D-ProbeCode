@@ -2,7 +2,11 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 21
+# VERSION: 23
+# CHANGE LOG (v22 -> v23): ส่ง Effective Tip แยกแกน X / Y (tip_radius_xy) เข้า evaluate_points — เฉพาะเมื่อติ๊ก
+#   "Separate X / Y Effective Tip" (ค่าเริ่มต้นปิด: รู sphere 3-11-real ผลแย่ลง |dev| 0.255 → 0.270 —
+#   X เกินจากผนังนอกไม่ได้มาจากหัวโพรบอย่างเดียว)
+# CHANGE LOG (v21 -> v22): Run inspection ถามตั้ง $1=255 ก่อนส่ง G-code ถ้า $1 ≠ 255 (openbuilds_logger v05)
 # CHANGE LOG (v20 -> v21):
 #   ตัดช่องขนาดเวอร์เนียร์ของการแตะผนังนอก — Effective Tip มาจาก Set up (Hardware Setting) เสมอ
 #   (log เก่าที่มีจุดแตะผนังนอก: ยังประเมินได้ แต่ไม่เอาค่าจากจุดเหล่านั้นมาใช้ชดเชย)
@@ -121,6 +125,8 @@ _COLOR_BAD  = theme.ERR_TEXT
 def evaluation_kwargs(app) -> dict:
     """v19: ค่าที่ทุกที่ส่งเข้า evaluate_points() — ชดเชยหรือไม่, Effective Tip, ขนาดจริงชิ้นงาน"""
     return dict(tip_radius_mm=app.probe_profile.effective_tip_radius,
+                tip_radius_xy=(app.probe_profile.effective_tip_radius_xy           # v23
+                               if getattr(app, 'evaluation_tip_xy', False) else None),
                 best_fit=bool(getattr(app, 'evaluation_best_fit', False)),
                 compensate=bool(getattr(app, 'evaluation_compensate', True)),
                 use_run_calib=False,   # v21: Effective Tip มาจาก Set up เท่านั้น
@@ -306,6 +312,11 @@ class EvaluationLeftPanel:
         ctk.CTkCheckBox(self.results_frame, text="Sloped walls: pretravel along the probing direction",
                         variable=self._travel_var, font=ctk.CTkFont(size=11),
                         command=self._on_toggle_travel).pack(anchor="w", padx=10, pady=(4, 0))
+        # v23: Effective Tip แยกแกน X / Y จาก Set up (ค่าเริ่มต้นปิด)
+        self._tip_xy_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_tip_xy', False)))
+        ctk.CTkCheckBox(self.results_frame, text="Separate X / Y Effective Tip (from Set up)",
+                        variable=self._tip_xy_var, font=ctk.CTkFont(size=11),
+                        command=self._on_toggle_tip_xy).pack(anchor="w", padx=10, pady=(4, 0))
 
         self.lbl_failed = ctk.CTkLabel(self.results_frame, text="—",
                                        font=ctk.CTkFont(size=18, weight="bold"))
@@ -421,7 +432,9 @@ class EvaluationLeftPanel:
                    else " (Hardware Setting)") + (
                 ", pretravel along probing dir" if result.get('pretravel') == 'travel' else "")   # v19
             comp_text = {
-                'on': f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm{src}",
+                'on': (f"Tip compensation: r X {result['tip_radius_xy'][0]:.3f} / Y "
+                       f"{result['tip_radius_xy'][1]:.3f} mm{src}" if result.get('tip_radius_xy') else
+                       f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm{src}"),   # v23
                 'unavailable': "Tip compensation: unavailable (schema has no probe directions"
                                " — re-export G-code + schema)",
             }.get(comp, "Tip compensation: off (raw ball centre vs CAD)")
@@ -454,6 +467,18 @@ class EvaluationLeftPanel:
             parts.append(f"{ax} {v['d_eff']:.3f} (span {v['span']:.3f} − {ref} "
                          f"{v['width_true'] or v['width_cad']:.3f})" + ("" if v['ok'] else " ⚠ out of range"))
         return "\nOuter-wall Effective Tip ⌀: " + ", ".join(parts)
+
+    def _on_toggle_tip_xy(self):
+        """v23: ชดเชยด้วย Effective Tip แยกแกน X / Y (จำค่า) แล้วคำนวณผลใหม่"""
+        from core import user_settings
+        self.app.evaluation_tip_xy = bool(self._tip_xy_var.get())
+        user_settings.save_section("evaluation_tip_xy", self.app.evaluation_tip_xy)
+        if self.app.evaluation_tip_xy and self.app.probe_profile.effective_tip_radius_xy is None:
+            _mb.showinfo("Effective Tip X / Y", "ยังไม่มีค่าแยกแกน — รัน Set up (Find centre + ขนาดเวอร์เนียร์ "
+                                               "ทั้ง X และ Y) ก่อน ระหว่างนี้ใช้ค่าเดียวทุกทิศ",
+                         parent=self.app.root)
+        if not self._auto_refresh_if_result_exists():
+            self.refresh()
 
     def _on_toggle_travel(self):
         """v19: แบบจำลองระยะทริกบนผนังเอียง (จำค่า) แล้วคำนวณผลใหม่"""
@@ -1004,6 +1029,8 @@ class EvaluationLeftPanel:
         app, logger = self.app, self.app.openbuilds_logger
         job = getattr(app, 'job_gcode', None)
         if not job:
+            return
+        if not logger.check_idle_delay(parent=app.root):   # v22: $1 ≠ 255 → แกนดีด ~0.4 มม.
             return
         pp = app.probe_profile
         head = (f"Set up เสร็จ — Effective Tip ⌀ = {pp.effective_tip_diameter:.3f} มม.\n"

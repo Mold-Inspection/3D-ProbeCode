@@ -2,7 +2,13 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 19
+# VERSION: 22
+# CHANGE LOG (v21 -> v22): Set up เก็บ Effective Tip ⌀ แยกแกน X / Y (probe_profile v08) — Evaluation
+#   ชดเชยผนังแนว X ด้วย D_X แนว Y ด้วย D_Y (X ≠ Y ไม่ต้องใช้ค่าเฉลี่ยแล้ว); ตั้งค่าเดียวเอง = ล้างค่าแยกแกน
+# CHANGE LOG (v20 -> v21): Find centre ถามตั้ง $1=255 ก่อนรันถ้า $1 ≠ 255 (openbuilds_logger v05)
+# CHANGE LOG (v19 -> v20):
+#   Probe Stylus → Double touch: ช่อง Slow touches (จำนวนครั้ง, ใช้มัธยฐาน) และ Settle (s) ก่อนแตะช้า
+#   Find centre ใช้ค่าหน่วงเดียวกัน
 # CHANGE LOG (v18 -> v19):
 #   Find centre: ช่อง "Back-off after touch" (ค่าเริ่มต้น 2) — ถอยออกจากผนังหลังแตะ ก่อนยก Z
 # CHANGE LOG (v17 -> v18):
@@ -435,6 +441,8 @@ class HardwareSettingDialog:
             self.dialog.showwarning("OpenBuilds", "ยังไม่ได้เชื่อมต่อ OpenBuilds Control — เปิด OpenBuilds "
                                                   "และเชื่อมต่อเครื่องก่อน แล้วกดอีกครั้ง")
             return
+        if not logger.check_idle_delay(run_native=self.dialog.run_native):   # v21: $1 ≠ 255 → แกนดีด ~0.4 มม.
+            return
         # v08: ขนาดชิ้นงานอ่านใหม่ทุกครั้งตามมุมมอง + มุม Rotation ปัจจุบัน (ช่องถูกกรอกตอนเปิดหน้านี้
         # ครั้งแรก — ถ้ากด Rotate ทีหลัง ค่าเดิมจะสลับแกน) — ไม่มีโมเดลก็ใช้ค่าที่พิมพ์เอง
         self._fill_wall_size(quiet=True)
@@ -474,6 +482,7 @@ class HardwareSettingDialog:
                             true_x=true.get("X"), true_y=true.get("Y"),
                             repeats=int(vals.get("repeats", 0)),          # v15: repeatability
                             backoff=vals.get("backoff", 2.0),             # v19
+                            rep_dwell=float(pp.retouch_dwell),            # v20
                             rep_feed=float(pp.retouch_feed), rep_back=float(pp.retouch_distance),
                             zero_mode=self._setup_zero_mode(), keep_zero=keep_zero)   # v16
         err = st.validate()
@@ -592,7 +601,8 @@ class HardwareSettingDialog:
                 f"X = {deff['X']:.3f}, Y = {deff['Y']:.3f} มม. ต่างกัน {abs(deff['X'] - deff['Y']):.3f} — "
                 f"ปกติควรใกล้กัน (ไม่เกิน {_DEFF_XY_TOL:g})\n"
                 f"สาเหตุที่พบบ่อย: ชิ้นงานเลื่อนตอนแตะ, กรอกเวอร์เนียร์สลับแกน, หรือหัวโพรบไวไม่เท่ากันแต่ละทิศ\n\n"
-                f"ใช้ค่าเฉลี่ย {(deff['X'] + deff['Y']) / 2:.3f} ต่อไหม? (No = แก้แล้วกด Find centre ใหม่)"):
+                f"ถ้าไม่ใช่สาเหตุสองข้อแรก โปรแกรมจะชดเชยแยกแกน (ผนังแนว X ใช้ {deff['X']:.3f}, "
+                f"แนว Y ใช้ {deff['Y']:.3f})\n\nใช้ค่านี้ต่อไหม? (No = แก้แล้วกด Find centre ใหม่)"):
             return
         if deff:
             new = round(sum(deff.values()) / len(deff), 3)
@@ -601,12 +611,12 @@ class HardwareSettingDialog:
                                       f"ได้ {new:.3f} มม. อยู่นอกช่วง 0 – {pp.tip_diameter:g} — ตรวจขนาดเวอร์เนียร์ "
                                       f"(แกน X = ซ้าย-ขวาบนเครื่อง) แล้วกด Find centre ใหม่")
                 return
-            self._apply_deff(new)
+            self._apply_deff(new, xy=(deff['X'], deff['Y']) if len(deff) == 2 else None)   # v22
             if getattr(self.app, 'setup_info', None):
                 self.app.setup_info['eff_after'] = new
             axes = "   ".join(f"{a}: {d:.3f}" for a, d in deff.items())
             msg = (f"Effective Tip ⌀ ใหม่ = {new:.3f} มม.  (เดิม {old:.3f}, เปลี่ยน {new - old:+.3f})\n"
-                   f"{axes}\nตั้งค่าให้แล้ว")
+                   f"{axes}\nตั้งค่าให้แล้ว" + (" — ชดเชยแยกแกน X / Y" if len(deff) == 2 else ""))
             if abs(new - old) > _DEFF_RERUN_TOL and flow['reruns'] == 0:
                 if self.dialog.askyesno(
                         "Effective Tip ⌀ changed",
@@ -644,9 +654,12 @@ class HardwareSettingDialog:
         if getattr(self.app, 'setup_info', None):
             self.app.setup_info['eff_after'] = d
 
-    def _apply_deff(self, d: float):
-        """v16: ตั้ง + บันทึก Effective Tip ⌀ (ไม่ถาม — ผู้เรียกยืนยันเอง)"""
-        self.app.probe_profile.effective_tip_diameter = d
+    def _apply_deff(self, d: float, xy=None):
+        """v16: ตั้ง + บันทึก Effective Tip ⌀ (ไม่ถาม — ผู้เรียกยืนยันเอง)
+        v22: xy = (D_X, D_Y) จากผนังนอก — None = ล้างค่าแยกแกน (ใช้ d ทุกทิศ)"""
+        pp = self.app.probe_profile
+        pp.effective_tip_diameter = d
+        pp.effective_tip_dx, pp.effective_tip_dy = (round(xy[0], 3), round(xy[1], 3)) if xy else (0.0, 0.0)
         if self._probe_eff_entry is not None:
             try:
                 self._probe_eff_entry.delete(0, "end")
@@ -806,9 +819,24 @@ class HardwareSettingDialog:
         self._retouch_feed_entry.pack(side="left", padx=(6, 4))
         ctk.CTkLabel(dt_row, text="mm/min", font=ctk.CTkFont(size=11),
                      text_color=theme.TEXT_MUTED).pack(side="left")
+        dt_row2 = ctk.CTkFrame(parent, fg_color="transparent")   # v20
+        dt_row2.pack(fill="x", pady=(2, 2))
+        ctk.CTkLabel(dt_row2, text="Slow touches", font=ctk.CTkFont(size=12),
+                     text_color=theme.TEXT_SECONDARY).pack(side="left")
+        self._retouch_count_entry = ctk.CTkEntry(dt_row2, width=50, height=28, font=ctk.CTkFont(size=12))
+        self._retouch_count_entry.insert(0, str(int(app.probe_profile.retouch_count)))
+        self._retouch_count_entry.pack(side="left", padx=(6, 4))
+        ctk.CTkLabel(dt_row2, text="(median)    Settle", font=ctk.CTkFont(size=12),
+                     text_color=theme.TEXT_SECONDARY).pack(side="left")
+        self._retouch_dwell_entry = ctk.CTkEntry(dt_row2, width=50, height=28, font=ctk.CTkFont(size=12))
+        self._retouch_dwell_entry.insert(0, f"{app.probe_profile.retouch_dwell:g}")
+        self._retouch_dwell_entry.pack(side="left", padx=(6, 4))
+        ctk.CTkLabel(dt_row2, text="s", font=ctk.CTkFont(size=11),
+                     text_color=theme.TEXT_MUTED).pack(side="left")
         ctk.CTkLabel(parent, wraplength=360, justify="left", font=ctk.CTkFont(size=11),
                      text_color=theme.TEXT_MUTED,
-                     text=("The slow re-touch is the measured value (less pre-travel scatter). "
+                     text=("The slow re-touches are the measured value: their median, so one jumpy touch "
+                           "is ignored. Settle = pause before each slow touch so the machine stops shaking. "
                            "ALARM:4 on the re-touch = the probe is still triggered after backing off — "
                            "increase Back off. Applies to newly exported G-code.")
                      ).pack(anchor="w", pady=(0, 10))
@@ -835,7 +863,7 @@ class HardwareSettingDialog:
                 f"Tip ⌀  : {p.tip_diameter:.1f} mm  (r = {p.tip_radius:.2f} mm)\n"
                 f"Clearance : {p.wall_clearance:.2f} mm (wall)  {p.floor_clearance:.2f} mm (floor)\n"
                 f"Z trigger : {'yes — floor depth can be probed' if p.z_trigger else 'no — side touches only'}\n"
-                f"Double touch : {f'back off {p.retouch_distance:g} mm, re-touch F{p.retouch_feed:g}' if p.double_touch else 'off'}\n"
+                f"Double touch : {f'back off {p.retouch_distance:g} mm, {int(p.retouch_count)}× F{p.retouch_feed:g} (median), settle {p.retouch_dwell:g} s' if p.double_touch else 'off'}\n"
                 f"Shaft contact : {self._shaft_depth_text()}\n"
                 f"Compensation r : {p.effective_tip_radius:.3f} mm"
                 f"{'  (calibrated)' if p.effective_tip_diameter > 0 else '  (from Tip ⌀)'}")
@@ -863,6 +891,10 @@ class HardwareSettingDialog:
             if new_rdist <= 0: raise ValueError("ระยะถอยก่อนแตะซ้ำต้องมากกว่า 0")
             new_rfeed = float(self._retouch_feed_entry.get().strip())
             if new_rfeed <= 0: raise ValueError("ความเร็วแตะซ้ำต้องมากกว่า 0")
+            new_rcount = int(float(self._retouch_count_entry.get().strip()))   # v20
+            if not 1 <= new_rcount <= 9: raise ValueError("จำนวนครั้งแตะช้าต้องอยู่ระหว่าง 1–9")
+            new_rdwell = float(self._retouch_dwell_entry.get().strip() or 0)
+            if not 0 <= new_rdwell <= 5: raise ValueError("เวลาหน่วงต้องอยู่ระหว่าง 0–5 วินาที")
             new_shaft = float(self._shaft_d_entry.get().strip())   # v13
             if new_shaft <= 0: raise ValueError("⌀ ก้านโพรบต้องมากกว่า 0")
             new_tilt = float(self._tilt_entry.get().strip() or 0)
@@ -874,11 +906,15 @@ class HardwareSettingDialog:
         app.probe_profile.stylus_length = new_length
         app.probe_profile.tip_diameter  = new_tip_d
         app.probe_profile.wall_clearance = new_clear
+        if abs(new_eff - app.probe_profile.effective_tip_diameter) > 1e-9:   # v22: พิมพ์ค่าเดียวเอง
+            app.probe_profile.effective_tip_dx = app.probe_profile.effective_tip_dy = 0.0
         app.probe_profile.effective_tip_diameter = new_eff
         app.probe_profile.floor_clearance = new_floor   # v04
         app.probe_profile.double_touch = bool(self._double_touch_var.get())   # v11
         app.probe_profile.retouch_distance = new_rdist
         app.probe_profile.retouch_feed = new_rfeed
+        app.probe_profile.retouch_count = new_rcount   # v20
+        app.probe_profile.retouch_dwell = new_rdwell
         app.probe_profile.stylus_shaft_diameter = new_shaft   # v13
         app.probe_profile.stylus_tilt_deg = new_tilt
         if self._lbl_probe_summary is not None:
@@ -918,9 +954,11 @@ class HardwareSettingDialog:
             "stylus_length": p.stylus_length, "tip_diameter": p.tip_diameter,
             "wall_clearance": p.wall_clearance,
             "effective_tip_diameter": p.effective_tip_diameter,
+            "effective_tip_dx": p.effective_tip_dx, "effective_tip_dy": p.effective_tip_dy,   # v22
             "floor_clearance": p.floor_clearance, "z_trigger": bool(p.z_trigger),   # v04
             "double_touch": bool(p.double_touch), "retouch_distance": p.retouch_distance,   # v11
             "retouch_feed": p.retouch_feed,
+            "retouch_count": int(p.retouch_count), "retouch_dwell": p.retouch_dwell,   # v20
             "stylus_shaft_diameter": p.stylus_shaft_diameter, "stylus_tilt_deg": p.stylus_tilt_deg})   # v13
 
     def _save_machine(self):
@@ -939,6 +977,8 @@ class HardwareSettingDialog:
         app.probe_profile.double_touch = app.probe_profile.DEFAULT_DOUBLE_TOUCH            # v11
         app.probe_profile.retouch_distance = app.probe_profile.DEFAULT_RETOUCH_DISTANCE
         app.probe_profile.retouch_feed = app.probe_profile.DEFAULT_RETOUCH_FEED
+        app.probe_profile.retouch_count = app.probe_profile.DEFAULT_RETOUCH_COUNT   # v20
+        app.probe_profile.retouch_dwell = app.probe_profile.DEFAULT_RETOUCH_DWELL
         self._double_touch_var.set(app.probe_profile.double_touch)
         app.probe_profile.stylus_shaft_diameter = app.probe_profile.DEFAULT_SHAFT_D   # v13
         app.probe_profile.stylus_tilt_deg = app.probe_profile.DEFAULT_TILT_DEG
@@ -947,7 +987,9 @@ class HardwareSettingDialog:
             entry.delete(0, "end")
             entry.insert(0, str(val))
         for entry, val in ((self._retouch_dist_entry, app.probe_profile.retouch_distance),
-                           (self._retouch_feed_entry, app.probe_profile.retouch_feed)):
+                           (self._retouch_feed_entry, app.probe_profile.retouch_feed),
+                           (self._retouch_count_entry, app.probe_profile.retouch_count),
+                           (self._retouch_dwell_entry, app.probe_profile.retouch_dwell)):
             entry.delete(0, "end")
             entry.insert(0, str(val))
         if self._probe_floor_entry is not None:

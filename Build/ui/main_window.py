@@ -15,7 +15,11 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 26
+# VERSION: 28
+# CHANGE LOG (v27 -> v28):
+#   โหลด effective_tip_dx / effective_tip_dy (Effective Tip แยกแกน) และ evaluation_tip_xy (ค่าเริ่มต้นปิด)
+# CHANGE LOG (v26 -> v27):
+#   โหลด retouch_count / retouch_dwell (Probe Stylus) จาก settings
 # CHANGE LOG (v25 -> v26):
 #   evaluation_compensate (Tip compensation ในแท็บ Evaluation, จำค่า) + calib_true_size
 # CHANGE LOG (v24 -> v25):
@@ -162,11 +166,14 @@ class UIManager:
         _saved = user_settings.load()
         user_settings.apply_numbers(self.probe_profile, _saved.get('probe'),
                                     ('stylus_length', 'tip_diameter', 'wall_clearance',
-                                     'effective_tip_diameter', 'floor_clearance',
-                                     'retouch_distance', 'retouch_feed', 'stylus_shaft_diameter',
-                                     'stylus_tilt_deg'),
+                                     'effective_tip_diameter', 'effective_tip_dx', 'effective_tip_dy',
+                                     'floor_clearance',
+                                     'retouch_distance', 'retouch_feed', 'retouch_count', 'retouch_dwell',
+                                     'stylus_shaft_diameter', 'stylus_tilt_deg'),
                                     allow_zero=('wall_clearance', 'effective_tip_diameter', 'floor_clearance',
-                                                'stylus_tilt_deg'))
+                                                'effective_tip_dx', 'effective_tip_dy',
+                                                'stylus_tilt_deg', 'retouch_dwell'))
+        self.probe_profile.retouch_count = max(1, int(self.probe_profile.retouch_count))   # v27
         self.probe_profile.z_trigger = bool((_saved.get('probe') or {}).get('z_trigger', False))   # v21
         self.probe_profile.double_touch = bool((_saved.get('probe') or {}).get(
             'double_touch', self.probe_profile.DEFAULT_DOUBLE_TOUCH))                                # v23
@@ -183,6 +190,7 @@ class UIManager:
         self.evaluation_best_fit = bool(user_settings.get('evaluation_best_fit', False))   # v25
         self.evaluation_compensate = bool(user_settings.get('evaluation_compensate', True))   # v26
         self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', False))   # v26
+        self.evaluation_tip_xy = bool(user_settings.get('evaluation_tip_xy', False))   # v28: Effective Tip แยก X/Y
         self.job_gcode   = None   # v24: G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
         self.centre_done = None   # v24: {'model': path STEP, 'time': datetime} — Find centre สำเร็จล่าสุด
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel

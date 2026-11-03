@@ -1,7 +1,12 @@
 # ==============================================================================
 # ui/wall_zero.py — หา X0 Y0 = กึ่งกลางชิ้นงาน (+ Z0 = ผิวบน) ด้วยการแตะผนังด้านนอก 4 ด้าน
 # ==============================================================================
-# VERSION: 10
+# VERSION: 12
+# CHANGE LOG (v11 -> v12):
+#   เตือนเมื่อ $1 (step idle delay) ≠ 255 — มอเตอร์ดับหลังหยุดทุกครั้ง ก้านโพรบที่งอดันแกนไปได้
+#   แล้วแกนดีดไป 4 full steps (~0.4 มม.) ตอนจ่ายไฟกลับ (ทดสอบ 2026-11-03: $1=25 เสีย 0.40 มม./ครั้ง)
+# CHANGE LOG (v10 -> v11):
+#   หน่วง rep_dwell (s) ก่อนแตะช้าแต่ละครั้ง และตำแหน่งผนัง = มัธยฐานของการแตะช้า (เดิมค่าเฉลี่ย)
 # CHANGE LOG (v09 -> v10):
 #   ถอยออกหลังแตะแต่ละผนัง (ก่อนยก Z) ตั้งได้: CentreSettings.backoff (เดิมค่าคงที่ _BACKOFF = 2.0)
 # CHANGE LOG (v08 -> v09):
@@ -80,7 +85,8 @@ class CentreSettings:
     def __init__(self, width: float, length: float, tip_d: float, gap: float = 30.0, lift: float = 5.0,
                  depth: float = 4.0, feed: float = 100.0, true_x: float = None, true_y: float = None,
                  repeats: int = 0, rep_feed: float = 20.0, rep_back: float = 1.0,
-                 zero_mode: str = "center", keep_zero: bool = False, backoff: float = _BACKOFF):
+                 zero_mode: str = "center", keep_zero: bool = False, backoff: float = _BACKOFF,
+                 rep_dwell: float = 0.0):
         # tip_d = ⌀ ลูกบอลที่ใช้หักออกจากระยะที่วัด (Effective Tip ⌀ ถ้า calibrate แล้ว)
         self.width, self.length, self.tip_d = float(width), float(length), float(tip_d)
         # v06: ขนาดจริงที่วัดด้วยเวอร์เนียร์ (None = ไม่ calibrate) — ใช้หา Effective Tip ⌀
@@ -93,6 +99,7 @@ class CentreSettings:
         self.zero_mode = zero_mode if zero_mode in _ZERO_FROM_CENTRE else "center"
         self.keep_zero = bool(keep_zero)
         self.backoff = float(backoff)   # v10: ถอยออกหลังแตะผนัง ก่อนยก Z
+        self.rep_dwell = max(0.0, float(rep_dwell))   # v11: หน่วงก่อนแตะช้า
 
     @property
     def per_wall(self) -> int:
@@ -132,6 +139,7 @@ def side_gcode(axis: str, sign: int, s: CentreSettings) -> str:
         f"G91 G38.2 {a}{-sign * s.search:.3f} F{s.feed:.0f}",   # แตะเข้าหาชิ้นงาน
         *[ln for _ in range(s.repeats) for ln in (                # v07: แตะซ้ำที่ feed วัดจริง
             f"G0 {a}{sign * s.rep_back:.3f}",
+            *([f"G4 P{s.rep_dwell:.2f}"] if s.rep_dwell > 0 else []),   # v11
             f"G38.2 {a}{-sign * (s.rep_back + 2.0):.3f} F{s.rep_feed:.0f}")],
         f"G0 {a}{sign * s.backoff:.3f}",
         "G90",
@@ -204,10 +212,10 @@ class CentreRun:
         return self.prb[w * k:(w + 1) * k]
 
     def _wall_value(self, w: int, i: int) -> float:
-        """v07: ตำแหน่งผนัง (แกน i, พิกัดเครื่อง) = ค่าเฉลี่ยแตะซ้ำ ถ้ามี ไม่งั้นแตะค้นหา"""
+        """v07: ตำแหน่งผนัง (แกน i, พิกัดเครื่อง) = มัธยฐานของแตะซ้ำ (v11) ถ้ามี ไม่งั้นแตะค้นหา"""
         pts = self._wall_touches(w)
-        rep = pts[1:] or pts[:1]
-        return sum(p[i] for p in rep) / len(rep)
+        v = sorted(p[i] for p in (pts[1:] or pts[:1]))
+        return v[len(v) // 2] if len(v) % 2 else 0.5 * (v[len(v) // 2 - 1] + v[len(v) // 2])
 
     def _mid(self, axis: str) -> float:
         """กึ่งกลางสองผนังของแกน (พิกัดเครื่อง) — X ใช้ผนัง 0–1, Y ใช้ 2–3"""
@@ -327,6 +335,10 @@ class CentreRun:
                 else:
                     lines.append(f"   ⚠ differs from CAD — check ${key} (steps/mm) with a 200 mm jog")
         lines.append(f"(sizes use ball ⌀ {s.tip_d:g} mm)")
+        idle = self.steps_mm.get(1)     # v12: $1 step idle delay
+        if idle is not None and idle != 255:
+            lines.append(f"⚠ $1={idle:g}: motors switch off after every stop — the bent stylus can push "
+                         f"the axis and it snaps 4 full steps (~0.4 mm). Set $1=255.")
         lines += self._repeat_lines()   # v07
         # v06: Effective Tip ⌀ จากขอบนอก — span ยาวกว่าชิ้นงานจริงเท่า ⌀ ลูกบอลที่ใช้งานจริง
         self.deff = {}
