@@ -1,5 +1,8 @@
 # core/gcode_generator.py
-# VERSION: 17
+# VERSION: 18
+# CHANGE LOG (v17 -> v18):
+#   แตะช้า retouch_count ครั้งต่อจุด (ครั้งแรกหลัง RETOUCH_MARK, ครั้งถัดไปหลัง REPEAT_MARK → log parser
+#   ใช้มัธยฐาน) และ G4 P<retouch_dwell> ก่อนแตะช้าแต่ละครั้ง
 # CHANGE LOG (v16 -> v17):
 #   FEATURE (จุดแตะจาก B-Rep ตรง ๆ): build_point_map(probe_r=...) — ทุกจุดคิดจากไฟล์ STEP ด้วย
 #   core/surface_oracle.py: x/y/z = จุดที่เส้นทางโพรบทะลุผิว CAD จริง และ 'trig' = ตาราง
@@ -95,7 +98,7 @@ import re
 import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
 
-from core.log_parser import RETOUCH_MARK
+from core.log_parser import REPEAT_MARK, RETOUCH_MARK
 from core.hole_ordering import order_holes_nearest_neighbor, split_step_ready
 from core.models import (FLOOR_SAFETY, hole_floor_depth, layer_fractions, rect_wall_contacts,
                          surface_below)
@@ -137,10 +140,18 @@ def _touch_lines(target, normal, settings, probe_profile, label: str, what: str)
         d = float(probe_profile.retouch_distance)
         rb = -normal * d
         fwd = normal * (d + settings.overtravel)
-        lines.append(f"G0 X{rb[0]:.3f} Y{rb[1]:.3f} Z{rb[2]:.3f} ; back off for the slow re-touch")
-        lines.append(f"{RETOUCH_MARK} ; re-touch marker — the log parser keeps the next touch only")
-        lines.append(f"G38.2 X{fwd[0]:.3f} Y{fwd[1]:.3f} Z{fwd[2]:.3f} "
-                     f"F{float(probe_profile.retouch_feed):.0f} ; {label} — slow re-touch")
+        dwell = float(getattr(probe_profile, 'retouch_dwell', 0.0) or 0.0)
+        if 0 < round(dwell, 2) <= 0.02:   # G4 P0.01 / P0.02 คือ marker ของ log parser — ห้ามชน
+            dwell = 0.03
+        for k in range(max(1, int(getattr(probe_profile, 'retouch_count', 1) or 1))):   # v18
+            lines.append(f"G0 X{rb[0]:.3f} Y{rb[1]:.3f} Z{rb[2]:.3f} ; back off for the slow re-touch")
+            if dwell > 0:   # v18: ให้เครื่อง/ก้านนิ่งก่อนแตะช้า (ไม่ใช่ marker — P ต่างจาก 0.01/0.02)
+                lines.append(f"G4 P{dwell:.2f} ; settle")
+            lines.append(f"{RETOUCH_MARK if k == 0 else REPEAT_MARK} ; "
+                         + ("re-touch marker — the log parser drops the fast touch" if k == 0
+                            else "repeat marker — combined with the touch before (median)"))
+            lines.append(f"G38.2 X{fwd[0]:.3f} Y{fwd[1]:.3f} Z{fwd[2]:.3f} "
+                         f"F{float(probe_profile.retouch_feed):.0f} ; {label} — slow re-touch {k + 1}")
     back = -normal * settings.backoff
     lines.append(f"G0 X{back[0]:.3f} Y{back[1]:.3f} Z{back[2]:.3f} ; pull-off from {what}")
     lines.append("G90")
@@ -766,8 +777,10 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     lines.append(f"; Holes: {len(ordered)}  Safe Z: {settings.safe_z:.2f} mm  "
                  f"Probe Feed: {settings.probe_feedrate:.0f} mm/min")
     if getattr(probe_profile, 'double_touch', False):   # v13
-        lines.append(f"; DOUBLE TOUCH: back off {float(probe_profile.retouch_distance):.2f} mm, re-touch at "
-                     f"F{float(probe_profile.retouch_feed):.0f} — the slow touch is the measured value")
+        lines.append(f"; DOUBLE TOUCH: back off {float(probe_profile.retouch_distance):.2f} mm, "
+                     f"{max(1, int(getattr(probe_profile, 'retouch_count', 1) or 1))} slow re-touch(es) at "
+                     f"F{float(probe_profile.retouch_feed):.0f} after {float(getattr(probe_profile, 'retouch_dwell', 0) or 0):g} s"
+                     f" — the median of the slow touches is the measured value")
     if zero_note:   # v09: Work zero ที่ผู้ใช้เลือก (core/work_zero.py)
         lines.append(f"; WORK ZERO: X0 Y0 Z0 = {zero_note}")
         lines.append("; BEFORE RUNNING: touch off that point and Set Zero X/Y/Z there.")

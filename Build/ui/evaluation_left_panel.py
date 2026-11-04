@@ -2,7 +2,15 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 21
+# VERSION: 26
+# CHANGE LOG (v25 -> v26): ทิ้ง job ค้างของ Find centre ก่อนส่ง G-code ตรวจรู (openbuilds_logger v07)
+# CHANGE LOG (v24 -> v25): Feature 1 — ส่ง app.part_alignment (วัดจาก Set up) เข้า evaluate_points เมื่อติ๊ก
+#   "Correct tilt / lean / rotation" (ค่าเริ่มต้นเปิด) และเป็นไฟล์ CAD เดียวกัน
+# CHANGE LOG (v23 -> v24): Run inspection ตั้ง $1=255 ให้เองก่อนส่ง G-code (ไม่ถาม — openbuilds_logger v06)
+# CHANGE LOG (v22 -> v23): ส่ง Effective Tip แยกแกน X / Y (tip_radius_xy) เข้า evaluate_points — เฉพาะเมื่อติ๊ก
+#   "Separate X / Y Effective Tip" (ค่าเริ่มต้นปิด: รู sphere 3-11-real ผลแย่ลง |dev| 0.255 → 0.270 —
+#   X เกินจากผนังนอกไม่ได้มาจากหัวโพรบอย่างเดียว)
+# CHANGE LOG (v21 -> v22): Run inspection ถามตั้ง $1=255 ก่อนส่ง G-code ถ้า $1 ≠ 255 (openbuilds_logger v05)
 # CHANGE LOG (v20 -> v21):
 #   ตัดช่องขนาดเวอร์เนียร์ของการแตะผนังนอก — Effective Tip มาจาก Set up (Hardware Setting) เสมอ
 #   (log เก่าที่มีจุดแตะผนังนอก: ยังประเมินได้ แต่ไม่เอาค่าจากจุดเหล่านั้นมาใช้ชดเชย)
@@ -118,14 +126,25 @@ _COLOR_GOOD = theme.OK_TEXT
 _COLOR_BAD  = theme.ERR_TEXT
 
 
+def _alignment_for(app):
+    """v25: ผลวัดเอียงจาก Set up — เฉพาะเมื่อเปิดใช้ และวัดกับไฟล์ CAD ที่โหลดอยู่"""
+    al = getattr(app, 'part_alignment', None)
+    if not al or not getattr(app, 'evaluation_align', True):
+        return None
+    return al if al.get('model') == getattr(app, 'loaded_step_filepath', None) else None
+
+
 def evaluation_kwargs(app) -> dict:
     """v19: ค่าที่ทุกที่ส่งเข้า evaluate_points() — ชดเชยหรือไม่, Effective Tip, ขนาดจริงชิ้นงาน"""
     return dict(tip_radius_mm=app.probe_profile.effective_tip_radius,
+                tip_radius_xy=(app.probe_profile.effective_tip_radius_xy           # v23
+                               if getattr(app, 'evaluation_tip_xy', False) else None),
+                align=_alignment_for(app),   # v25
                 best_fit=bool(getattr(app, 'evaluation_best_fit', False)),
                 compensate=bool(getattr(app, 'evaluation_compensate', True)),
                 use_run_calib=False,   # v21: Effective Tip มาจาก Set up เท่านั้น
                 tip_d_max=float(app.probe_profile.tip_diameter),
-                pretravel='travel' if getattr(app, 'evaluation_pretravel_travel', False) else 'normal')
+                pretravel='travel' if getattr(app, 'evaluation_pretravel_travel', True) else 'normal')
 
 
 def _remap_holes_by_gi(result: dict, current_holes: list) -> None:
@@ -302,10 +321,20 @@ class EvaluationLeftPanel:
                         command=self._on_toggle_best_fit).pack(anchor="w", padx=10, pady=(6, 0))
 
         # v19: แบบจำลองระยะทริกบนผนังเอียง (ผนังตรงได้เท่ากัน) — ให้ข้อมูลจริงตัดสิน
-        self._travel_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_pretravel_travel', False)))
+        self._travel_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_pretravel_travel', True)))
         ctk.CTkCheckBox(self.results_frame, text="Sloped walls: pretravel along the probing direction",
                         variable=self._travel_var, font=ctk.CTkFont(size=11),
                         command=self._on_toggle_travel).pack(anchor="w", padx=10, pady=(4, 0))
+        # v25: Feature 1 — แปลงจุดวัดด้วยผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up
+        self._align_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_align', True)))
+        ctk.CTkCheckBox(self.results_frame, text="Correct tilt / Z lean / rotation (from Set up)",
+                        variable=self._align_var, font=ctk.CTkFont(size=11),
+                        command=self._on_toggle_align).pack(anchor="w", padx=10, pady=(4, 0))
+        # v23: Effective Tip แยกแกน X / Y จาก Set up (ค่าเริ่มต้นปิด)
+        self._tip_xy_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_tip_xy', False)))
+        ctk.CTkCheckBox(self.results_frame, text="Separate X / Y Effective Tip (from Set up)",
+                        variable=self._tip_xy_var, font=ctk.CTkFont(size=11),
+                        command=self._on_toggle_tip_xy).pack(anchor="w", padx=10, pady=(4, 0))
 
         self.lbl_failed = ctk.CTkLabel(self.results_frame, text="—",
                                        font=ctk.CTkFont(size=18, weight="bold"))
@@ -419,9 +448,12 @@ class EvaluationLeftPanel:
             comp = result.get('compensation')
             src = (" (this run's outer walls)" if result.get('tip_source') == 'run'
                    else " (Hardware Setting)") + (
-                ", pretravel along probing dir" if result.get('pretravel') == 'travel' else "")   # v19
+                ", pretravel along probing dir" if result.get('pretravel') == 'travel' else "") + (
+                ", tilt / Z lean / rotation corrected" if result.get('alignment') else "")   # v19 / v25
             comp_text = {
-                'on': f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm{src}",
+                'on': (f"Tip compensation: r X {result['tip_radius_xy'][0]:.3f} / Y "
+                       f"{result['tip_radius_xy'][1]:.3f} mm{src}" if result.get('tip_radius_xy') else
+                       f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm{src}"),   # v23
                 'unavailable': "Tip compensation: unavailable (schema has no probe directions"
                                " — re-export G-code + schema)",
             }.get(comp, "Tip compensation: off (raw ball centre vs CAD)")
@@ -454,6 +486,29 @@ class EvaluationLeftPanel:
             parts.append(f"{ax} {v['d_eff']:.3f} (span {v['span']:.3f} − {ref} "
                          f"{v['width_true'] or v['width_cad']:.3f})" + ("" if v['ok'] else " ⚠ out of range"))
         return "\nOuter-wall Effective Tip ⌀: " + ", ".join(parts)
+
+    def _on_toggle_align(self):
+        """v25: แปลงจุดวัดด้วยผลวัดเอียงจาก Set up (จำค่า) แล้วคำนวณผลใหม่"""
+        from core import user_settings
+        self.app.evaluation_align = bool(self._align_var.get())
+        user_settings.save_section("evaluation_align", self.app.evaluation_align)
+        if self.app.evaluation_align and getattr(self.app, 'part_alignment', None) is None:
+            _mb.showinfo("Tilt / lean", "ยังไม่มีผลวัดเอียง — รัน Set up โดยติ๊ก \"Also measure tilt...\" "
+                                       "ในหน้า Work Zero ก่อน", parent=self.app.root)
+        if not self._auto_refresh_if_result_exists():
+            self.refresh()
+
+    def _on_toggle_tip_xy(self):
+        """v23: ชดเชยด้วย Effective Tip แยกแกน X / Y (จำค่า) แล้วคำนวณผลใหม่"""
+        from core import user_settings
+        self.app.evaluation_tip_xy = bool(self._tip_xy_var.get())
+        user_settings.save_section("evaluation_tip_xy", self.app.evaluation_tip_xy)
+        if self.app.evaluation_tip_xy and self.app.probe_profile.effective_tip_radius_xy is None:
+            _mb.showinfo("Effective Tip X / Y", "ยังไม่มีค่าแยกแกน — รัน Set up (Find centre + ขนาดเวอร์เนียร์ "
+                                               "ทั้ง X และ Y) ก่อน ระหว่างนี้ใช้ค่าเดียวทุกทิศ",
+                         parent=self.app.root)
+        if not self._auto_refresh_if_result_exists():
+            self.refresh()
 
     def _on_toggle_travel(self):
         """v19: แบบจำลองระยะทริกบนผนังเอียง (จำค่า) แล้วคำนวณผลใหม่"""
@@ -1017,6 +1072,8 @@ class EvaluationLeftPanel:
 
         cmds = [ln.split(";")[0].strip() for ln in job['text'].splitlines()]
         app.last_gcode_name = job['name']
+        logger.ensure_idle_delay()         # v24: $1=255 ก่อนเคลื่อนที่ (ไม่ถาม) — $1 ≠ 255 แกนดีด ~0.4 มม.
+        logger.discard_job()               # v26: job ค้างของ Find centre ที่เพิ่งจบ ต้องไม่ถูกบันทึกเป็นงานนี้
         logger.suppress_logs(0)            # job นี้ต้องถูกบันทึก (แม้เพิ่งรัน Find centre)
         try:
             logger.send_gcode("\n".join(c for c in cmds if c))
