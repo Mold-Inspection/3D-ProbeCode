@@ -4,7 +4,10 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 13
+# VERSION: 14
+# CHANGE LOG (v13 -> v14): Feature 1 — align (จาก Set up, ui/wall_zero.py v13): แปลงจุดวัด (PRB − WCO) เข้า
+#   พิกัดชิ้นงานก่อนประเมิน: หักศูนย์เลื่อนตามความลึก x − kx·(z − z_ref), หมุนกลับรอบศูนย์ −yaw,
+#   z − (gx·dx + gy·dy) (ผิวบนเอียง) — จุดที่ไม่อยู่บนเส้นทางโพรบแล้ว: dev += m·off (off = ส่วนที่ตั้งฉาก n)
 # CHANGE LOG (v12 -> v13):
 #   Effective Tip แยกแกน X / Y (tip_radius_xy) — รัศมีชดเชยของแต่ละจุดตามทิศที่โพรบเดิน n:
 #   r(n) = rX·nx² + rY·ny² + r̄·nz² (หัวโพรบ kinematic ทริกช้า/เร็วไม่เท่ากันแต่ละทิศ — ทดสอบ 2026-11-03
@@ -197,6 +200,29 @@ def _table_dist(exp, s_meas: float) -> float:
     if s_meas < sv[-1]:
         return float(r[-1] + (s_meas - sv[-1]) * (r[-1] - r[-2]) / (sv[-1] - sv[-2]))
     return float(np.interp(s_meas, sv[::-1], r[::-1]))
+
+
+def align_point(p, al):
+    """v14: จุดวัด (x, y, z พิกัดงาน) → พิกัดชิ้นงาน ด้วยผลวัดเอียงจาก Set up (al = app.part_alignment)"""
+    x, y, z = (float(c) for c in p)
+    cx, cy = al['pivot']
+    kx, ky = al['lean']
+    gx, gy = al['slope']
+    dz = z - float(al['z_ref'])
+    x1, y1 = x - kx * dz - cx, y - ky * dz - cy
+    c, s = math.cos(-al['yaw_rad']), math.sin(-al['yaw_rad'])
+    return (cx + c * x1 - s * y1, cy + s * x1 + c * y1, z - (gx * (x - cx) + gy * (y - cy)))
+
+
+def _off_term(exp, raw, r: float) -> float:
+    """v14: ศูนย์กลางลูกบอลอยู่นอกเส้นทางโพรบ off (⟂ n) → ระยะถึงผิวลดลง m·off ⇒ dev เพิ่ม m·off"""
+    g = _trig_at(exp, r)
+    if g is None or 'sx' not in exp:
+        return 0.0
+    n = np.asarray(_probe_dir(exp), dtype=float)
+    d = np.asarray(raw, dtype=float) - np.array([float(exp['sx']), float(exp['sy']), float(exp['sz'])])
+    off = d - float(np.dot(d, n)) * n
+    return float(np.dot(g[1], off))
 
 
 def _r_at(exp, r_tip) -> float:
@@ -434,7 +460,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                     tip_radius_mm: float = 0.0, best_fit: bool = False, compensate: bool = True,
                     use_run_calib: bool = True, calib_true: dict = None,
                     tip_d_max: float = None, pretravel: str = 'normal',
-                    tip_radius_xy: tuple = None) -> dict:
+                    tip_radius_xy: tuple = None, align: dict = None) -> dict:
     """จับคู่ EXPECTED[i] กับ ACTUAL[i] ด้วย sequence index แล้วประเมินผลผ่าน/
     ไม่ผ่านของแต่ละจุดเทียบกับ tolerance (mm, ระยะ 3D Euclidean) จากนั้น
     รวมผลขึ้นเป็นโครงสร้าง layer -> segment -> hole -> รายการจุดที่ไม่ผ่านแบบ
@@ -458,6 +484,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
     pretravel       : v12 — 'normal' (ทริกเมื่อกดเข้าผิวตามทิศตั้งฉาก = รัศมี r คงที่ แบบ CMM ทั่วไป)
                        หรือ 'travel' (เครื่องเดินต่อ R − r ตามทิศที่โพรบเดิน) — ผนังตรงเท่ากัน
     tip_radius_xy   : v13 — (rX, rY) Effective Tip แยกแกนจาก Set up (None = ใช้ tip_radius_mm ทุกทิศ)
+    align           : v14 — ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up (None = ไม่แปลงจุดวัด)
 
     Returns
     -------
@@ -468,6 +495,9 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
       failed_point_refs, expected_count, actual_count,
       sequence_mismatch, settings_mismatch, holes
     """
+    if align:   # v14: จุดวัดทั้งหมดเข้าพิกัดชิ้นงานก่อน (best-fit / คาลิเบรตก็ใช้จุดที่แปลงแล้ว)
+        actual_points = [dict(a, x=q[0], y=q[1], z=q[2], prb_work=(a['x'], a['y'], a['z']))
+                         for a in actual_points for q in [align_point((a['x'], a['y'], a['z']), align)]]
     matched = min(len(expected_points), len(actual_points))
     idx_all = [i for i in range(matched) if expected_points[i].get('shape') != 'calib']   # v12
     total_points = len(idx_all)
@@ -508,6 +538,8 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         exact = bool(exp.get('trig')) and 'sx' in exp and _probe_dir(exp) is not None   # v12
         if exact:
             dev_nocomp = _table_dev(exp, raw_log, 0.0, False)
+            if align:   # v14
+                dev_nocomp += _off_term(exp, raw_log, 0.0)
         sh_ = shifts.get(str(exp.get('hole_id', '?')))
         if sh_ is not None:
             raw = (raw[0] + sh_[0], raw[1] + sh_[1], raw[2] + sh_[2])
@@ -517,6 +549,8 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         dev = float(dx * w[0] + dy * w[1] + dz * w[2])   # v12: ระยะเบี่ยงตามทิศตั้งฉากผิว (มีเครื่องหมาย)
         if exact:   # v12: ย้อนตาราง B-Rep — แม่นแม้ผนังโค้งมาก/แตะแบบเฉียด (ผนังเรียบได้ค่าเดียวกัน)
             dev = _table_dev(exp, raw, r_pt, comp_on)
+            if align:   # v14
+                dev += _off_term(exp, raw, r_pt if comp_on != 'travel' else float(exp['trig'][-1][0]))
         euclid = math.sqrt(dx * dx + dy * dy + dz * dz)
         r_used = r_pt if comp_on else 0.0
         exp_center = (ex - r_used * w[0], ey - r_used * w[1], ez - r_used * w[2])
@@ -526,7 +560,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                                + s_b * np.asarray(_probe_dir(exp), dtype=float))
         extra = {'raw_log': raw_log, 'wco': act.get('wco'), 'cad': e0, 'dev_nocomp': dev_nocomp,
                  'exp_center': exp_center, 'normal': tuple(float(c) for c in w), 'dev': dev,
-                 'euclid_mm': euclid, 'r_used': r_used}
+                 'euclid_mm': euclid, 'r_used': r_used, 'prb_work': act.get('prb_work')}
         is_floor = exp.get('shape') == 'floor'
         if is_floor:   # v08: พื้นก้นรู — เทียบความลึกตามแกนรูอย่างเดียว
             n = _probe_dir(exp) or (0.0, 0.0, -1.0)
@@ -657,6 +691,8 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         'tolerance_mm':       tolerance_mm,
         'tip_radius_mm':      r_tip if comp_on else 0.0,   # v07
         'tip_radius_xy':      rxy if comp_on else None,    # v13: (rX, rY) ที่ใช้ — None = ทุกทิศ r̄
+        'alignment':          ({k: align[k] for k in ('lean', 'slope', 'yaw_rad', 'z_ref', 'pivot', 'top_z')
+                               if k in align} if align else None),   # v14
         'compensation':       compensation,                # 'on' / 'off' / 'unavailable'
         'tip_source':         tip_source,                  # v12: 'run' (ผนังนอกรอบนี้) / 'setting'
         'pretravel':          comp_on or None,             # v12: 'normal' / 'travel' / None (ไม่ชดเชย)
@@ -696,6 +732,12 @@ def export_results_csv(result: dict, filepath: str) -> None:
                     "r_eff X / Y (mm)", f"{rxy[0]:.4f} / {rxy[1]:.4f}" if rxy else "same all directions",
                     "source", result.get('tip_source', 'setting'),
                     "tolerance (mm)", result.get('tolerance_mm'), "best_fit", result.get('best_fit')])
+        al = result.get('alignment')   # v14
+        if al:
+            w.writerow(["# alignment (raw = PRB − WCO after correction)", "lean x/y per z",
+                        f"{al['lean'][0]:+.5f} / {al['lean'][1]:+.5f}", "top slope x/y",
+                        f"{al['slope'][0]:+.5f} / {al['slope'][1]:+.5f}", "yaw deg",
+                        f"{math.degrees(al['yaw_rad']):+.4f}", "z_ref", al['z_ref'], "top_z", al.get('top_z')])
         for ax, v in (cal.get('axes') or {}).items():
             w.writerow([f"# calibration {ax}", "span", f"{v['span']:.4f}", "width CAD", f"{v['width_cad']:.4f}",
                         "width caliper", "" if v['width_true'] is None else f"{v['width_true']:.4f}",

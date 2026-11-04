@@ -2,10 +2,13 @@
 # ui/openbuilds_logger.py — ตัวบันทึก log ของ OpenBuilds Control ที่ทำงานเบื้องหลัง
 # ตั้งแต่เปิดหน้าต่างหลัก (ไม่ต้องเปิด start_openbuilds_logger.bat แยก)
 # ==============================================================================
-# VERSION: 05
+# VERSION: 07
+# CHANGE LOG (v06 -> v07): discard_job() — ทิ้ง job ที่ยังอัดค้าง (Find centre ที่เพิ่งจบ) ก่อนเริ่ม Run inspection
+#   (Find centre v13 มีจุดแตะในขั้นท้าย ๆ — job นั้นจบหลัง Idle ไม่กี่วินาที จึงถูกบันทึก/ประเมินแทนงานตรวจรู)
+# CHANGE LOG (v05 -> v06): ensure_idle_delay() ตั้ง $1=255 ให้เองก่อน Find centre / Run inspection (ไม่ถามแล้ว)
 # CHANGE LOG (v04 -> v05):
 #   เก็บค่า GRBL ($N=ค่า) จากทุกคำตอบ (self.grbl) — อ่าน $$ เองครั้งเดียวเมื่อเครื่อง Idle หลังเชื่อมต่อ
-#   check_idle_delay(): ถามก่อนงานที่เครื่องขยับ (Find centre / Run inspection) ถ้า $1 ≠ 255
+#   check_idle_delay(): (v06 → ensure_idle_delay) ถามก่อนงานที่เครื่องขยับ (Find centre / Run inspection) ถ้า $1 ≠ 255
 #   ($1 = step idle delay — มอเตอร์ดับหลังหยุด ก้านโพรบที่งอดันแกนไปได้ แล้วแกนดีดไป 4 full steps
 #   ~0.4 มม. ตอนจ่ายไฟกลับ — ทดสอบ 2026-11-03: $1=25 เสีย 0.40 มม./ครั้ง, $1=255 เหลือ 0.003)
 # CHANGE LOG (v03 -> v04): เก็บ last_status (status ล่าสุดจาก OpenBuilds) ให้ Find centre ตรวจตำแหน่ง Z
@@ -37,7 +40,6 @@ import os
 import queue
 import re
 import time
-from tkinter import messagebox as _mb
 
 from core import user_settings
 from core.openbuilds_link import JobRecorder, OpenBuildsLink, default_log_dir, write_job_log
@@ -211,26 +213,21 @@ class OpenBuildsLogger:
         self.suppress_logs(5)
         self.send_gcode("$$")
 
-    def check_idle_delay(self, parent=None, run_native=None) -> bool:
-        """v05: ก่อนงานที่เครื่องขยับ — $1 ≠ 255 ถามว่าจะตั้ง $1=255 ไหม (False = ผู้ใช้ยกเลิก)
-        run_native = SettingsDialogBase.run_native ถ้าถามจากใน dialog (popup ไม่หลุดไปหลังหน้าต่างหลัก)"""
-        idle = self.grbl.get(1)
-        if idle is None or idle == 255:
-            return True
-        ask = run_native or (lambda fn, *a, **k: fn(*a, parent=parent, **k))
-        ans = ask(
-            _mb.askyesnocancel, "GRBL $1 (step idle delay)",
-            f"$1 = {idle:g} — มอเตอร์ดับหลังหยุดทุกครั้ง ก้านโพรบที่งอหลังแตะดันแกนไปได้ "
-            f"แล้วแกนดีดไป 4 full steps (~0.4 มม.) ตอนจ่ายไฟกลับ ทำให้ค่าวัดเลื่อน\n\n"
-            f"ตั้ง $1=255 (มอเตอร์จ่ายไฟค้างไว้) ก่อนรันไหม?\n"
-            f"Yes = ตั้งแล้วรัน   No = รันต่อโดยไม่ตั้ง   Cancel = ยกเลิก", icon="warning")
-        if ans is None:
-            return False
-        if ans:
-            self.suppress_logs(5)
-            self.send_gcode("$1=255\n$$")
-            self.grbl[1] = 255.0
-        return True
+    def ensure_idle_delay(self):
+        """v06: ก่อนงานที่เครื่องขยับ — $1 ≠ 255 (หรือยังไม่รู้ค่า) ตั้ง $1=255 ให้เลย ไม่ถาม
+        (เครื่องต้อง Idle อยู่ — ผู้เรียกตรวจแล้ว; คำสั่งเข้าคิวก่อน G-code ของงานนั้น)"""
+        if self.grbl.get(1) == 255:
+            return
+        self.suppress_logs(5)
+        self.send_gcode("$1=255\n$$")
+        self.grbl[1] = 255.0
+        print("[openbuilds_logger] $1 set to 255 (motors stay powered between moves)")
+
+    def discard_job(self):
+        """v07: ทิ้ง job ที่ยังอัดค้างอยู่ (ไม่บันทึก) — เรียกก่อนส่ง G-code งานใหม่ตอนเครื่อง Idle"""
+        if self.recorder is not None and self.recorder.recording:
+            print(f"[openbuilds_logger] discarded an unfinished job ({self.recorder.job.probe_count} point(s))")
+            self.recorder.job = None
 
     def stop_machine(self):
         """เหมือนปุ่ม Stop ของ OpenBuilds: พักการเคลื่อนที่ ล้างคิว แล้ว soft reset"""

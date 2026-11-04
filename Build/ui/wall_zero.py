@@ -1,7 +1,16 @@
 # ==============================================================================
 # ui/wall_zero.py — หา X0 Y0 = กึ่งกลางชิ้นงาน (+ Z0 = ผิวบน) ด้วยการแตะผนังด้านนอก 4 ด้าน
 # ==============================================================================
-# VERSION: 12
+# VERSION: 13
+# CHANGE LOG (v12 -> v13): Feature 1 — วัดเอียง / แกน Z เอียง / หมุน หลังตั้ง X0 Y0 (CentreSettings.align):
+#   (ก) แตะผิวบนด้วย G38.2 Z 4 จุด (2 ครั้ง/จุด) → ระนาบผิวบน z = a + gx·dx + gy·dy (a = Z ที่ทริกเหนือศูนย์)
+#   (ข) แตะผนังนอก 4 ด้านอีกครั้งที่ความลึกที่ 2 → ศูนย์เลื่อนต่อความลึก k = Δศูนย์ / Δz (รวมชิ้นงานเอียง +
+#       แกน Z เครื่องเอียง; ผนังเดียวกันทิศเดียวกัน pretravel หักล้าง)
+#   (ค) แตะผนังซ้ายเพิ่ม 2 จุด ที่ y = ±yaw_dy → มุมหมุนรอบ Z
+#   ผล → self.align (core/evaluation_engine.py v14 แปลงจุดวัดเข้าพิกัดชิ้นงานก่อนประเมิน)
+#   (ก) ทำเฉพาะเมื่อหัวโพรบทริกแนว Z ได้ (Probe Stylus → z_trigger) — ไม่งั้นข้าม ระนาบ = ไม่เอียง
+#   ทุกตำแหน่ง XY ใช้ G53 (พิกัดเครื่อง) รอบศูนย์ที่วัดได้ — ใช้ได้ทุก Work zero
+#   top_touch_points(): เลือกจุดผิวบนที่ห่างจุดตรวจรู/ขอบชิ้นงาน
 # CHANGE LOG (v11 -> v12):
 #   เตือนเมื่อ $1 (step idle delay) ≠ 255 — มอเตอร์ดับหลังหยุดทุกครั้ง ก้านโพรบที่งอดันแกนไปได้
 #   แล้วแกนดีดไป 4 full steps (~0.4 มม.) ตอนจ่ายไฟกลับ (ทดสอบ 2026-11-03: $1=25 เสีย 0.40 มม./ครั้ง)
@@ -86,7 +95,8 @@ class CentreSettings:
                  depth: float = 4.0, feed: float = 100.0, true_x: float = None, true_y: float = None,
                  repeats: int = 0, rep_feed: float = 20.0, rep_back: float = 1.0,
                  zero_mode: str = "center", keep_zero: bool = False, backoff: float = _BACKOFF,
-                 rep_dwell: float = 0.0):
+                 rep_dwell: float = 0.0, align: bool = False, top_pts=(), depth2: float = None,
+                 yaw_dy: float = None):
         # tip_d = ⌀ ลูกบอลที่ใช้หักออกจากระยะที่วัด (Effective Tip ⌀ ถ้า calibrate แล้ว)
         self.width, self.length, self.tip_d = float(width), float(length), float(tip_d)
         # v06: ขนาดจริงที่วัดด้วยเวอร์เนียร์ (None = ไม่ calibrate) — ใช้หา Effective Tip ⌀
@@ -100,6 +110,11 @@ class CentreSettings:
         self.keep_zero = bool(keep_zero)
         self.backoff = float(backoff)   # v10: ถอยออกหลังแตะผนัง ก่อนยก Z
         self.rep_dwell = max(0.0, float(rep_dwell))   # v11: หน่วงก่อนแตะช้า
+        # v13: Feature 1 — จุดผิวบน (dx, dy จากศูนย์), ความลึกที่ 2, ระยะ ±y ของ 2 จุดหาการหมุน
+        self.align = bool(align)
+        self.top_pts = [(float(x), float(y)) for x, y in top_pts]
+        self.depth2 = float(depth2) if depth2 else self.depth + 6.0
+        self.yaw_dy = float(yaw_dy) if yaw_dy else 0.3 * self.length
 
     @property
     def per_wall(self) -> int:
@@ -125,7 +140,56 @@ class CentreSettings:
             return "Back-off ต้องมากกว่า 0 และไม่เกิน Gap"
         if self.repeats and (self.rep_feed <= 0 or self.rep_back <= 0):
             return "Repeat feed / back-off ต้องมากกว่า 0"
+        if self.align and ((self.top_pts and len(self.top_pts) < 3) or self.depth2 <= self.depth):   # v13
+            return "วัดเอียง: ต้องมีจุดผิวบนอย่างน้อย 3 จุด และความลึกที่ 2 ต้องลึกกว่า Probe depth"
         return ""
+
+
+_Z_START = 3.0    # v13: G0 ลงถึงเหนือ Z0 เท่านี้ แล้วค่อย G38.2 ช้า ๆ (เดิม 1.0 — G0 ลงใกล้ผิวเกินไป ผู้ใช้กด Stop)
+_Z_OVER = 2.0     # v13: G38.2 Z ลงต่ำกว่า Z0 ได้สูงสุดเท่านี้ (ไม่ทริก = ALARM หยุดเอง)
+
+
+def top_touch_points(width: float, length: float, avoid=(), ball_r: float = 1.0):
+    """v13: 4 จุดบนผิวบน (dx, dy จากศูนย์) ห่างขอบชิ้นงาน ball_r + 1.5 และห่างจุดตรวจรูทุกจุด (avoid = xy
+    พิกัดงานเทียบศูนย์) ball_r + 2.5 — ลองจากไกลศูนย์ก่อน; [] ถ้าหาไม่ได้"""
+    edge = ball_r + 1.5
+    clear = ball_r + 2.5
+    for f in (0.7, 0.8, 0.6, 0.5, 0.9, 0.4):
+        ax, ay = f * width / 2.0, f * length / 2.0
+        if ax > width / 2.0 - edge or ay > length / 2.0 - edge:
+            continue
+        pts = [(sx * ax, sy * ay) for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        if all((px - qx) ** 2 + (py - qy) ** 2 >= clear ** 2 for px, py in pts for qx, qy in avoid):
+            return pts
+    return []
+
+
+def _xy53(x: float, y: float) -> str:
+    return f"G90\nG53 G0 X{x:.3f} Y{y:.3f}"
+
+
+def _touch_lines(a: str, sign: int, s) -> list:
+    """v13: แตะผนังจากนอกครั้งเดียว + แตะช้า 1 ครั้ง (เริ่มที่ความลึกแล้ว, จบที่ความลึกเดิม)"""
+    return ["G91", f"G38.2 {a}{-sign * s.search:.3f} F{s.feed:.0f}",
+            f"G0 {a}{sign * s.rep_back:.3f}",
+            *([f"G4 P{s.rep_dwell:.2f}"] if s.rep_dwell > 0 else []),
+            f"G38.2 {a}{-sign * (s.rep_back + 2.0):.3f} F{s.rep_feed:.0f}",
+            f"G0 {a}{sign * s.backoff:.3f}", "G90"]
+
+
+def _solve3(m, b):
+    """v13: แก้ระบบ 3×3 (Cramer)"""
+    def det(a):
+        return (a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+                + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]))
+    d = det(m)
+    out = []
+    for k in range(3):
+        mk = [row[:] for row in m]
+        for r in range(3):
+            mk[r][k] = b[r]
+        out.append(det(mk) / d)
+    return out
 
 
 def side_gcode(axis: str, sign: int, s: CentreSettings) -> str:
@@ -163,6 +227,7 @@ class CentreRun:
         self._need = 0
         self._sent_at = 0.0
         self._deadline = 0.0
+        self.align, self._extra = None, []   # v13
 
     # ------------------------------------------------------------------
     def start(self):
@@ -187,11 +252,22 @@ class CentreRun:
              lambda: f"G53 G0 X{self._mid('X'):.3f} Y{self._mid('Y'):.3f}\nG4 P1", 0),
             ("Set X0 Y0 at the work zero", lambda: "G10 L20 P{} X{:.4f} Y{:.4f}".format(p(), *self._zero_xy()), 0),
         ]
+        if s.align:   # v13: Feature 1 — หลังตั้ง X0 Y0 แล้ว (ตำแหน่งทั้งหมดเทียบศูนย์ที่วัดได้ ใช้ G53)
+            # แตะผิวบนเฉพาะเมื่อมี top_pts (หัวโพรบทริกแนว Z ได้ — ไม่งั้นลูกบอลจะกดผิวลงไปเฉย ๆ)
+            self._steps += [("Tilt: touch the top surface (Z)", self._top_gcode, 2 * len(s.top_pts))] if s.top_pts else []
+            self._steps += [
+                (f"Lean: walls again at Z−{s.depth2:g}", self._deep_gcode, 8),
+                ("Rotation: 2 more touches on the left wall", self._yaw_gcode, 4),
+                ("Back above the centre", lambda: f"G90\nG0 Z{s.lift:.3f}\n"
+                                                  + _xy53(self.result['X'][2], self.result['Y'][2]), 0),
+            ]
         self.active, self.prb, self.result, self._i = True, [], {}, -1
         self.deff = {}   # v06
         self.steps_mm = {}
         self.rep = {}    # v07
-        timeout = _TIMEOUT_S + 60.0 * s.repeats   # แตะซ้ำที่ feed ช้าใช้เวลาเพิ่ม
+        timeout = _TIMEOUT_S + 60.0 * s.repeats + (420.0 if s.align else 0.0)   # แตะซ้ำ / วัดเอียงใช้เวลาเพิ่ม
+        self.align = None   # v13
+        self._extra = []    # v13: (ป้าย, จุดแตะ) ของขั้นวัดเอียง — ลง CSV
         self._deadline = time.monotonic() + timeout
         self.logger.on_event.append(self._on_event)
         self.logger.suppress_logs(timeout + 30)
@@ -234,6 +310,108 @@ class CentreRun:
         fx, fy = _ZERO_FROM_CENTRE[self.s.zero_mode]
         self.zero_set = (self.s.zero_mode, -fx * size["X"], -fy * size["Y"])
         return -fx * size["X"], -fy * size["Y"]
+
+    # ------------------------------------------------------------------
+    # v13: Feature 1 — G-code ของขั้นวัดเอียง (ศูนย์ = self.result[...][2] พิกัดเครื่อง)
+    # ------------------------------------------------------------------
+    def _centre_m(self):
+        return self.result['X'][2], self.result['Y'][2]
+
+    def _top_gcode(self) -> str:
+        s, (mx, my) = self.s, self._centre_m()
+        out = []
+        for dx, dy in s.top_pts:   # แตะ 2 ครั้ง/จุด ที่ feed ช้า — ไม่ทริกภายใน Z−2 = ALARM หยุดเอง
+            out += ["G90", f"G0 Z{s.lift:.3f}", _xy53(mx + dx, my + dy), f"G0 Z{_Z_START:.3f}", "G91",
+                    f"G38.2 Z{-(_Z_START + _Z_OVER):.3f} F{s.rep_feed:.0f}", "G0 Z2.000",
+                    *([f"G4 P{s.rep_dwell:.2f}"] if s.rep_dwell > 0 else []),
+                    f"G38.2 Z{-(2.0 + _Z_OVER):.3f} F{s.rep_feed:.0f}", "G0 Z1.000", "G90"]
+        return "\n".join(out + [f"G0 Z{s.lift:.3f}"])
+
+    def _deep_gcode(self) -> str:
+        s, (mx, my) = self.s, self._centre_m()
+        out = []
+        for axis, sign, _name in _WALLS:
+            x = mx + (sign * s.outside("X") if axis == "X" else 0.0)
+            y = my + (sign * s.outside("Y") if axis == "Y" else 0.0)
+            out += ["G90", f"G0 Z{s.lift:.3f}", _xy53(x, y), f"G0 Z{-s.depth2:.3f}"] + _touch_lines(axis, sign, s)
+        return "\n".join(out + [f"G0 Z{s.lift:.3f}"])
+
+    def _yaw_gcode(self) -> str:
+        s, (mx, my) = self.s, self._centre_m()
+        out = []
+        for sy in (-1, 1):
+            out += ["G90", f"G0 Z{s.lift:.3f}", _xy53(mx - s.outside("X"), my + sy * s.yaw_dy),
+                    f"G0 Z{-s.depth:.3f}"] + _touch_lines("X", -1, s)
+        return "\n".join(out + [f"G0 Z{s.lift:.3f}"])
+
+    def _compute_align(self) -> list:
+        """v13: ระนาบผิวบน, ศูนย์เลื่อนต่อความลึก, มุมหมุน → self.align + ข้อความสรุป"""
+        import math
+        s = self.s
+        n0 = 4 * s.per_wall
+        pts = self.prb[n0:]
+        n_top = 2 * len(s.top_pts)
+        if len(pts) < n_top + 12:
+            return ["⚠ Tilt / lean: not enough touches — skipped"]
+        top, deep, yaw = pts[:n_top], pts[n_top:n_top + 8], pts[n_top + 8:n_top + 12]
+        mx, my = self._centre_m()
+        oz = float(self.offset.get('z', 0.0))
+        # (ก) ระนาบผิวบน — Z งาน (ก้นลูกบอล) ที่ทริก, เฉลี่ย 2 ครั้ง/จุด (ไม่มีจุด = ไม่ได้วัด → ไม่เอียง)
+        a0 = resid = None
+        gx = gy = 0.0
+        rows, zrep = [], [0.0]
+        for k, (dx, dy) in enumerate(s.top_pts):
+            a, b = top[2 * k], top[2 * k + 1]
+            rows.append((a[0] - mx, a[1] - my, 0.5 * (a[2] + b[2]) - oz))
+            zrep.append(abs(a[2] - b[2]))
+            self._extra += [(f"top {k + 1} ({dx:+.1f},{dy:+.1f})", a), (f"top {k + 1} ({dx:+.1f},{dy:+.1f})", b)]
+        if rows:
+            A = [[1.0, x, y] for x, y, _ in rows]
+            z = [r[2] for r in rows]
+            # least squares 3 พารามิเตอร์ (normal equations — 4 จุด)
+            ata = [[sum(A[i][r] * A[i][c] for i in range(len(A))) for c in range(3)] for r in range(3)]
+            atb = [sum(A[i][r] * z[i] for i in range(len(A))) for r in range(3)]
+            a0, gx, gy = _solve3(ata, atb)
+            resid = max(abs(z[i] - (a0 + gx * rows[i][0] + gy * rows[i][1])) for i in range(len(rows)))
+        # (ข) ศูนย์ที่ความลึกที่ 2 (แตะช้า = จุดที่ 2 ของแต่ละผนัง)
+        w2 = {f"{ax}{'+' if sg > 0 else '-'}": deep[2 * j + 1] for j, (ax, sg, _n) in enumerate(_WALLS)}
+        for j, (ax, sg, _n) in enumerate(_WALLS):
+            self._extra += [(f"deep {ax}{'+' if sg > 0 else '-'}", deep[2 * j]),
+                            (f"deep {ax}{'+' if sg > 0 else '-'}", deep[2 * j + 1])]
+        c2x, c2y = 0.5 * (w2['X-'][0] + w2['X+'][0]), 0.5 * (w2['Y-'][1] + w2['Y+'][1])
+        span2 = (w2['X+'][0] - w2['X-'][0], w2['Y+'][1] - w2['Y-'][1])
+        z1, z2 = -s.depth, -s.depth2
+        kx, ky = (c2x - mx) / (z2 - z1), (c2y - my) / (z2 - z1)
+        # (ค) ผนังซ้ายที่ y = my ∓ dy (แตะช้า) — ผนังหมุน +θ (ทวนเข็ม) → x ลดลงเมื่อ y เพิ่ม
+        ya, yb = yaw[1], yaw[3]
+        self._extra += [("yaw X- y-", yaw[0]), ("yaw X- y-", yaw[1]), ("yaw X- y+", yaw[2]), ("yaw X- y+", yaw[3])]
+        yaw_rad = -math.atan2(yb[0] - ya[0], yb[1] - ya[1])
+        cx, cy = self.zero_set[1], self.zero_set[2]   # ศูนย์ในพิกัดงาน
+        self.align = {
+            'pivot': (cx, cy), 'z_ref': z1, 'lean': (kx, ky), 'slope': (gx, gy), 'yaw_rad': yaw_rad,
+            'top_z': a0, 'top_resid': resid, 'top_rep': max(zrep), 'span_depth2': span2,
+            'machine_lean': (kx + gx, ky + gy), 'depth2': s.depth2,
+        }
+        deg = math.degrees
+        top = ([f"   top surface: Z at the centre {a0:+.3f} (ball bottom; Z0 = {0:+.3f})  "
+                f"slope X {gx * 1000:+.2f} Y {gy * 1000:+.2f} µm/mm ({deg(math.atan(gx)):+.3f}°, {deg(math.atan(gy)):+.3f}°)"
+                f"  fit {resid:.3f}, repeat {max(zrep):.3f}",
+                f"   centre moves per mm deeper: X {-kx:+.4f}  Y {-ky:+.4f}  "
+                f"(Z−{s.depth:g} → Z−{s.depth2:g}; part tilt alone would give X {gx:+.4f} Y {gy:+.4f})",
+                f"   → machine Z lean ≈ X {-(kx + gx):+.4f}  Y {-(ky + gy):+.4f} mm/mm"] if rows else
+               ["   top surface: not touched (the probe does not trigger in Z) — top tilt / Z0 not measured",
+                f"   centre moves per mm deeper: X {-kx:+.4f}  Y {-ky:+.4f}  (Z−{s.depth:g} → Z−{s.depth2:g}; "
+                f"part tilt + machine Z lean together)"])
+        return [
+            "Lean / rotation (Feature 1):" if not rows else "Tilt / lean / rotation (Feature 1):",
+            *top,
+            f"   rotation about Z: {deg(yaw_rad):+.3f}°  (left wall, y ±{s.yaw_dy:g})",
+            f"   span at Z−{s.depth2:g}: X {span2[0]:.3f} Y {span2[1]:.3f}  (at Z−{s.depth:g}: X {self.result['X'][3]:.3f} "
+            f"Y {self.result['Y'][3]:.3f})",
+            "   Evaluation corrects the measured points with these (switch in the Evaluation tab)."
+            + ("  ⚠ the top is not flat at the touched points (fit > 0.05) — check them"
+               if resid is not None and resid > 0.05 else ""),
+        ]
 
     def _next(self):
         self._i += 1
@@ -313,6 +491,7 @@ class CentreRun:
 
     def _finish(self):
         s = self.s
+        align_lines = self._compute_align() if s.align else []   # v13 (ก่อน CSV — เพิ่มจุดแตะลง _extra)
         lines = [f"✔ X0 Y0 set at {_ZERO_TEXT[s.zero_mode]} — Z0 = top surface "
                  f"({'kept from before' if s.keep_zero else 'set at the start'}).",
                  f"   The ball is waiting at Z+{s.lift:g} above the centre."]
@@ -340,6 +519,7 @@ class CentreRun:
             lines.append(f"⚠ $1={idle:g}: motors switch off after every stop — the bent stylus can push "
                          f"the axis and it snaps 4 full steps (~0.4 mm). Set $1=255.")
         lines += self._repeat_lines()   # v07
+        lines += align_lines            # v13
         # v06: Effective Tip ⌀ จากขอบนอก — span ยาวกว่าชิ้นงานจริงเท่า ⌀ ลูกบอลที่ใช้งานจริง
         self.deff = {}
         for a in ("X", "Y"):
@@ -414,6 +594,9 @@ class CentreRun:
                     for j, p in enumerate(self._wall_touches(w)):
                         wr.writerow([f"{axis}{'+' if sign > 0 else '-'} ({name})", j,
                                      self.s.feed if j == 0 else self.s.rep_feed] + [f"{c:.3f}" for c in p])
+                for j, (label, p) in enumerate(self._extra):   # v13: ขั้นวัดเอียง
+                    wr.writerow([label, j % 2, self.s.rep_feed if label.startswith("top") or j % 2 else self.s.feed]
+                                + [f"{c:.3f}" for c in p])
             return path
         except Exception as e:
             print(f"[wall_zero] repeatability CSV not written: {e!r}")

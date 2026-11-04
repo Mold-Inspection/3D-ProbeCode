@@ -2,7 +2,11 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 22
+# VERSION: 24
+# CHANGE LOG (v23 -> v24): Feature 1 — ช่องติ๊ก "วัดเอียง / แกน Z เอียง / หมุน" ใน Work Zero (ค่าเริ่มต้นเปิด):
+#   ส่งจุดผิวบน (wall_zero.top_touch_points — ห่างจุดตรวจรูใน schema), ความลึกที่ 2 (+6 มม. ไม่เกินความหนา − 2)
+#   และ ±y ของการหาการหมุนให้ CentreSettings; ผล → app.part_alignment (Evaluation ใช้แปลงจุดวัด)
+# CHANGE LOG (v22 -> v23): Find centre ตั้ง $1=255 ให้เองก่อนรัน (ไม่ถาม — openbuilds_logger v06)
 # CHANGE LOG (v21 -> v22): Set up เก็บ Effective Tip ⌀ แยกแกน X / Y (probe_profile v08) — Evaluation
 #   ชดเชยผนังแนว X ด้วย D_X แนว Y ด้วย D_Y (X ≠ Y ไม่ต้องใช้ค่าเฉลี่ยแล้ว); ตั้งค่าเดียวเอง = ล้างค่าแยกแกน
 # CHANGE LOG (v20 -> v21): Find centre ถามตั้ง $1=255 ก่อนรันถ้า $1 ≠ 255 (openbuilds_logger v05)
@@ -117,7 +121,7 @@ from core import user_settings
 from core.models import set_floor_safety
 from core.work_zero import (WORK_ZERO_CHOICES, Z0_REF_CHOICES, label_of, mode_of_label, zero_hint_text,
                             z0_ref_label, z0_ref_of_label)
-from ui.wall_zero import CentreRun, CentreSettings
+from ui.wall_zero import CentreRun, CentreSettings, top_touch_points
 
 _DEFF_XY_TOL = 0.10     # v18: Effective Tip ⌀ X กับ Y ต่างกันเกินนี้ (มม.) → เตือนก่อนตั้งค่า — ปรับได้
 _DEFF_RERUN_TOL = 0.01   # v16: Effective Tip ⌀ เปลี่ยนเกินนี้ (มม.) → แนะนำรัน Set up ซ้ำ 1 ครั้ง — ปรับได้
@@ -371,6 +375,11 @@ class HardwareSettingDialog:
                 ent.insert(0, f"{float(value):g}")
             ent.pack(anchor="w")
             self._wall_entries[key] = ent
+        # v24: Feature 1 — วัดเอียง / แกน Z เอียง / หมุน หลังตั้ง X0 Y0
+        self._align_var = ctk.BooleanVar(value=bool(saved.get("align", True)))
+        ctk.CTkCheckBox(parent, text="Also measure Z-axis lean and rotation (+~3 min; top-surface tilt only "
+                                     "if the probe triggers in Z)",
+                        variable=self._align_var, font=ctk.CTkFont(size=11)).pack(anchor="w", pady=(0, 8))
         ctk.CTkButton(parent, text="↻ Part size from model", width=160, height=26,
                       fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                       font=ctk.CTkFont(size=11), command=self._fill_wall_size).pack(anchor="w", pady=(0, 8))
@@ -441,8 +450,7 @@ class HardwareSettingDialog:
             self.dialog.showwarning("OpenBuilds", "ยังไม่ได้เชื่อมต่อ OpenBuilds Control — เปิด OpenBuilds "
                                                   "และเชื่อมต่อเครื่องก่อน แล้วกดอีกครั้ง")
             return
-        if not logger.check_idle_delay(run_native=self.dialog.run_native):   # v21: $1 ≠ 255 → แกนดีด ~0.4 มม.
-            return
+        logger.ensure_idle_delay()   # v23: $1=255 ก่อนเคลื่อนที่ (ไม่ถาม) — $1 ≠ 255 แกนดีด ~0.4 มม.
         # v08: ขนาดชิ้นงานอ่านใหม่ทุกครั้งตามมุมมอง + มุม Rotation ปัจจุบัน (ช่องถูกกรอกตอนเปิดหน้านี้
         # ครั้งแรก — ถ้ากด Rotate ทีหลัง ค่าเดิมจะสลับแกน) — ไม่มีโมเดลก็ใช้ค่าที่พิมพ์เอง
         self._fill_wall_size(quiet=True)
@@ -477,6 +485,26 @@ class HardwareSettingDialog:
                     f"No = ยกเลิก — ถ้าต้องการตั้ง Z0 ใหม่ ให้ jog ลงจนก้นลูกบอลแตะผิวบนก่อนแล้วกดอีกครั้ง"):
                 return
             keep_zero = True
+        align = bool(self._align_var.get())   # v24: Feature 1
+        top_pts, depth2 = [], None
+        if align:
+            avoid = [(float(p['x']), float(p['y'])) for p in (getattr(app, 'loaded_expected_points', None) or [])
+                     if p.get('shape') != 'calib']
+            # แตะผิวบนแนว Z เฉพาะหัวที่ทริกแนว Z ได้ — ไม่งั้นลูกบอลกดผิวลงไป 2 มม. โดยไม่หยุด
+            top_pts = (top_touch_points(vals["width_x"], vals["length_y"], avoid, pp.tip_diameter / 2.0)
+                       if pp.z_trigger else [])
+            zs = getattr(app, 'current_z', None)
+            thick = float(max(zs) - min(zs)) if zs is not None and len(zs) else None
+            depth2 = vals["depth"] + 6.0
+            if thick:
+                depth2 = min(depth2, thick - 2.0)
+            if (pp.z_trigger and not top_pts) or depth2 <= vals["depth"] + 1.0:
+                if not self.dialog.askyesno(
+                        "Tilt / lean",
+                        "หาจุดแตะผิวบนที่ห่างรูตรวจ/ขอบชิ้นงานไม่ได้ หรือชิ้นงานบางเกินกว่าจะแตะผนังที่ความลึกที่ 2\n\n"
+                        "รัน Find centre โดยไม่วัดเอียงไหม?"):
+                    return
+                align, top_pts, depth2 = False, [], None
         st = CentreSettings(vals["width_x"], vals["length_y"], tip_d,
                             vals["gap"], vals["lift"], vals["depth"], vals["feed"],
                             true_x=true.get("X"), true_y=true.get("Y"),
@@ -484,12 +512,14 @@ class HardwareSettingDialog:
                             backoff=vals.get("backoff", 2.0),             # v19
                             rep_dwell=float(pp.retouch_dwell),            # v20
                             rep_feed=float(pp.retouch_feed), rep_back=float(pp.retouch_distance),
-                            zero_mode=self._setup_zero_mode(), keep_zero=keep_zero)   # v16
+                            zero_mode=self._setup_zero_mode(), keep_zero=keep_zero,   # v16
+                            align=align, top_pts=top_pts, depth2=depth2)                   # v24
         err = st.validate()
         if err:
             self.dialog.showerror("Invalid Input", err)
             return
-        user_settings.save_section("wall_zero", {k: vals[k] for k in ("gap", "lift", "depth", "feed", "repeats", "backoff")})
+        user_settings.save_section("wall_zero", dict({k: vals[k] for k in ("gap", "lift", "depth", "feed", "repeats",
+                                                                        "backoff")}, align=bool(self._align_var.get())))
         ox, oy = st.outside("X"), st.outside("Y")
         # v09: ขั้นแรกตั้ง Z0 ที่ตำแหน่งปัจจุบัน — ถ้าลูกบอลไม่ได้แตะผิวจริง จะลงไปแตะผนังที่ระดับขอบบน
         # (แรงดันลูกบอลขึ้น หัวโพรบด้านข้างไม่ทริก = ไถข้ามขอบ) จึงแสดง Z ปัจจุบันและเตือนถ้าไม่ใช่ Z0 เดิม
@@ -515,7 +545,12 @@ class HardwareSettingDialog:
                 f"ทำแบบเดียวกันที่ Y ±{oy:.1f} → ประเมินขนาดเทียบแบบ → กลับจุดเริ่ม (Z ยกไว้) → "
                 f"ไปกึ่งกลางที่วัดได้ → ตั้ง X0 Y0 ที่ {label_of(st.zero_mode)} (ค้างไว้เหนือกึ่งกลางที่ Z+{st.lift:g})\n"
                 + (f"แต่ละผนังแตะซ้ำ {st.repeats} ครั้งที่ F{st.rep_feed:g} (ถอย {st.rep_back:g} มม.) "
-                   f"เพื่อตรวจ repeatability\n" if st.repeats else "") + "\n" +
+                   f"เพื่อตรวจ repeatability\n" if st.repeats else "")
+                + (("วัดเอียง: " + (f"แตะผิวบนด้วย Z ที่ {', '.join(f'({x:+.1f},{y:+.1f})' for x, y in st.top_pts)} "
+                                     f"(G0 ถึง Z+3 แล้วลงช้า ต่ำกว่า Z0 ได้สูงสุด 2 มม.), " if st.top_pts else
+                                     "ไม่แตะผิวบน (หัวโพรบทริกแนว Z ไม่ได้), ")
+                    + f"แตะผนังนอกอีกรอบที่ Z−{st.depth2:g} (ลงข้างชิ้นงาน ห่างผนัง {st.gap:g} มม.), "
+                   f"ผนังซ้ายเพิ่ม 2 จุดที่ y ±{st.yaw_dy:g}\n") if st.align else "") + "\n" +
                 f"ต้องมีที่เดินจากจุดนี้อย่างน้อย X ±{ox + 5:.0f} และ Y ±{oy + 5:.0f} มม. "
                 f"(เครื่องไม่มี soft limit) และไม่มี clamp สูงเกิน Z+{st.lift:g} ตามทางที่ข้าม\n"
                 f"มือพร้อมกดปุ่ม Stop / e-stop — เริ่มเลยไหม?"):
@@ -569,7 +604,11 @@ class HardwareSettingDialog:
                 'eff_before': (self.app.setup_info['eff_before']   # รันซ้ำ: เทียบกับค่าก่อน Set up รอบแรก
                                if run.s.keep_zero and getattr(self.app, 'setup_info', None)
                                else self.app.probe_profile.effective_tip_diameter),
-                'eff_after': None, 'text': text}
+                'eff_after': None, 'text': text, 'align': getattr(run, 'align', None)}
+            # v24: Feature 1 — Evaluation แปลงจุดวัดด้วยค่านี้ (None = รอบนี้ไม่ได้วัด → ไม่ใช้ค่าเก่า)
+            al = getattr(run, 'align', None)
+            self.app.part_alignment = (dict(al, model=getattr(self.app, 'loaded_step_filepath', None),
+                                            time=self.app.centre_done['time']) if al else None)
         self._set_wall_status(("✔ " if ok else "⚠ ") + text, theme.OK_TEXT if ok else theme.WARN_TEXT)
         if ok and self._flow:   # v16: Set up ก่อนตรวจรู — ไปต่อหลังข้อความขึ้นแล้ว
             self.app.root.after(150, self._flow_after_centre)

@@ -15,7 +15,9 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 28
+# VERSION: 30
+# CHANGE LOG (v29 -> v30): ค่าเริ่มต้น evaluation_pretravel_travel = True (แบบจำลอง travel บนผนังเอียง)
+# CHANGE LOG (v28 -> v29): part_alignment (Feature 1 — จาก Set up) + evaluation_align (ค่าเริ่มต้นเปิด)
 # CHANGE LOG (v27 -> v28):
 #   โหลด effective_tip_dx / effective_tip_dy (Effective Tip แยกแกน) และ evaluation_tip_xy (ค่าเริ่มต้นปิด)
 # CHANGE LOG (v26 -> v27):
@@ -189,8 +191,12 @@ class UIManager:
         self.loaded_step_filepath  = None   # เต็ม path ของไฟล์ STEP ที่โหลดล่าสุด (None ถ้ายังไม่โหลด)
         self.evaluation_best_fit = bool(user_settings.get('evaluation_best_fit', False))   # v25
         self.evaluation_compensate = bool(user_settings.get('evaluation_compensate', True))   # v26
-        self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', False))   # v26
+        # v30: ค่าเริ่มต้น travel — หัวโพรบทริกแนว Z ไม่ได้ (ลูกบอลคงความสูง เครื่องเดินต่อตามทิศที่โพรบ) ทดสอบ
+        #      2026-11-04 รู sphere: |dev| 0.198 → 0.113 และผิดพลาดไม่โตตามความลึก
+        self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', True))   # v26 / v30
         self.evaluation_tip_xy = bool(user_settings.get('evaluation_tip_xy', False))   # v28: Effective Tip แยก X/Y
+        self.evaluation_align = bool(user_settings.get('evaluation_align', True))      # v29: Feature 1
+        self.part_alignment = None   # v29: ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up ล่าสุด
         self.job_gcode   = None   # v24: G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
         self.centre_done = None   # v24: {'model': path STEP, 'time': datetime} — Find centre สำเร็จล่าสุด
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel
