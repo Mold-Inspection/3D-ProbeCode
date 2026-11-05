@@ -2,7 +2,9 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 26
+# VERSION: 27
+# CHANGE LOG (v26 -> v27): Z offset ในผลลัพธ์ (core/evaluation_engine.py v15::estimate_z_offset) — ผิวบนจริงอยู่
+#   เหนือ/ใต้ Z0 กี่ มม. + bias ขนาดรู (รูโค้ง/sphere), หรือบอกว่าแยกไม่ได้ (taper มุมเดียว) / หาไม่ได้ (ผนังตรง)
 # CHANGE LOG (v25 -> v26): ทิ้ง job ค้างของ Find centre ก่อนส่ง G-code ตรวจรู (openbuilds_logger v07)
 # CHANGE LOG (v24 -> v25): Feature 1 — ส่ง app.part_alignment (วัดจาก Set up) เข้า evaluate_points เมื่อติ๊ก
 #   "Correct tilt / lean / rotation" (ค่าเริ่มต้นเปิด) และเป็นไฟล์ CAD เดียวกัน
@@ -460,7 +462,7 @@ class EvaluationLeftPanel:
             comp_text += self._calib_text(result)                  # v19
             depth_text, depth_warn = self._depth_status_text()   # v13
             shaft_text = self._shaft_risk_text()                   # v17
-            depth_text += shaft_text + self._best_fit_text()       # v18
+            depth_text += shaft_text + self._best_fit_text() + self._z_offset_text(result)   # v18 / v27
             depth_warn = depth_warn or bool(shaft_text)
             self.lbl_hole_rate.configure(
                 text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text
@@ -472,6 +474,24 @@ class EvaluationLeftPanel:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
+
+    @staticmethod
+    def _z_offset_text(result) -> str:
+        """v27: ผลของ estimate_z_offset() เป็นข้อความใต้ Results"""
+        z = result.get('z_offset')
+        if not z or not z.get('n'):
+            return ""
+        if not z.get('observable'):
+            return "\nZ offset: cannot be found — the probed walls are vertical"
+        if z.get('separable'):
+            dz, b = z['dz'], z['bias']
+            return (f"\nZ offset: real top surface is {abs(dz):.3f} mm {'above' if dz >= 0 else 'below'} Z0"
+                    f" (Z0 {'too low' if dz >= 0 else 'too high'} by {abs(dz):.3f})"
+                    f"\n  + hole reads {abs(b):.3f} mm {'small' if b >= 0 else 'large'} all round"
+                    f" (part size or tip compensation)")
+        return (f"\nZ offset ≈ {z['dz_only']:+.3f} mm only IF the hole is exactly CAD size"
+                f"\n  — one wall angle: Z and hole size cannot be told apart"
+                f" (0.01 mm size error = {0.01 * z['amp']:.3f} mm in Z)")
 
     @staticmethod
     def _calib_text(result) -> str:
@@ -807,6 +827,14 @@ class EvaluationLeftPanel:
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลไม่สำเร็จ:\n{e!r}")
             return False
+
+        try:   # v27: Z offset จากผนังรูที่เอียง/โค้ง (~50 ms)
+            from core.evaluation_engine import estimate_z_offset
+            result['z_offset'] = estimate_z_offset(expected_points, actual_points, tolerance,
+                                                   **evaluation_kwargs(app))
+        except Exception as e:
+            print(f"[evaluation_left_panel] Z offset failed: {e!r}")
+            result['z_offset'] = None
 
         result['log_filename']         = log_filename
         prev = getattr(app, 'evaluation_result', None) or {}   # v19: refresh ใช้ log เดิม

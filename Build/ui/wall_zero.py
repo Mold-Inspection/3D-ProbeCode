@@ -1,7 +1,13 @@
 # ==============================================================================
 # ui/wall_zero.py — หา X0 Y0 = กึ่งกลางชิ้นงาน (+ Z0 = ผิวบน) ด้วยการแตะผนังด้านนอก 4 ด้าน
 # ==============================================================================
-# VERSION: 13
+# VERSION: 14
+# CHANGE LOG (v13 -> v14): หา Z0 (ผิวบนจริง) จากขอบบนด้วยการแตะด้านข้าง — ไม่ต้องทริกแนว Z (CentreSettings.edge_z)
+#   ต่อผนังนอกทั้ง 4: แตะหน้าผนังที่ Z−2 (อ้างอิง f) แล้วแตะด้านข้าง G38.3 (ไม่ทริก = ไม่ ALARM) ที่ความสูง
+#   ก้นลูกบอล b ไล่ขึ้นทีละ edge_step ใกล้ผิวบน — ศูนย์กลางลูกบอลอยู่เหนือผิวบน u = b + R − t (0 < u < R)
+#   ลูกบอลชนมุมขอบช้ากว่าหน้าผนัง Δ = R − √(R² − u²) (pretravel ทิศเดียวกันหักล้าง) ⇒ t = b + R − √(R² − (R−Δ)²)
+#   ใช้จุดที่ Δ ∈ [_EDGE_DMIN, _EDGE_DMAX] → self.edge = {'top': มัธยฐาน t, 'walls': ..., ...} — แสดงผลเท่านั้น
+#   ไม่เปลี่ยน Z0 เอง; เดินเลยหน้าผนังได้สูงสุด _EDGE_PAST มม. (กันไถขอบ)
 # CHANGE LOG (v12 -> v13): Feature 1 — วัดเอียง / แกน Z เอียง / หมุน หลังตั้ง X0 Y0 (CentreSettings.align):
 #   (ก) แตะผิวบนด้วย G38.2 Z 4 จุด (2 ครั้ง/จุด) → ระนาบผิวบน z = a + gx·dx + gy·dy (a = Z ที่ทริกเหนือศูนย์)
 #   (ข) แตะผนังนอก 4 ด้านอีกครั้งที่ความลึกที่ 2 → ศูนย์เลื่อนต่อความลึก k = Δศูนย์ / Δz (รวมชิ้นงานเอียง +
@@ -96,7 +102,8 @@ class CentreSettings:
                  repeats: int = 0, rep_feed: float = 20.0, rep_back: float = 1.0,
                  zero_mode: str = "center", keep_zero: bool = False, backoff: float = _BACKOFF,
                  rep_dwell: float = 0.0, align: bool = False, top_pts=(), depth2: float = None,
-                 yaw_dy: float = None):
+                 yaw_dy: float = None, edge_z: bool = False, ball_r: float = 1.0, edge_lo: float = -1.05,
+                 edge_hi: float = 1.20, edge_step: float = 0.15):
         # tip_d = ⌀ ลูกบอลที่ใช้หักออกจากระยะที่วัด (Effective Tip ⌀ ถ้า calibrate แล้ว)
         self.width, self.length, self.tip_d = float(width), float(length), float(tip_d)
         # v06: ขนาดจริงที่วัดด้วยเวอร์เนียร์ (None = ไม่ calibrate) — ใช้หา Effective Tip ⌀
@@ -115,6 +122,10 @@ class CentreSettings:
         self.top_pts = [(float(x), float(y)) for x, y in top_pts]
         self.depth2 = float(depth2) if depth2 else self.depth + 6.0
         self.yaw_dy = float(yaw_dy) if yaw_dy else 0.3 * self.length
+        # v14: หา Z0 จากขอบบน — ความสูงก้นลูกบอล (Z งาน) ที่แตะด้านข้าง, รัศมีลูกบอลจริง
+        self.edge_z, self.ball_r = bool(edge_z), float(ball_r)
+        n = max(2, int(round((float(edge_hi) - float(edge_lo)) / float(edge_step))) + 1)
+        self.edge_heights = [round(float(edge_lo) + k * float(edge_step), 4) for k in range(n)]
 
     @property
     def per_wall(self) -> int:
@@ -147,6 +158,10 @@ class CentreSettings:
 
 _Z_START = 3.0    # v13: G0 ลงถึงเหนือ Z0 เท่านี้ แล้วค่อย G38.2 ช้า ๆ (เดิม 1.0 — G0 ลงใกล้ผิวเกินไป ผู้ใช้กด Stop)
 _Z_OVER = 2.0     # v13: G38.2 Z ลงต่ำกว่า Z0 ได้สูงสุดเท่านี้ (ไม่ทริก = ALARM หยุดเอง)
+_EDGE_FACE_Z = -2.0   # v14: แตะหน้าผนังอ้างอิงที่ Z นี้ (ก้นลูกบอล, ต่ำกว่าผิวบนพอ)
+_EDGE_BACK = 1.2      # v14: ถอยจากจุดทริกหน้าผนังก่อนแตะแต่ละความสูง (ผิวลูกบอลห่างผนัง ~0.6)
+_EDGE_PAST = 1.0      # v14: G38.3 เดินเลยจุดทริกหน้าผนังได้สูงสุด (มม.) — ไม่ทริก = ลอยเหนือผิวบน/หยุด
+_EDGE_DMIN, _EDGE_DMAX = 0.08, 0.50   # v14: Δ ที่ใช้คำนวณ (เล็กไป = ไวต่อ noise, ใหญ่ไป = แรงชี้ขึ้น ทริกช้า)
 
 
 def top_touch_points(width: float, length: float, avoid=(), ball_r: float = 1.0):
@@ -228,6 +243,8 @@ class CentreRun:
         self._sent_at = 0.0
         self._deadline = 0.0
         self.align, self._extra = None, []   # v13
+        self.edge, self._edge_now, self._edge_rec, self._edge_face_idx = None, None, [], {}   # v14
+        self._edge_face_at = 0
 
     # ------------------------------------------------------------------
     def start(self):
@@ -258,14 +275,24 @@ class CentreRun:
             self._steps += [
                 (f"Lean: walls again at Z−{s.depth2:g}", self._deep_gcode, 8),
                 ("Rotation: 2 more touches on the left wall", self._yaw_gcode, 4),
-                ("Back above the centre", lambda: f"G90\nG0 Z{s.lift:.3f}\n"
-                                                  + _xy53(self.result['X'][2], self.result['Y'][2]), 0),
             ]
+        if s.edge_z:   # v14: Z0 จากขอบบน — หลังวัดเอียง (จุดแตะต่อท้าย self.prb ไม่กระทบลำดับของขั้นก่อนหน้า)
+            for j, (axis, sign, name) in enumerate(_WALLS):
+                self._steps += [
+                    (f"Z0 edge: {name} wall face at Z{_EDGE_FACE_Z:g}", lambda j=j: self._edge_face_gcode(j), 2),
+                    (f"Z0 edge: {name} top edge ({len(s.edge_heights)} side touches)",
+                     lambda j=j: self._edge_gcode(j), len(s.edge_heights)),
+                ]
+        if s.align or s.edge_z:
+            self._steps += [("Back above the centre", lambda: f"G90\nG0 Z{s.lift:.3f}\n"
+                                                              + _xy53(self.result['X'][2], self.result['Y'][2]), 0)]
         self.active, self.prb, self.result, self._i = True, [], {}, -1
+        self.edge, self._edge_now, self._edge_rec, self._edge_face_idx = None, None, [], {}   # v14
         self.deff = {}   # v06
         self.steps_mm = {}
         self.rep = {}    # v07
-        timeout = _TIMEOUT_S + 60.0 * s.repeats + (420.0 if s.align else 0.0)   # แตะซ้ำ / วัดเอียงใช้เวลาเพิ่ม
+        timeout = (_TIMEOUT_S + 60.0 * s.repeats + (420.0 if s.align else 0.0)   # แตะซ้ำ / วัดเอียงใช้เวลาเพิ่ม
+                   + (4 * (40.0 + 12.0 * len(s.edge_heights)) if s.edge_z else 0.0))   # v14
         self.align = None   # v13
         self._extra = []    # v13: (ป้าย, จุดแตะ) ของขั้นวัดเอียง — ลง CSV
         self._deadline = time.monotonic() + timeout
@@ -343,6 +370,84 @@ class CentreRun:
             out += ["G90", f"G0 Z{s.lift:.3f}", _xy53(mx - s.outside("X"), my + sy * s.yaw_dy),
                     f"G0 Z{-s.depth:.3f}"] + _touch_lines("X", -1, s)
         return "\n".join(out + [f"G0 Z{s.lift:.3f}"])
+
+    # ------------------------------------------------------------------
+    # v14: Z0 จากขอบบน (แตะด้านข้าง — ไม่ต้องทริกแนว Z)
+    # ------------------------------------------------------------------
+    def _edge_xy(self, j: int):
+        s, (mx, my) = self.s, self._centre_m()
+        axis, sign, _n = _WALLS[j]
+        return (mx + (sign * s.outside("X") if axis == "X" else 0.0),
+                my + (sign * s.outside("Y") if axis == "Y" else 0.0))
+
+    def _edge_face_gcode(self, j: int) -> str:
+        """หน้าผนัง j ที่ Z−2: แตะเร็ว + แตะช้า (ค่าอ้างอิง f) — จบที่ถอยออก backoff ความสูงเดิม"""
+        s = self.s
+        axis, sign, _n = _WALLS[j]
+        self._edge_now = None
+        self._edge_face_at = len(self.prb)
+        self._edge_face_idx[j] = self._edge_face_at
+        return "\n".join(["G90", f"G0 Z{s.lift:.3f}", _xy53(*self._edge_xy(j)), f"G0 Z{_EDGE_FACE_Z:.3f}"]
+                         + _touch_lines(axis, sign, s))
+
+    def _edge_gcode(self, j: int) -> str:
+        """แตะด้านข้างที่ความสูงไล่ขึ้น (G38.3) — ถอยไปจุดเดิม (G53) ก่อนแต่ละครั้ง แล้วยกขึ้นข้างผนัง"""
+        s = self.s
+        axis, sign, _n = _WALLS[j]
+        i = 0 if axis == "X" else 1
+        f = self.prb[self._edge_face_at + 1][i]   # แตะช้า
+        back = f + sign * _EDGE_BACK
+        self._edge_now = (j, f, list(s.edge_heights))
+        mx, my = self._centre_m()
+        xy = (lambda v: _xy53(v, my)) if axis == "X" else (lambda v: _xy53(mx, v))
+        out = []
+        for b in s.edge_heights:
+            out += [xy(back), f"G0 Z{b:.3f}", "G91",
+                    f"G38.3 {axis}{-sign * (_EDGE_BACK + _EDGE_PAST):.3f} F{s.rep_feed:.0f}", "G90"]
+        return "\n".join(out + [xy(back), f"G0 Z{s.lift:.3f}"])
+
+    def _compute_edge(self) -> list:
+        """Δ ของแต่ละความสูง → t (Z งานของผิวบนจริง เทียบ Z0) ต่อผนังและรวม"""
+        import math
+        s, R = self.s, self.s.ball_r
+        per, used = {}, []
+        for j, f, b, p, ok in self._edge_rec:
+            axis, sign, name = _WALLS[j]
+            i = 0 if axis == "X" else 1
+            d = (p[i] - f) * -sign   # เดินเลยจุดทริกหน้าผนังเข้าหาชิ้นงานเท่าไหร่
+            tag = f"edge {axis}{'+' if sign > 0 else '-'} b{b:+.2f} " + ("hit" if ok else "miss")
+            self._extra.append((tag, p, s.rep_feed))
+            if ok and _EDGE_DMIN <= d <= _EDGE_DMAX:
+                t = b + R - math.sqrt(max(0.0, R * R - (R - d) ** 2))
+                per.setdefault(f"{axis}{'+' if sign > 0 else '-'}", []).append(t)
+                used.append((j, b, d, t))
+        if not used:
+            hits = [(b, round((p[0 if _WALLS[j][0] == 'X' else 1] - f) * -_WALLS[j][1], 3))
+                    for j, f, b, p, ok in self._edge_rec if ok]
+            self.edge = {'top': None, 'walls': {}, 'n': 0}
+            return ["Z0 from the top edges: ⚠ no usable side touch (Δ outside "
+                    f"{_EDGE_DMIN:g}–{_EDGE_DMAX:g}) — Z0 may be off by more than the scanned range "
+                    f"Z{s.edge_heights[0]:+g}…{s.edge_heights[-1]:+g}; hits (b, Δ): {hits[:12]}"]
+        med = lambda v: sorted(v)[len(v) // 2] if len(v) % 2 else 0.5 * (sorted(v)[len(v) // 2 - 1] + sorted(v)[len(v) // 2])
+        walls = {k: med(v) for k, v in per.items()}
+        top = med([u[3] for u in used])
+        spread = max(u[3] for u in used) - min(u[3] for u in used)
+        slope = {}
+        if 'X-' in walls and 'X+' in walls:
+            slope['X'] = (walls['X+'] - walls['X-']) / max(1e-6, self.result['X'][3])
+        if 'Y-' in walls and 'Y+' in walls:
+            slope['Y'] = (walls['Y+'] - walls['Y-']) / max(1e-6, self.result['Y'][3])
+        self.edge = {'top': top, 'walls': walls, 'n': len(used), 'spread': spread, 'slope': slope,
+                     'touches': used, 'ball_r': R, 'lift': s.lift}
+        return [
+            f"Z0 from the top edges (side touches, ball R {R:g}): real top surface at Z {top:+.3f}  "
+            f"({len(used)} touches, spread {spread:.3f})",
+            "   per wall: " + "  ".join(f"{k} {v:+.3f}" for k, v in walls.items())
+            + ("   slope " + "  ".join(f"{a} {g * 1000:+.1f} µm/mm" for a, g in slope.items()) if slope else ""),
+            (f"   → Z0 is {abs(top):.3f} mm {'BELOW' if top > 0 else 'ABOVE'} the real top. To fix it with the ball "
+             f"where it is now (Z+{s.lift:g}): G10 L20 P{_COORD_P.get(self.coord, 1)} Z{s.lift - top:.3f}"
+             if abs(top) >= 0.01 else "   → Z0 matches the real top (within 0.01 mm)"),
+        ]
 
     def _compute_align(self) -> list:
         """v13: ระนาบผิวบน, ศูนย์เลื่อนต่อความลึก, มุมหมุน → self.align + ข้อความสรุป"""
@@ -470,10 +575,18 @@ class CentreRun:
                 self.steps_mm[int(mm.group(1))] = float(mm.group(2))
             m = _PRB.search(resp)
             if m:
+                p = tuple(float(m.group(k)) for k in (1, 2, 3))
+                if self._edge_now is not None:   # v14: แตะด้านข้างขอบบน (G38.3) — ไม่ทริกได้
+                    j, f, hs = self._edge_now
+                    k = sum(1 for r in self._edge_rec if r[0] == j)
+                    if k < len(hs):
+                        self._edge_rec.append((j, f, hs[k], p, m.group(4) == "1"))
+                    self.prb.append(p)
+                    return
                 if m.group(4) != "1":
                     self._fail("a probe move ended without touching a wall")
                     return
-                self.prb.append(tuple(float(m.group(k)) for k in (1, 2, 3)))
+                self.prb.append(p)
 
     def _fail(self, why: str):
         try:
@@ -492,6 +605,13 @@ class CentreRun:
     def _finish(self):
         s = self.s
         align_lines = self._compute_align() if s.align else []   # v13 (ก่อน CSV — เพิ่มจุดแตะลง _extra)
+        self._edge_now = None
+        if s.edge_z:   # v14: ก่อน CSV เช่นกัน
+            face = [(f"edge {a}{'+' if g > 0 else '-'} face", self.prb[self._edge_face_idx[j] + k],
+                     self.s.feed if k == 0 else self.s.rep_feed)
+                    for j, (a, g, _n) in enumerate(_WALLS) if j in self._edge_face_idx for k in (0, 1)]
+            self._extra += face
+            align_lines = align_lines + self._compute_edge()
         lines = [f"✔ X0 Y0 set at {_ZERO_TEXT[s.zero_mode]} — Z0 = top surface "
                  f"({'kept from before' if s.keep_zero else 'set at the start'}).",
                  f"   The ball is waiting at Z+{s.lift:g} above the centre."]
@@ -594,9 +714,11 @@ class CentreRun:
                     for j, p in enumerate(self._wall_touches(w)):
                         wr.writerow([f"{axis}{'+' if sign > 0 else '-'} ({name})", j,
                                      self.s.feed if j == 0 else self.s.rep_feed] + [f"{c:.3f}" for c in p])
-                for j, (label, p) in enumerate(self._extra):   # v13: ขั้นวัดเอียง
-                    wr.writerow([label, j % 2, self.s.rep_feed if label.startswith("top") or j % 2 else self.s.feed]
-                                + [f"{c:.3f}" for c in p])
+                for j, item in enumerate(self._extra):   # v13: ขั้นวัดเอียง / v14: ขอบบน (label, p, feed)
+                    label, p = item[0], item[1]
+                    feed = item[2] if len(item) > 2 else (
+                        self.s.rep_feed if label.startswith("top") or j % 2 else self.s.feed)
+                    wr.writerow([label, j % 2, feed] + [f"{c:.3f}" for c in p])
             return path
         except Exception as e:
             print(f"[wall_zero] repeatability CSV not written: {e!r}")

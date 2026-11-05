@@ -2,7 +2,9 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 24
+# VERSION: 25
+# CHANGE LOG (v24 -> v25): ช่องติ๊ก "หา Z0 จากขอบบน (แตะด้านข้าง)" (ui/wall_zero.py v14, ค่าเริ่มต้นปิด) —
+#   ผล → app.edge_top / setup_info['edge'] (แสดงเท่านั้น ไม่เปลี่ยน Z0)
 # CHANGE LOG (v23 -> v24): Feature 1 — ช่องติ๊ก "วัดเอียง / แกน Z เอียง / หมุน" ใน Work Zero (ค่าเริ่มต้นเปิด):
 #   ส่งจุดผิวบน (wall_zero.top_touch_points — ห่างจุดตรวจรูใน schema), ความลึกที่ 2 (+6 มม. ไม่เกินความหนา − 2)
 #   และ ±y ของการหาการหมุนให้ CentreSettings; ผล → app.part_alignment (Evaluation ใช้แปลงจุดวัด)
@@ -379,7 +381,12 @@ class HardwareSettingDialog:
         self._align_var = ctk.BooleanVar(value=bool(saved.get("align", True)))
         ctk.CTkCheckBox(parent, text="Also measure Z-axis lean and rotation (+~3 min; top-surface tilt only "
                                      "if the probe triggers in Z)",
-                        variable=self._align_var, font=ctk.CTkFont(size=11)).pack(anchor="w", pady=(0, 8))
+                        variable=self._align_var, font=ctk.CTkFont(size=11)).pack(anchor="w", pady=(0, 4))
+        # v25: Z0 จากขอบบนด้วยการแตะด้านข้าง (ui/wall_zero.py v14) — หัวที่ทริกแนว Z ไม่ได้ก็ใช้ได้
+        self._edge_var = ctk.BooleanVar(value=bool(saved.get("edge_z", False)))
+        ctk.CTkCheckBox(parent, text="Also find the real top surface (Z0) from the top edges — side touches "
+                                     "only (+~5 min, shows the Z0 error, does not change Z0)",
+                        variable=self._edge_var, font=ctk.CTkFont(size=11)).pack(anchor="w", pady=(0, 8))
         ctk.CTkButton(parent, text="↻ Part size from model", width=160, height=26,
                       fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
                       font=ctk.CTkFont(size=11), command=self._fill_wall_size).pack(anchor="w", pady=(0, 8))
@@ -513,13 +520,15 @@ class HardwareSettingDialog:
                             rep_dwell=float(pp.retouch_dwell),            # v20
                             rep_feed=float(pp.retouch_feed), rep_back=float(pp.retouch_distance),
                             zero_mode=self._setup_zero_mode(), keep_zero=keep_zero,   # v16
-                            align=align, top_pts=top_pts, depth2=depth2)                   # v24
+                            align=align, top_pts=top_pts, depth2=depth2,                   # v24
+                            edge_z=bool(self._edge_var.get()), ball_r=pp.tip_diameter / 2.0)   # v25
         err = st.validate()
         if err:
             self.dialog.showerror("Invalid Input", err)
             return
         user_settings.save_section("wall_zero", dict({k: vals[k] for k in ("gap", "lift", "depth", "feed", "repeats",
-                                                                        "backoff")}, align=bool(self._align_var.get())))
+                                                                        "backoff")}, align=bool(self._align_var.get()),
+                                                       edge_z=bool(self._edge_var.get())))   # v25
         ox, oy = st.outside("X"), st.outside("Y")
         # v09: ขั้นแรกตั้ง Z0 ที่ตำแหน่งปัจจุบัน — ถ้าลูกบอลไม่ได้แตะผิวจริง จะลงไปแตะผนังที่ระดับขอบบน
         # (แรงดันลูกบอลขึ้น หัวโพรบด้านข้างไม่ทริก = ไถข้ามขอบ) จึงแสดง Z ปัจจุบันและเตือนถ้าไม่ใช่ Z0 เดิม
@@ -550,7 +559,10 @@ class HardwareSettingDialog:
                                      f"(G0 ถึง Z+3 แล้วลงช้า ต่ำกว่า Z0 ได้สูงสุด 2 มม.), " if st.top_pts else
                                      "ไม่แตะผิวบน (หัวโพรบทริกแนว Z ไม่ได้), ")
                     + f"แตะผนังนอกอีกรอบที่ Z−{st.depth2:g} (ลงข้างชิ้นงาน ห่างผนัง {st.gap:g} มม.), "
-                   f"ผนังซ้ายเพิ่ม 2 จุดที่ y ±{st.yaw_dy:g}\n") if st.align else "") + "\n" +
+                   f"ผนังซ้ายเพิ่ม 2 จุดที่ y ±{st.yaw_dy:g}\n") if st.align else "")
+                + (f"หา Z0 จากขอบบน: ทุกผนัง แตะหน้าผนังที่ Z−2 แล้วแตะด้านข้างที่ Z {st.edge_heights[0]:+g} … "
+                   f"{st.edge_heights[-1]:+g} (ไล่ขึ้น {len(st.edge_heights)} ระดับ, G38.3 เลยหน้าผนังได้สูงสุด 1 มม.) "
+                   f"— ไม่เปลี่ยน Z0 เอง\n" if st.edge_z else "") + "\n" +
                 f"ต้องมีที่เดินจากจุดนี้อย่างน้อย X ±{ox + 5:.0f} และ Y ±{oy + 5:.0f} มม. "
                 f"(เครื่องไม่มี soft limit) และไม่มี clamp สูงเกิน Z+{st.lift:g} ตามทางที่ข้าม\n"
                 f"มือพร้อมกดปุ่ม Stop / e-stop — เริ่มเลยไหม?"):
@@ -604,7 +616,9 @@ class HardwareSettingDialog:
                 'eff_before': (self.app.setup_info['eff_before']   # รันซ้ำ: เทียบกับค่าก่อน Set up รอบแรก
                                if run.s.keep_zero and getattr(self.app, 'setup_info', None)
                                else self.app.probe_profile.effective_tip_diameter),
-                'eff_after': None, 'text': text, 'align': getattr(run, 'align', None)}
+                'eff_after': None, 'text': text, 'align': getattr(run, 'align', None),
+                'edge': getattr(run, 'edge', None)}   # v25
+            self.app.edge_top = getattr(run, 'edge', None)   # v25: Z0 จากขอบบน (None = ไม่ได้วัด)
             # v24: Feature 1 — Evaluation แปลงจุดวัดด้วยค่านี้ (None = รอบนี้ไม่ได้วัด → ไม่ใช้ค่าเก่า)
             al = getattr(run, 'align', None)
             self.app.part_alignment = (dict(al, model=getattr(self.app, 'loaded_step_filepath', None),
