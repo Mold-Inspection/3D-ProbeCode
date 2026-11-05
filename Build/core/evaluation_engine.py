@@ -4,7 +4,10 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 14
+# VERSION: 15
+# CHANGE LOG (v14 -> v15): estimate_z_offset() — หา Z offset (ผิวบนจริงอยู่เหนือ Z0 ที่ตั้งกี่ มม.) จากผนังรู
+#   ที่เอียง/โค้ง: เลื่อน z ของจุดวัดหา dz ที่ RMS ของ dev น้อยสุด (Gauss-Newton) + บอกความไว
+#   (ผนังตรงหาไม่ได้) และตัวขยาย tip-radius error → Z error (ผนังเอียงมุมเดียว เช่น taper แยกไม่ได้)
 # CHANGE LOG (v13 -> v14): Feature 1 — align (จาก Set up, ui/wall_zero.py v13): แปลงจุดวัด (PRB − WCO) เข้า
 #   พิกัดชิ้นงานก่อนประเมิน: หักศูนย์เลื่อนตามความลึก x − kx·(z − z_ref), หมุนกลับรอบศูนย์ −yaw,
 #   z − (gx·dx + gy·dy) (ผิวบนเอียง) — จุดที่ไม่อยู่บนเส้นทางโพรบแล้ว: dev += m·off (off = ส่วนที่ตั้งฉาก n)
@@ -710,6 +713,76 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         'settings_mismatch':  [],   # เติมทีหลังโดยผู้เรียก (diff_snapshots())
         'holes':              holes_out,
     }
+
+
+def _all_devs(result: dict):
+    pts = [p for h in result.get('holes', {}).values() for s in h.get('segments', [])
+           for l in s.get('layers', []) for p in l.get('points', [])]
+    return np.array([float(p['dev']) for p in pts if p.get('dev') is not None], dtype=float)
+
+
+def estimate_z_offset(expected_points: list, actual_points: list, tolerance_mm: float, **kw) -> dict:
+    """v15: Z offset = ผิวบนจริงอยู่เหนือ Z0 ที่ตั้งไว้กี่ มม. (+ = Z0 ต่ำไป ลูกบอลลงลึกกว่าที่ตั้งใจ)
+    เลื่อน z ของจุดวัด −dz; ความไวต่อจุด s = ∂dev/∂dz (≈ m_z ของผิว ณ จุดแตะ)
+      - ผนังตรง (s ≈ 0)                     → หาไม่ได้ (observable False)
+      - s ต่างกันตามความลึก (sphere, โค้ง)  → ฟิต dz + bias ขนาดรูคงที่ c พร้อมกัน (separable True)
+        dev ≈ dev0 + s·dz + c — แยกได้ว่า Z0 ผิด หรือรูเล็ก/ใหญ่ทั้งรู (ชิ้นงานจริง / การชดเชยหัวโพรบ)
+      - s เท่ากันทุกจุด (taper มุมเดียว)    → dz กับ c แยกกันไม่ได้: คืน dz_only ที่สมมติว่ารูตรง CAD
+        พอดี — ขนาดรูผิด ε (ตามแนวตั้งฉากผิว) ⇒ Z ผิด ε / s̄ (amp)
+    dz_only = ฟิต Z อย่างเดียว (เหมือนรายงาน 4 พ.ย.) เก็บไว้เทียบ"""
+    if kw.get('align') is None:   # จุดแตะแนวนอนไม่สนใจ z — ต้องมี off-term (dev += m·off) ถึงเห็นการเลื่อน Z
+        kw = dict(kw, align=dict(pivot=(0.0, 0.0), z_ref=0.0, lean=(0.0, 0.0), slope=(0.0, 0.0), yaw_rad=0.0))
+
+    def devs(dz):
+        act = [dict(a, z=float(a['z']) - dz) for a in actual_points]
+        return _all_devs(evaluate_points(expected_points, act, tolerance_mm, **kw))
+
+    f0 = devs(0.0)
+    out = dict(dz=None, dz_only=None, bias=None, n=int(len(f0)), observable=False, separable=False, amp=None,
+               rms0=float(np.sqrt(np.mean(f0 ** 2))) if len(f0) else None,
+               mean0=float(np.mean(np.abs(f0))) if len(f0) else None)
+    if len(f0) < 3:
+        return out
+    h = 0.05
+    fp, fm = devs(h), devs(-h)
+    if len(fp) != len(f0) or len(fm) != len(f0):
+        return out
+    sens = (fp - fm) / (2 * h)
+    sbar = float(np.mean(np.abs(sens)))
+    cv = float(np.std(sens) / sbar) if sbar > 1e-9 else 0.0
+    out.update(sens_mean=sbar, sens_cv=cv)
+    if sbar < 0.05:   # ผนังตรง — การเลื่อน Z ไม่เปลี่ยน dev
+        return out
+    sep = cv > 0.15
+
+    def solve(joint):
+        A = np.c_[sens, np.ones(len(sens))] if joint else sens[:, None]
+        dz, f = 0.0, f0
+        for _ in range(6):
+            x, *_ = np.linalg.lstsq(A, -f, rcond=None)
+            dz += float(x[0])
+            f = devs(dz)
+            if len(f) != len(f0):
+                return None, None, None
+            if abs(x[0]) < 0.0005:
+                break
+        c = -float(np.mean(f)) if joint else 0.0   # bias ขนาดรู (+ = รูเล็กกว่า CAD ตามแนวตั้งฉากผิว)
+        return dz, c, (f - np.mean(f)) if joint else f   # residual หลังฟิต
+
+    dz1, _c, f1 = solve(False)
+    if dz1 is None:
+        return out
+    out.update(dz_only=float(dz1), observable=True, separable=sep, amp=1.0 / sbar)
+    if sep:
+        dz, c, fr = solve(True)
+        if dz is None:
+            return out
+        out.update(dz=float(dz), bias=float(c), rms1=float(np.sqrt(np.mean(fr ** 2))))
+    else:
+        out.update(dz=float(dz1), rms1=float(np.sqrt(np.mean(f1 ** 2))))
+    out.update(mean1=float(np.mean(np.abs(f1))), max1=float(np.max(np.abs(f1))),
+               passed1=int(np.sum(np.abs(f1) <= tolerance_mm)))   # หลังชดเชย Z อย่างเดียว (ค่าที่จะเห็นจริง)
+    return out
 
 
 def export_results_csv(result: dict, filepath: str) -> None:
