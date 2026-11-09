@@ -1,7 +1,8 @@
 # ==============================================================================
 # core/probe_profile.py — ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
 # ==============================================================================
-# VERSION: 08
+# VERSION: 09
+# CHANGE LOG (v08 -> v09): effective_tip_xy_date — วันที่ตั้ง Effective Tip แยกแกน ("" = ไม่ทราบ)
 # CHANGE LOG (v07 -> v08): effective_tip_dx / effective_tip_dy — Effective Tip ⌀ แยกแกนจาก Set up
 #   (0 = ไม่มี ใช้ effective_tip_diameter ทุกทิศ) และ effective_tip_radius_xy
 # CHANGE LOG (v06 -> v07):
@@ -62,6 +63,7 @@ class ProbeProfile:
     # v08: แยกแกน X / Y จากผนังนอกตอน Set up — หัวโพรบ kinematic ทริกไม่เท่ากันแต่ละทิศ (0 = ไม่มี)
     effective_tip_dx: float = 0.0   # mm
     effective_tip_dy: float = 0.0   # mm
+    effective_tip_xy_date: str = ""   # v09: YYYY-MM-DD ที่ตั้งค่าแยกแกนจาก Set up ("" = ไม่ทราบ)
     # v03: ระยะว่างขั้นต่ำระหว่างลูกบอลกับพื้น/ขั้นที่อยู่ใต้ชั้นวัดที่ลึกที่สุด — ชั้นจะถูกยกขึ้นให้เอง
     floor_clearance: float = 1.0   # mm
     # v03: หัวโพรบทริกเมื่อถูกดันขึ้นตรง ๆ (แนว Z) ได้ไหม — ปิด = ไม่มีคำสั่งแตะพื้นใน G-code เลย

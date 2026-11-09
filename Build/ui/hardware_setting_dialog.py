@@ -2,7 +2,8 @@
 # ui/hardware_setting_dialog.py — "Hardware Setting" floating dialog (Probe
 # Stylus + Machine Working Area), built on ui/settings_dialog_base.py
 # ==============================================================================
-# VERSION: 25
+# VERSION: 26
+# CHANGE LOG (v25 -> v26): บันทึกวันที่ตั้ง Effective Tip แยกแกน (effective_tip_xy_date) — แสดงในผลประเมิน
 # CHANGE LOG (v24 -> v25): ช่องติ๊ก "หา Z0 จากขอบบน (แตะด้านข้าง)" (ui/wall_zero.py v14, ค่าเริ่มต้นปิด) —
 #   ผล → app.edge_top / setup_info['edge'] (แสดงเท่านั้น ไม่เปลี่ยน Z0)
 # CHANGE LOG (v23 -> v24): Feature 1 — ช่องติ๊ก "วัดเอียง / แกน Z เอียง / หมุน" ใน Work Zero (ค่าเริ่มต้นเปิด):
@@ -713,6 +714,7 @@ class HardwareSettingDialog:
         pp = self.app.probe_profile
         pp.effective_tip_diameter = d
         pp.effective_tip_dx, pp.effective_tip_dy = (round(xy[0], 3), round(xy[1], 3)) if xy else (0.0, 0.0)
+        pp.effective_tip_xy_date = datetime.date.today().isoformat() if xy else ""   # v26
         if self._probe_eff_entry is not None:
             try:
                 self._probe_eff_entry.delete(0, "end")
@@ -1008,6 +1010,7 @@ class HardwareSettingDialog:
             "wall_clearance": p.wall_clearance,
             "effective_tip_diameter": p.effective_tip_diameter,
             "effective_tip_dx": p.effective_tip_dx, "effective_tip_dy": p.effective_tip_dy,   # v22
+            "effective_tip_xy_date": p.effective_tip_xy_date,   # v26
             "floor_clearance": p.floor_clearance, "z_trigger": bool(p.z_trigger),   # v04
             "double_touch": bool(p.double_touch), "retouch_distance": p.retouch_distance,   # v11
             "retouch_feed": p.retouch_feed,

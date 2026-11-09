@@ -1,7 +1,11 @@
 # ==============================================================================
 # ui/tabs/evaluation_tab.py — แท็บ "Evaluation" (เทียบผลตรวจจริงจาก .log กับรูที่คาดหวัง)
 # ==============================================================================
-# VERSION: 02
+# VERSION: 03
+# CHANGE LOG (v02 -> v03):
+#   FEATURE (Feature 2): กราฟกลางเป็น 3D แทน heat map 2D — CAD wireframe (≤ MAX_TRIS_3D สามเหลี่ยม) + วงผนัง CAD
+#   ทุกชั้นที่ตรวจ + จุดที่วัดได้ (เขียว/แดง) เลื่อนจากจุด CAD ตามระยะเบี่ยงจริง × k (ขยายให้เห็น บอกค่า k บนกราฟ)
+#   + เส้นรอบรูปที่วัดได้ของแต่ละชั้น; ข้อความเหนือรู = Hole n PASS/FAIL x/y เท่านั้น; ถ้าวาด 3D ไม่ได้ → 2D เดิม
 # CHANGE LOG (v01 -> v02):
 #   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
 #   Requirement 4 — remove Accuracy, report Offset/Failed instead):
@@ -89,6 +93,7 @@ _FAIL_EDGE    = '#ff8a80'
 _NODATA_FACE  = '#555555'
 _NODATA_EDGE  = '#888888'
 _HILITE_EDGE  = '#ffee58'
+MAX_TRIS_3D   = 2500   # v03: สามเหลี่ยม CAD สูงสุดในกราฟ 3D (มาก = ละเอียดแต่หมุนช้า)
 
 
 class EvaluationTab:
@@ -99,6 +104,7 @@ class EvaluationTab:
         self._overview_base_face = []
         self._overview_base_edge = []
         self._highlighted_gidx   = None
+        self._hole_artists       = {}   # v03: gi -> {'scatter': [...], 'text': Text}
 
     # ------------------------------------------------------------------
     def draw_evaluation(self):
@@ -114,6 +120,7 @@ class EvaluationTab:
         self._overview_base_face = []
         self._overview_base_edge = []
         self._highlighted_gidx   = None
+        self._hole_artists       = {}
 
         if app.geo.mesh is None or app.geo.step_data is None:
             self._draw_placeholder(
@@ -148,7 +155,14 @@ class EvaluationTab:
                 "compare it against the expected probe points.")
             return
 
-        self._draw_overview(evaluation_result)
+        try:
+            self._draw_3d(evaluation_result)   # v03
+        except Exception as e:
+            print(f"[evaluation_tab] 3D view failed, using 2D: {e!r}")
+            app.fig.clf()
+            app.ax = app.fig.add_subplot(111, facecolor=theme.c(theme.PLOT_AX))
+            self._hole_artists = {}
+            self._draw_overview(evaluation_result)
 
     # ------------------------------------------------------------------
     def _draw_placeholder(self, icon: str, message: str):
@@ -170,6 +184,129 @@ class EvaluationTab:
         app.canvas.draw()
 
     # ------------------------------------------------------------------
+    def _work_mesh(self):
+        """v03: (vertices, faces) ของ CAD ในพิกัดงาน (เดียวกับจุดใน Schema/log): หมุนตามมุมมอง − Work zero
+        ลดจำนวนสามเหลี่ยมเหลือ ≤ MAX_TRIS_3D (หมุนกราฟได้ลื่น — วัดไว้ ~160 ms/ภาพที่ 2k)"""
+        app = self.app
+        from core.projector import view_rotation_matrix
+        from core.work_zero import machining_origin
+        rot = view_rotation_matrix(app.current_view, app.screen_rotation)
+        org = machining_origin(app, app.current_view, app.screen_rotation)
+        v = np.asarray(app.geo.mesh.vertices, dtype=float) @ rot.T - org
+        f = np.asarray(app.geo.mesh.faces)
+        step = max(1, len(f) // MAX_TRIS_3D)
+        return v, f[::step]
+
+    @staticmethod
+    def _nice_scale(max_dev: float, size: float) -> int:
+        """ตัวคูณขยายระยะเบี่ยงให้มองเห็น: max |dev| × k ≈ 25 % ของขนาดรู (ปัดเป็น 1/2/5/10/…)"""
+        if not max_dev or max_dev <= 0:
+            return 1
+        want = 0.25 * size / max_dev
+        for k in (1, 2, 5, 10, 20, 50, 100, 200):
+            if k >= want * 0.7:
+                return k
+        return 200
+
+    def _draw_3d(self, evaluation_result: dict):
+        """v03: กราฟ 3D แทน heat map — CAD (wireframe จาง + วงผนัง CAD ทุกชั้นที่ตรวจ) + จุดที่วัดได้
+        สีเขียว/แดงต่อจุด เลื่อนออกจากจุด CAD ตามระยะเบี่ยงจริง × k (ขยายให้เห็น) พร้อมเส้นเชื่อม
+        และเส้นรอบรูปที่วัดได้ของแต่ละชั้น (× k) — ข้อความเหนือรูแสดงเฉพาะผลสำคัญ"""
+        app = self.app
+        app.fig.clf()
+        app.fig.subplots_adjust(left=0.0, right=1.0, top=0.93, bottom=0.05)
+        ax = app.fig.add_subplot(111, projection='3d', facecolor=theme.VIEW3D_BG)
+        app.ax = ax
+        holes_result = evaluation_result.get('holes', {}) or {}
+
+        v, f = self._work_mesh()
+        tri = v[f]
+        nan = np.full((len(f), 1), np.nan)
+        ax.plot(np.hstack([tri[:, [0, 1, 2, 0], 0], nan]).ravel(), np.hstack([tri[:, [0, 1, 2, 0], 1], nan]).ravel(),
+                np.hstack([tri[:, [0, 1, 2, 0], 2], nan]).ravel(), color="#4f6d8f", linewidth=0.5, alpha=0.35)
+
+        pts_all = [(gi, lyr, p) for gi, info in holes_result.items() for s in info.get('segments', [])
+                   for lyr in s.get('layers', []) for p in lyr.get('points', [])]
+        max_dev = max((abs(float(p.get('dev', p.get('distance_mm', 0.0)) or 0.0)) for _g, _l, p in pts_all), default=0.0)
+        sizes = [lyr['circle']['nominal_diameter'] / 2 for _g, lyr, _p in pts_all if lyr.get('circle')] or [5.0]
+        k = self._nice_scale(max_dev, float(np.median(sizes)))
+        self._scale = k
+
+        self._hole_artists = {}
+        gidx = {gi: h for gi, h in enumerate(app.current_holes)}
+        for gi, info in holes_result.items():
+            ok_h = bool(info.get('passed'))
+            arts = {'scatter': [], 'text': None}
+            top = None
+            for s in info.get('segments', []):
+                for lyr in s.get('layers', []):
+                    pts = lyr.get('points', [])
+                    if not pts:
+                        continue
+                    E = np.array([p['expected'] for p in pts], dtype=float)
+                    A = np.array([p['actual'] for p in pts], dtype=float)
+                    M = E + k * (A - E)
+                    c = lyr.get('circle')
+                    if c:   # วงผนัง CAD ของชั้นนี้ (จาก fit จุด CAD — ตรงกับผิว CAD)
+                        cc, r = np.asarray(c['nominal_center'], dtype=float), c['nominal_diameter'] / 2
+                        t = np.linspace(0, 2 * np.pi, 73)
+                        ax.plot(cc[0] + r * np.cos(t), cc[1] + r * np.sin(t), np.full_like(t, cc[2]),
+                                color="#cfd8e3", linewidth=1.0, alpha=0.9)
+                        cen = cc
+                    else:
+                        cen = E.mean(axis=0)
+                        o = np.argsort(np.arctan2(E[:, 1] - cen[1], E[:, 0] - cen[0]))
+                        ax.plot(*np.vstack([E[o], E[o[:1]]]).T, color="#cfd8e3", linewidth=1.0, alpha=0.9)
+                    o = np.argsort(np.arctan2(M[:, 1] - cen[1], M[:, 0] - cen[0]))   # รูปร่างที่วัด (× k)
+                    ax.plot(*np.vstack([M[o], M[o[:1]]]).T, color=_PASS_FACE if lyr.get('passed') else _FAIL_FACE,
+                            linewidth=1.2, alpha=0.85, linestyle='--')
+                    for e, m_ in zip(E, M):
+                        ax.plot(*np.vstack([e, m_]).T, color="#e6e9ed", linewidth=0.8, alpha=0.7)
+                    col = [_PASS_FACE if p.get('passed') else _FAIL_FACE for p in pts]
+                    ax.scatter(*E.T, s=10, c="#cfd8e3", depthshade=False)
+                    arts['scatter'].append(ax.scatter(*M.T, s=42, c=col, edgecolors="#111", linewidths=0.6,
+                                                      depthshade=False))
+                    top = max(top if top is not None else -1e9, float(E[:, 2].max()))
+                    arts['xy'] = (float(cen[0]), float(cen[1]))
+            if top is not None:
+                x, y = arts['xy']
+                _nf = info.get('total_points', 0) - info.get('passed_points', 0)
+                lbl = (f"Hole {info.get('display_id', gidx.get(gi) and gidx[gi].display_id)}  "
+                       + (f"PASS" if ok_h else
+                          f"FAIL {_nf} pt{'s' if _nf != 1 else ''}"))
+                arts['text'] = ax.text(x, y, 1.5, lbl, color=_PASS_FACE if ok_h else _FAIL_FACE, fontsize=10,
+                                       weight='bold', ha='center', va='bottom', zorder=20)
+                arts['base_color'] = _PASS_FACE if ok_h else _FAIL_FACE
+            self._hole_artists[gi] = arts
+
+        lo, hi = v.min(axis=0), v.max(axis=0)
+        span = hi - lo
+        ax.set_xlim(lo[0], hi[0]); ax.set_ylim(lo[1], hi[1]); ax.set_zlim(lo[2], max(hi[2], 2.0))
+        try:
+            ax.set_box_aspect((span[0], span[1], max(span[2], 2.0)))
+        except Exception:
+            pass
+        ax.view_init(elev=28, azim=-60)
+        for a in (ax.xaxis, ax.yaxis, ax.zaxis):
+            a.set_pane_color((0, 0, 0, 0))
+            a.label.set_color(theme.VIEW3D_MUTED)
+        ax.tick_params(colors=theme.VIEW3D_MUTED, labelsize=7)
+        ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.set_zlabel("Z (mm)")
+
+        n_pass = sum(1 for i in holes_result.values() if i.get('passed'))
+        n_fail = len(holes_result) - n_pass
+        tot, pas = evaluation_result.get('total_points'), evaluation_result.get('passed_points')
+        app.fig.suptitle(f"Evaluation 3D — {n_pass} hole(s) passed, {n_fail} failed  |  {(tot or 0) - (pas or 0)} of {tot} points failed"
+                         f"  |  deviation shown ×{k}", fontsize=12, color=theme.VIEW3D_TEXT)
+        app.fig.text(0.01, 0.01, f"Grey circle = CAD wall at each probed layer · dot = measured point moved away from its "
+                     f"CAD point by the real deviation × {k} (green pass / red fail) · dashed = measured outline × {k}",
+                     fontsize=8, color=theme.VIEW3D_MUTED, ha='left', va='bottom')
+        mismatch = evaluation_result.get('settings_mismatch') or []
+        if mismatch:
+            app.fig.text(0.01, 0.96, f"⚠ Settings changed since export for: {', '.join(str(m) for m in mismatch)}",
+                         fontsize=8, color='#ffca28', ha='left', va='top')
+        app.canvas.draw()
+
     def _draw_overview(self, evaluation_result: dict):
         """วาด mesh background + hole markers สีตามผลตรวจ (เขียว/แดง/เทา)
         พร้อมเส้นทางเดินเครื่อง (แบบเดียวกับ Path Mapper) เพื่ออ้างอิงลำดับ
@@ -245,7 +382,7 @@ class EvaluationTab:
             ax.text(h.x, h.y, label, color='black', fontsize=8,
                    weight='bold', ha='center', va='center', zorder=6)
             if info is not None and not info.get('passed', False):
-                sub = f"{info.get('passed_points', 0)}/{info.get('total_points', 0)} pts"
+                sub = f"{info.get('total_points', 0) - info.get('passed_points', 0)} fail"
                 ax.text(h.x, h.y - 4, sub, color=_FAIL_FACE, fontsize=7,
                         ha='center', va='top', zorder=6)
 
@@ -302,6 +439,15 @@ class EvaluationTab:
         """เรียกจาก ui/main_window.py ตอน hover/click รูใน sidebar ขณะอยู่แท็บ
         Evaluation — ไฮไลต์ marker บน overview เดิม ไม่สลับหน้า (แบบเดียวกับ
         path_mapper_tab.py)"""
+        arts = (self._hole_artists or {}).get(global_idx)   # v03: กราฟ 3D
+        if arts is not None:
+            self._highlighted_gidx = global_idx
+            if arts.get('text') is not None:
+                arts['text'].set_color(_HILITE_EDGE)
+            for sc in arts['scatter']:
+                sc.set_edgecolors(_HILITE_EDGE); sc.set_linewidths(1.6)
+            self.app.canvas.draw_idle()
+            return
         if self._overview_scatter is None:
             return
         local_idx = self._overview_index_map.get(global_idx)
@@ -315,6 +461,15 @@ class EvaluationTab:
         self.app.canvas.draw_idle()
 
     def clear_hole_highlight(self):
+        arts = (self._hole_artists or {}).get(self._highlighted_gidx)   # v03: กราฟ 3D
+        if arts is not None:
+            if arts.get('text') is not None:
+                arts['text'].set_color(arts.get('base_color', _PASS_FACE))
+            for sc in arts['scatter']:
+                sc.set_edgecolors("#111"); sc.set_linewidths(0.6)
+            self._highlighted_gidx = None
+            self.app.canvas.draw_idle()
+            return
         if self._overview_scatter is None or self._highlighted_gidx is None:
             return
         self._highlighted_gidx = None
