@@ -4,7 +4,10 @@
 # Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
 # snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
 # ==============================================================================
-# VERSION: 15
+# VERSION: 16
+# CHANGE LOG (v15 -> v16): hole_metrics() / circularity_pct() — ค่าสรุปต่อรูสำหรับหน้า Evaluation และรายงาน PDF:
+#   % ความเป็นวงกลมต่อชั้น = 100 × (1 − roundness / tolerance), จุดลึกสุดของรู (ผนังทรงกลม: fit ทรงกลม
+#   ให้จุดที่วัด → ก้น = −(cz − R) เทียบ CAD; แตะพื้นจริง; หรือบอกชั้นลึกสุดที่แตะได้)
 # CHANGE LOG (v14 -> v15): estimate_z_offset() — หา Z offset (ผิวบนจริงอยู่เหนือ Z0 ที่ตั้งกี่ มม.) จากผนังรู
 #   ที่เอียง/โค้ง: เลื่อน z ของจุดวัดหา dz ที่ RMS ของ dev น้อยสุด (Gauss-Newton) + บอกความไว
 #   (ผนังตรงหาไม่ได้) และตัวขยาย tip-radius error → Z error (ผนังเอียงมุมเดียว เช่น taper แยกไม่ได้)
@@ -782,6 +785,93 @@ def estimate_z_offset(expected_points: list, actual_points: list, tolerance_mm: 
         out.update(dz=float(dz1), rms1=float(np.sqrt(np.mean(f1 ** 2))))
     out.update(mean1=float(np.mean(np.abs(f1))), max1=float(np.max(np.abs(f1))),
                passed1=int(np.sum(np.abs(f1) <= tolerance_mm)))   # หลังชดเชย Z อย่างเดียว (ค่าที่จะเห็นจริง)
+    return out
+
+
+def _fit_sphere(pts):
+    """least-squares sphere (algebraic): |p|² = 2c·p + (R² − |c|²) → (centre, R, rms) or None"""
+    p = np.asarray(pts, dtype=float)
+    if len(p) < 5:
+        return None
+    A = np.column_stack([2.0 * p, np.ones(len(p))])
+    sol, *_ = np.linalg.lstsq(A, (p ** 2).sum(axis=1), rcond=None)
+    c = sol[:3]
+    r2 = float(sol[3] + c @ c)
+    if r2 <= 0:
+        return None
+    R = math.sqrt(r2)
+    rms = float(np.sqrt(np.mean((np.linalg.norm(p - c, axis=1) - R) ** 2)))
+    return c, R, rms
+
+
+SPHERE_CAD_RMS = 0.02   # CAD points within this of one sphere → spherical wall (deepest point computable)
+
+
+def circularity_pct(roundness, tolerance_mm):
+    """v16: % ความเป็นวงกลมของ 1 ชั้น = 100 × (1 − roundness / tolerance), ตัดที่ 0–100
+    100 % = กลมพอดี, 0 % = ความไม่กลม (max − min ของรัศมีจากวงกลม LS) เท่ากับ tolerance หรือมากกว่า"""
+    if roundness is None or not tolerance_mm:
+        return None
+    return float(min(100.0, max(0.0, 100.0 * (1.0 - float(roundness) / float(tolerance_mm)))))
+
+
+def hole_metrics(info: dict, tolerance_mm: float, cad_floor_depth=None) -> dict:
+    """v16: ค่าสรุปของ 1 รูจากผลประเมิน (holes[gi]) — ใช้ทั้งหน้า Evaluation และรายงาน PDF
+      layers:  [{seg, layer, depth, n, passed, failed, max_abs, circularity, roundness, d_err, c_off}]
+      deepest: จุดลึกสุดของรู
+        method 'sphere' — ผนังทรงกลม (จุด CAD อยู่บนทรงกลมเดียว): fit ทรงกลมให้จุดที่วัดแล้วหา
+                          ก้นรู = −(cz − R) เทียบกับทรงกลมของ CAD (ใช้ได้เพราะโพรบทริกแนว Z ไม่ได้)
+        method 'floor'  — โพรบแตะพื้นจริง (Z trigger)
+        method 'layer'  — ผนังตรง/กรวยก้นแบน: หาจากผนังไม่ได้ บอกแค่ชั้นลึกสุดที่แตะ + ความลึก CAD"""
+    layers, all_pts = [], []
+    for seg in info.get('segments', []) or []:
+        for lyr in seg.get('layers', []) or []:
+            pts = lyr.get('points', []) or []
+            all_pts += pts
+            circ = lyr.get('circle') or {}
+            devs = [abs(float(p['dev'])) for p in pts if p.get('dev') is not None] or \
+                   [float(p.get('distance_mm', 0.0)) for p in pts]
+            depth = -float(np.mean([p['expected'][2] for p in pts])) if pts else None
+            layers.append(dict(
+                seg=seg.get('seg_idx', 0), layer=lyr.get('layer_idx', 0), depth=depth, n=len(pts),
+                passed=bool(lyr.get('passed')), failed=sum(1 for p in pts if not p.get('passed', True)),
+                max_abs=max(devs) if devs else None, roundness=circ.get('roundness'),
+                circularity=circularity_pct(circ.get('roundness'), tolerance_mm),
+                d_err=circ.get('diameter_error'), c_off=circ.get('center_offset')))
+    circ_vals = [l['circularity'] for l in layers if l['circularity'] is not None]
+    out = dict(layers=layers, n=len(all_pts),
+               failed=sum(1 for p in all_pts if not p.get('passed', True)),
+               max_abs=max((l['max_abs'] for l in layers if l['max_abs'] is not None), default=None),
+               circularity_min=min(circ_vals) if circ_vals else None,
+               circularity_mean=float(np.mean(circ_vals)) if circ_vals else None,
+               roundness_max=max((l['roundness'] for l in layers if l['roundness'] is not None), default=None),
+               cad_floor_depth=cad_floor_depth)
+    out['passed'] = bool(info.get('passed'))   # ทุกจุด (รวมพื้น) ผ่าน — 1 จุดไม่ผ่าน = รูไม่ผ่าน
+
+    deep = dict(method='layer', depth=max((l['depth'] for l in layers if l['depth'] is not None), default=None),
+                cad=cad_floor_depth, error=None, note="")
+    fl = info.get('floor')
+    if fl and fl.get('actual') is not None:
+        deep.update(method='floor', depth=-float(fl['actual'][2]), cad=-float(fl['expected'][2]))
+        deep['error'] = deep['depth'] - deep['cad']
+    elif len(layers) >= 2 and len(all_pts) >= 6:
+        se = _fit_sphere([p['expected'] for p in all_pts])
+        sa = _fit_sphere([p['actual'] for p in all_pts])
+        if se is not None and sa is not None and se[2] <= SPHERE_CAD_RMS:
+            d_cad = -float(se[0][2] - se[1])
+            d_mea = -float(sa[0][2] - sa[1])
+            sph = dict(sphere_r=float(sa[1]), sphere_r_cad=float(se[1]), sphere_rms=float(sa[2]),
+                       centre=tuple(float(v) for v in sa[0]), centre_cad=tuple(float(v) for v in se[0]))
+            if cad_floor_depth is not None and cad_floor_depth < d_cad - 0.05:
+                # ทรงกลมถูกพื้นเรียบตัด (CAD ก้นทรงกลมลึกกว่าพื้น) — จุดลึกสุดคือพื้น ซึ่งผนังบอกไม่ได้
+                deep.update(method='sphere_flat', **sph)
+                deep['note'] = (f"spherical wall cut by a flat floor at {cad_floor_depth:.2f} (sphere bottom would be "
+                                f"{d_cad:.2f}) — the floor is not reachable from the walls")
+            else:
+                deep.update(method='sphere', depth=d_mea, cad=d_cad, error=d_mea - d_cad, **sph)
+    if deep['method'] == 'layer':
+        deep['note'] = "floor not reachable from the walls (probe cannot trigger in Z) — deepest probed layer only"
+    out['deepest'] = deep
     return out
 
 

@@ -3,7 +3,15 @@
 # ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
 # comparison_v02.md)
 # ==============================================================================
-# VERSION: 11
+# VERSION: 13
+# CHANGE LOG (v12 -> v13): หัวการ์ดแสดงเฉพาะจำนวนจุดที่ไม่ผ่าน (FAIL 3 pts) ให้ตรงกับข้อความเหนือการ์ด;
+#   แสดง Roundness (mm) ต่อชั้น และเปลี่ยนชื่อ % Circularity → Roundness margin
+# CHANGE LOG (v11 -> v12): การแสดงผลชัดขึ้น (Feature 2):
+#   - ผลรวมทุกรูบนสุดของรายการ + ข้อความ PASS / FAIL ตัวใหญ่เหนือการ์ดแต่ละรู (1 จุดไม่ผ่าน = รูไม่ผ่าน)
+#   - หัวการ์ดแสดงเฉพาะค่าสำคัญ; ในการ์ด: max |dev|, % ความเป็นวงกลม, จุดลึกสุด (core hole_metrics v16)
+#   - แสดงทุกจุดของทุกรูเป็นค่าเริ่มต้น (แถวเขียว/แดง, dev มีเครื่องหมาย, ทิศที่แตะ) — สร้างตารางเมื่อเปิดการ์ด
+#     (รายการใหญ่ > _AUTO_OPEN_POINTS จุด เปิดการ์ดเองทีละรู กันหน้าจอหน่วง)
+#   - ปุ่ม Export PDF report → ui/evaluation_report.py
 # CHANGE LOG (v10 -> v11):
 #   การ์ด "Tip compensation" ใต้ Tolerance: สวิตช์เปิด/ปิดการชดเชย (จำค่า, คำนวณผลใหม่ทันที), r ที่ใช้
 #   + ที่มา และปุ่ม ⓘ Details → ui/compensation_info_dialog.py (ย้ายมาจากแผงซ้าย)
@@ -72,7 +80,7 @@ import numpy as np
 import tkinter.messagebox as _mb
 
 from core import user_settings
-from core.evaluation_engine import _hole_fingerprint
+from core.evaluation_engine import _hole_fingerprint, hole_metrics
 from core.models import hole_floor_depth
 from ui.evaluation_left_panel import _remap_holes_by_gi
 from ui import theme
@@ -84,6 +92,22 @@ _COLOR_NODATA = theme.BTN_SECONDARY
 # v03 — per-point row background (Requirement 5: green pass / red fail)
 _ROW_PASS = theme.OK_BG
 _ROW_FAIL = theme.ERR_BG
+
+_AUTO_OPEN_POINTS = 48    # v12: เปิดการ์ดทุกรู (ตารางทุกจุด) อัตโนมัติถ้าจุดรวมไม่เกินนี้ (~30 ms ต่อแถว)
+
+
+def _dir_label(d):
+    """v12: ทิศที่โพรบเดินตอนแตะ → 'X−' / 'Y+' / '45°' (ผนังเอียงไม่ตรงแกน)"""
+    if not d:
+        return ""
+    dx, dy = float(d[0]), float(d[1])
+    if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+        return "Z" + ("−" if float(d[2]) < 0 else "+")
+    if abs(dx) >= 0.97 * np.hypot(dx, dy):
+        return "X" + ("+" if dx > 0 else "−")
+    if abs(dy) >= 0.97 * np.hypot(dx, dy):
+        return "Y" + ("+" if dy > 0 else "−")
+    return f"{np.degrees(np.arctan2(dy, dx)):.0f}°"
 
 
 class EvaluationSidebarPanel:
@@ -113,6 +137,9 @@ class EvaluationSidebarPanel:
         self.tol_entry.pack(side="left", padx=(8, 8))
         ctk.CTkButton(row, text="Apply", width=70, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      command=self._on_apply_tolerance).pack(side="left")
+        self._pdf_btn = ctk.CTkButton(row, text="Export PDF", width=96, fg_color=theme.BTN_SECONDARY,   # v12
+                                      hover_color=theme.BTN_SECONDARY_HOVER, command=self._on_export_pdf)
+        self._pdf_btn.pack(side="right")
 
         # v11: สวิตช์ชดเชยรัศมีหัวโพรบ + ค่าที่ใช้ + ปุ่มที่มาของค่า
         comp = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
@@ -171,10 +198,16 @@ class EvaluationSidebarPanel:
             self._build_warning_banner(result)
 
         holes_result = (result or {}).get('holes', {}) or {}
+        sel = [(gi, h) for gi, h in enumerate(app.current_holes) if getattr(h, 'selected_for_inspection', False)]
+        tol = float((result or {}).get('tolerance_mm', getattr(app, 'evaluation_tolerance_mm', 0.5)) or 0.5)
+        self._metrics = {gi: hole_metrics(holes_result[gi], tol, self._depth_info(h)[0])
+                         for gi, h in sel if holes_result.get(gi) is not None}
+        if result and sel:
+            self._build_overall_banner(sel, holes_result, tol)   # v12
+        total_pts = sum(m['n'] for m in self._metrics.values())
+        self._auto_open = total_pts <= _AUTO_OPEN_POINTS
         any_card = False
-        for gi, h in enumerate(app.current_holes):
-            if not getattr(h, 'selected_for_inspection', False):
-                continue
+        for gi, h in sel:
             info = holes_result.get(gi)
             self._build_hole_card(self.list_frame, gi, h, info)
             any_card = True
@@ -261,19 +294,38 @@ class EvaluationSidebarPanel:
         which is True only if EVERY point of this hole passed — a single
         failing point already flips this to False (and the badge to ❌)
         upstream. Nothing in this file needs to re-check that rule."""
-        widgets = {'is_expanded': False, 'layer_state': {}}
+        widgets = {'is_expanded': info is not None and getattr(self, '_auto_open', False),
+                   'layer_state': {}, 'rendered': False}
         self._hole_widgets[gi] = widgets
+        m = getattr(self, '_metrics', {}).get(gi)
+        tol = float((getattr(self.app, 'evaluation_result', None) or {}).get('tolerance_mm', 0.5) or 0.5)
 
         item_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        item_frame.pack(fill="x", padx=10, pady=(0, 8))   # v05: ชิดด้านบน
+        item_frame.pack(fill="x", padx=10, pady=(0, 10))   # v05: ชิดด้านบน
+
+        # v12: ข้อความผลตัวใหญ่เหนือการ์ด — 1 จุดไม่ผ่าน = รูไม่ผ่าน
+        if info is None:
+            verdict, vcol = "NO DATA — this hole is not in the log", theme.TEXT_MUTED
+        elif info.get('passed'):
+            verdict, vcol = f"✔ PASS — all {info.get('total_points', 0)} points within ±{tol:g} mm", theme.OK_TEXT
+        else:
+            nf = info.get('total_points', 0) - info.get('passed_points', 0)
+            verdict = (f"✘ FAIL — {nf} of {info.get('total_points', 0)} point{'s' if nf != 1 else ''} "
+                       f"outside ±{tol:g} mm")
+            vcol = theme.ERR_TEXT
+        ctk.CTkLabel(item_frame, text=verdict, text_color=vcol, anchor="w", justify="left", wraplength=380,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(fill="x", padx=2, pady=(0, 2))
 
         if info is None:
-            badge, color = "⚪ no data", _COLOR_NODATA
+            badge, color = "no data", _COLOR_NODATA
         elif info.get('passed'):
-            badge, color = "✅", _COLOR_PASS
-        else:
-            badge = f"❌ ({info.get('passed_points', 0)}/{info.get('total_points', 0)} pts)"
+            badge, color = f"PASS all {info.get('total_points', 0)}", _COLOR_PASS
+        else:   # v13: นับเฉพาะจุดที่ไม่ผ่าน (ให้ตรงกับข้อความเหนือการ์ด)
+            nf = info.get('total_points', 0) - info.get('passed_points', 0)
+            badge = f"FAIL {nf} pt{'s' if nf != 1 else ''}"
             color = _COLOR_FAIL
+        if m and m.get('max_abs') is not None:
+            badge += f"  max {m['max_abs']:.3f}"
         if info is not None and info.get('suspect_points'):   # v06: ก้านโพรบชน — ไม่นับ
             badge += f"  ⚠{info['suspect_points']} stylus?"
 
@@ -325,10 +377,7 @@ class EvaluationSidebarPanel:
                 wraplength=280, justify="left"
             ).pack(padx=10, pady=8, anchor="w")
         else:
-            ctk.CTkLabel(
-                body, text=f"Max Offset: {info.get('max_deviation', 0):.3f} mm",   # v03: was "Max deviation"
-                text_color=theme.TEXT_SECONDARY, font=ctk.CTkFont(size=11)
-            ).pack(anchor="w", padx=10, pady=(8, 2))
+            self._build_summary_block(body, info, m, tol)   # v12: max |dev|, ความกลม %, จุดลึกสุด
             bf = info.get('best_fit_offset')   # v09: ตำแหน่งรูจริงเยื้องจาก CAD = −(การเลื่อน)
             if bf:
                 d = (bf[0] ** 2 + bf[1] ** 2 + bf[2] ** 2) ** 0.5
@@ -337,11 +386,19 @@ class EvaluationSidebarPanel:
                                 f"(ΔX {-bf[0]:+.3f}  ΔY {-bf[1]:+.3f}  ΔZ {-bf[2]:+.3f}) — not counted"),
                     text_color=theme.WARN_TEXT, font=ctk.CTkFont(size=11), justify="left"
                 ).pack(anchor="w", padx=10, pady=(0, 2))
-            for seg in info.get('segments', []):
-                self._build_segment_block(body, gi, seg)
-
+            widgets['info'] = info
         if widgets['is_expanded']:
+            self._render_body(gi)
             body.pack(fill="x", pady=(4, 0))
+
+    def _render_body(self, gi):
+        """v12: สร้างแถวชั้น + ตารางจุดตอนเปิดการ์ดครั้งแรกเท่านั้น (รูเยอะไม่หน่วงตอน refresh)"""
+        widgets = self._hole_widgets.get(gi)
+        if widgets is None or widgets.get('rendered') or widgets.get('info') is None:
+            return
+        widgets['rendered'] = True
+        for seg in widgets['info'].get('segments', []):
+            self._build_segment_block(widgets['body'], gi, seg)
 
     def _toggle_hole(self, gi):
         widgets = self._hole_widgets.get(gi)
@@ -349,9 +406,62 @@ class EvaluationSidebarPanel:
             return
         widgets['is_expanded'] = not widgets['is_expanded']
         if widgets['is_expanded']:
+            self._render_body(gi)
             widgets['body'].pack(fill="x", pady=(4, 0))
         else:
             widgets['body'].pack_forget()
+
+    # ------------------------------------------------------------------
+    def _build_overall_banner(self, sel, holes_result, tol):
+        """v12: ผลรวมทุกรูบนสุดของรายการ"""
+        n_fail = sum(1 for gi, _h in sel if holes_result.get(gi) is not None and not holes_result[gi].get('passed'))
+        n_nod = sum(1 for gi, _h in sel if holes_result.get(gi) is None)
+        n_ok = len(sel) - n_fail - n_nod
+        pts_f = sum(m['failed'] for m in self._metrics.values())
+        pts_n = sum(m['n'] for m in self._metrics.values())
+        if n_fail:
+            text, fg, tc = (f"✘ PART FAILS\n{n_fail} of {len(sel)} hole{'s' if len(sel) != 1 else ''} failed  ·  "
+                            f"{pts_f} of {pts_n} points outside ±{tol:g} mm"), theme.ERR_BG, theme.ERR_TEXT
+        elif n_nod:
+            text, fg, tc = (f"⚠ INCOMPLETE\n{n_ok} passed, {n_nod} hole(s) without data"), theme.WARN_BG, theme.WARN_TEXT
+        else:
+            text, fg, tc = (f"✔ PART PASSES\nall {len(sel)} hole{'s' if len(sel) != 1 else ''}, "
+                            f"{pts_n} points within ±{tol:g} mm"), theme.OK_BG, theme.OK_TEXT
+        f = ctk.CTkFrame(self.list_frame, fg_color=fg, corner_radius=6)
+        f.pack(fill="x", padx=10, pady=(4, 10))
+        ctk.CTkLabel(f, text=text, text_color=tc, font=ctk.CTkFont(size=13, weight="bold"),
+                     wraplength=440, justify="left", anchor="w").pack(fill="x", padx=10, pady=8)
+
+    def _build_summary_block(self, parent, info, m, tol):
+        """v12: ค่าสำคัญของรู — max |dev|, % ความเป็นวงกลมต่อชั้น, จุดลึกสุด"""
+        if not m:
+            return
+        lines = [f"Max |dev| {m['max_abs']:.3f} mm  (tolerance ±{tol:g})" if m['max_abs'] is not None
+                 else f"Max Offset: {info.get('max_deviation', 0):.3f} mm"]
+        circ = [l for l in m['layers'] if l['circularity'] is not None]
+        if circ:
+            lines.append("Roundness (mm)  " + "   ".join(f"L{l['layer'] + 1} {l['roundness']:.3f}" for l in circ))
+            lines.append("Roundness margin  " + "   ".join(f"L{l['layer'] + 1} {l['circularity']:.0f}%" for l in circ))
+            lines.append("   = 100 × (1 − roundness / tolerance)")
+        dp = m['deepest']
+        if dp['method'] == 'sphere':
+            lines.append(f"Deepest point {dp['depth']:.3f} mm   (CAD {dp['cad']:.3f}, {dp['error']:+.3f})")
+            lines.append(f"   sphere fit R {dp['sphere_r']:.3f} (CAD {dp['sphere_r_cad']:.3f})")
+        elif dp['method'] == 'floor':
+            lines.append(f"Deepest point {dp['depth']:.3f} mm — floor probed   (CAD {dp['cad']:.3f}, {dp['error']:+.3f})")
+        else:
+            cad = f"  (CAD floor {dp['cad']:.2f})" if dp.get('cad') is not None else ""
+            lines.append(f"Deepest probed {dp['depth']:.2f} mm{cad}" if dp.get('depth') is not None
+                         else "Deepest point: —")
+            if dp['method'] == 'sphere_flat':
+                lines.append(f"   sphere fit R {dp['sphere_r']:.3f} (CAD {dp['sphere_r_cad']:.3f})")
+                lines.append("   flat floor below the sphere is not reachable")
+            else:
+                lines.append("   = lowest layer; the floor is not reachable")
+                lines.append("     from the walls — use Caliper depth")
+        ctk.CTkLabel(parent, text="\n".join(lines), anchor="w", justify="left",
+                     text_color=theme.TEXT_SECONDARY, font=ctk.CTkFont(family=theme.FONT_MONO, size=10)
+                     ).pack(fill="x", padx=10, pady=(8, 4))
 
     # ------------------------------------------------------------------
     def _build_segment_block(self, parent, gi, seg: dict):
@@ -367,18 +477,24 @@ class EvaluationSidebarPanel:
         layer_idx = layer.get('layer_idx', 0)
         key = (gi, seg_idx, layer_idx)
         state = self._hole_widgets[gi]['layer_state'].setdefault(
-            key, {'expanded': False, 'show_all': False})
+            key, {'expanded': True, 'show_all': True})   # v12: เปิดทุกชั้น แสดงทุกจุด
 
         row = ctk.CTkFrame(parent, fg_color=theme.BG_CARD_HOVER, corner_radius=5)
         row.pack(fill="x", padx=4, pady=2)
 
-        badge = "✅" if layer.get('passed') else "❌"
-        text = f"{badge} Layer {layer_idx + 1}   max offset={layer.get('max_deviation', 0):.3f} mm"
+        pts = layer.get('points', [])
+        nf = sum(1 for p in pts if not p.get('passed', True))
+        badge = "✔ PASS" if layer.get('passed') else f"✘ FAIL {nf} of {len(pts)}"
+        mx = max((abs(float(p['dev'])) for p in pts if p.get('dev') is not None),
+                 default=layer.get('max_deviation', 0))
         hw = self._hole_widgets[gi]
         depth = (hw.get('layer_depths') or {}).get(layer_idx)
         crit = hw.get('shaft_crit')
-        if depth is not None:
-            text += f"   depth {depth:.1f}"
+        text = f"{badge}   Layer {layer_idx + 1}" + (f"   depth {depth:.1f}" if depth is not None else "")
+        text += f"   max |dev| {mx:.3f}"
+        lm = next((l for l in ((getattr(self, '_metrics', {}).get(gi) or {}).get('layers') or [])
+                   if l['seg'] == seg_idx and l['layer'] == layer_idx), None)
+
         if depth is not None and crit is not None and depth > crit:   # v08: คำนวณจากเรขาคณิต
             text += (f"\n   ⚠ deeper than {crit:.1f} mm: the stylus shaft"
                      f"\n      may touch the hole edge before the ball tip"
@@ -388,8 +504,9 @@ class EvaluationSidebarPanel:
                      f"\n      (walls {layer.get('wall_shift', 0):+.2f} mm vs top layer) — values may be off")
         ctk.CTkButton(
             row, text=text, anchor="w",
-            fg_color="transparent", hover_color=theme.SELECT_BG, text_color=theme.TEXT,
-            font=ctk.CTkFont(size=11),
+            fg_color="transparent", hover_color=theme.SELECT_BG,
+            text_color=theme.OK_TEXT if layer.get('passed') else theme.ERR_TEXT,   # v12
+            font=ctk.CTkFont(size=11, weight="bold"),
             command=lambda: self._toggle_layer(gi, seg_idx, layer_idx)
         ).pack(fill="x", padx=4, pady=4)
 
@@ -401,7 +518,8 @@ class EvaluationSidebarPanel:
                 f"⌀ {circ['measured_diameter']:.3f}  (CAD {circ['nominal_diameter']:.3f}, "
                 f"{circ['diameter_error']:+.3f})",
                 f"Centre offset {circ['center_offset']:.3f}   Roundness "
-                + (f"{rnd:.3f}" if rnd is not None else "n/a (needs ≥ 4 pts)"),
+                + (f"{rnd:.3f}" if rnd is not None else "n/a (needs ≥ 4 pts)")
+                + (f"   Margin {lm['circularity']:.0f}%" if lm and lm['circularity'] is not None else ""),
             ]
             if raw_d is not None:
                 lines.append(f"Ball-centre ⌀ {raw_d:.3f} (for tip calibration)")
@@ -458,13 +576,15 @@ class EvaluationSidebarPanel:
         # (Requirement 5 wording — same underlying fields, display only)
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x")
-        for text, w in (("#", 22), ("Ideal", 130), ("Measured", 130), ("Offset(mm)", 68), ("", 24)):
+        # v12: + ทิศที่แตะ, dev มีเครื่องหมาย (− = เนื้อชิ้นงานเกิน/รูเล็ก, + = เนื้อหาย/รูใหญ่)
+        for text, w in (("#", 20), ("Dir", 30), ("Ideal (x, y, z)", 118), ("Measured", 118), ("Dev", 52), ("", 40)):
             ctk.CTkLabel(header, text=text, text_color=theme.TEXT_MUTED,
                         font=ctk.CTkFont(size=9, weight="bold"), width=w).pack(side="left")
 
         for p in shown:
             exp  = p.get('expected', (0.0, 0.0, 0.0))
             act  = p.get('actual', (0.0, 0.0, 0.0))
+            dev  = p.get('dev')
             dist = p.get('distance_mm', 0.0)
             ok   = p.get('passed', False)
             sus  = bool(p.get('suspect'))   # v06: ก้านชน — ไม่นับ
@@ -475,17 +595,21 @@ class EvaluationSidebarPanel:
             r = ctk.CTkFrame(parent, fg_color=row_color, corner_radius=3)
             r.pack(fill="x", pady=1)
 
-            ctk.CTkLabel(r, text=str(p.get('point_idx', '?')), width=22,
+            ctk.CTkLabel(r, text=str(p.get('point_idx', '?')), width=20,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
-            ctk.CTkLabel(r, text=f"{exp[0]:.2f},{exp[1]:.2f},{exp[2]:.2f}", width=130,
+            ctk.CTkLabel(r, text=_dir_label(p.get('dir')), width=30,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
-            ctk.CTkLabel(r, text=f"{act[0]:.2f},{act[1]:.2f},{act[2]:.2f}", width=130,
+            ctk.CTkLabel(r, text=f"{exp[0]:.2f}, {exp[1]:.2f}, {exp[2]:.2f}", width=118,
                         font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
-            ctk.CTkLabel(r, text=f"{dist:.3f}", width=68, font=ctk.CTkFont(size=9, weight="bold"),
+            ctk.CTkLabel(r, text=f"{act[0]:.2f}, {act[1]:.2f}, {act[2]:.2f}", width=118,
+                        font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
+            ctk.CTkLabel(r, text=f"{dev:+.3f}" if dev is not None else f"{dist:.3f}", width=52,
+                        font=ctk.CTkFont(size=10, weight="bold"),
                         text_color=(theme.OK_TEXT if ok else theme.ERR_TEXT)
                         ).pack(side="left", pady=2)
-            ctk.CTkLabel(r, text=("✅" if ok else "❌") + ("⚠" if sus else ""), width=24,
-                        font=ctk.CTkFont(size=9)).pack(side="left", pady=2)
+            ctk.CTkLabel(r, text=("PASS" if ok else "FAIL") + (" ⚠" if sus else ""), width=40,
+                        font=ctk.CTkFont(size=9, weight="bold"),
+                        text_color=(theme.OK_TEXT if ok else theme.ERR_TEXT)).pack(side="left", pady=2)
 
         if not points:
             ctk.CTkLabel(parent, text="No points recorded for this layer.",
@@ -634,7 +758,7 @@ class EvaluationSidebarPanel:
             if 'btn' not in w:
                 continue
             need = gi in missing
-            w['btn'].configure(text=w['btn_text'] + ("   ⚠ caliper depth" if need else ""))
+            w['btn'].configure(text=w['btn_text'] + ("  ⚠ depth" if need else ""))
             ent = w.get('caliper_entry')
             if ent is not None:
                 ent.configure(border_color=theme.WARN_TEXT if need else w['entry_border'],
@@ -695,6 +819,11 @@ class EvaluationSidebarPanel:
             self.warning_frame.pack_forget()
 
     # ------------------------------------------------------------------
+    def _on_export_pdf(self):
+        """v12: รายงาน PDF (ตาราง + ภาพตัดมองจากบนทุกชั้นของทุกรู) — สร้างใน thread แยก"""
+        from ui.evaluation_report import export_pdf_dialog
+        export_pdf_dialog(self.app, self._pdf_btn)
+
     def _on_apply_tolerance(self):
         app = self.app
         try:

@@ -2,7 +2,12 @@
 # ui/evaluation_left_panel.py — Left sidebar แทนที่ sidebar ปกติ ขณะอยู่แท็บ
 # "Evaluation" (§5 ของ PLAN_evaluation-tab-openbuilds-log-comparison_v02.md)
 # ==============================================================================
-# VERSION: 27
+# VERSION: 29
+# CHANGE LOG (v28 -> v29): การแก้ค่า 3 ตัว (pretravel / tilt / X-Y tip) ย้ายไปใต้ "Advanced corrections"
+#   (พับไว้, เปิดทั้งหมดเป็นค่าเริ่มต้น) + บรรทัด "Corrections: …" ใต้ผลเสมอ — สีเหลืองเมื่อมีการแก้ที่ไม่ได้ใช้
+#   (ไม่มีข้อมูล / ปิดไว้) หรือเปิด Best-fit centre  corrections_status() ใช้ร่วมกับรายงาน PDF
+# CHANGE LOG (v27 -> v28): "Separate X / Y Effective Tip" เปิดเป็นค่าเริ่มต้น — ผล 3-11 ที่แย่ลงวัดก่อนแก้ $1=255
+#   (X เสียสเต็ป); sphere 4/11 + taper 5/11 ดีขึ้นชัด (ไม่มีค่าแยกแกน → ใช้ค่าเดียวเหมือนเดิม)
 # CHANGE LOG (v26 -> v27): Z offset ในผลลัพธ์ (core/evaluation_engine.py v15::estimate_z_offset) — ผิวบนจริงอยู่
 #   เหนือ/ใต้ Z0 กี่ มม. + bias ขนาดรู (รูโค้ง/sphere), หรือบอกว่าแยกไม่ได้ (taper มุมเดียว) / หาไม่ได้ (ผนังตรง)
 # CHANGE LOG (v25 -> v26): ทิ้ง job ค้างของ Find centre ก่อนส่ง G-code ตรวจรู (openbuilds_logger v07)
@@ -136,11 +141,62 @@ def _alignment_for(app):
     return al if al.get('model') == getattr(app, 'loaded_step_filepath', None) else None
 
 
+def corrections_status(app, result) -> tuple:
+    """v29: การแก้ค่าที่ใช้จริงในผลนี้ → ([(หัวข้อ, ข้อความ)], [คำเตือน]) — ใช้ทั้งหน้า Evaluation และรายงาน PDF
+    คำเตือน = การแก้ที่ควรใช้แต่ไม่ได้ใช้ (ไม่มีข้อมูล / ปิดไว้ใน Advanced) และ Best-fit centre ที่เปิดอยู่"""
+    import math
+    result = result or {}
+    pp = app.probe_profile
+    items, warns = [], []
+    comp, rxy = result.get('compensation'), result.get('tip_radius_xy')
+    if comp == 'on':
+        if rxy:
+            d = getattr(pp, 'effective_tip_xy_date', '') or ''
+            items.append(("Tip compensation", f"r X {rxy[0]:.3f} / Y {rxy[1]:.3f} mm"
+                          + (f" (Set up {d})" if d else "")))
+            if not d:
+                warns.append("X / Y tip: calibration date unknown — re-run Set up if the probe was remounted")
+        else:
+            items.append(("Tip compensation", f"r {result.get('tip_radius_mm', 0):.3f} mm, every direction"))
+            if not getattr(app, 'evaluation_tip_xy', True):
+                warns.append("Separate X / Y tip is OFF (Advanced corrections)")
+            elif pp.effective_tip_radius_xy is None:
+                warns.append("X / Y tip not calibrated — one radius used for every direction (run Set up)")
+    elif comp == 'unavailable':
+        warns.append("Tip compensation unavailable — schema has no probe directions (re-export G-code)")
+    else:
+        warns.append("Tip compensation OFF — raw ball centre compared with CAD")
+    al = result.get('alignment')
+    if al:
+        kx, ky = al.get('lean', (0.0, 0.0))
+        gx, gy = al.get('slope', (0.0, 0.0))
+        t = (getattr(app, 'part_alignment', None) or {}).get('time')
+        items.append(("Tilt / lean / rotation",
+                      f"top tilt {math.degrees(math.atan(math.hypot(gx, gy))):.2f}° · "
+                      f"Z lean {math.degrees(math.atan(math.hypot(kx, ky))):.2f}° · "
+                      f"rotation {math.degrees(al.get('yaw_rad', 0.0)):+.2f}°"
+                      + (f" (Set up {t:%H:%M})" if hasattr(t, 'strftime') else "")))
+    elif not getattr(app, 'evaluation_align', True):
+        warns.append("Tilt / Z lean / rotation correction is OFF (Advanced corrections)")
+    elif getattr(app, 'part_alignment', None):
+        warns.append("Tilt / Z lean / rotation NOT corrected — Set up was measured on a different CAD file")
+    else:
+        warns.append("Tilt / Z lean / rotation NOT corrected — not measured in Set up since the app started")
+    pt = result.get('pretravel')
+    if pt == 'travel':
+        items.append(("Pretravel model", "along the probing direction (sloped walls)"))
+    elif pt == 'normal':
+        warns.append("Sloped-wall pretravel model is OFF (Advanced corrections)")
+    if result.get('best_fit'):
+        warns.append("Best-fit centre ON — hole POSITIONS are not checked, only size + form")
+    return items, warns
+
+
 def evaluation_kwargs(app) -> dict:
     """v19: ค่าที่ทุกที่ส่งเข้า evaluate_points() — ชดเชยหรือไม่, Effective Tip, ขนาดจริงชิ้นงาน"""
     return dict(tip_radius_mm=app.probe_profile.effective_tip_radius,
                 tip_radius_xy=(app.probe_profile.effective_tip_radius_xy           # v23
-                               if getattr(app, 'evaluation_tip_xy', False) else None),
+                               if getattr(app, 'evaluation_tip_xy', True) else None),
                 align=_alignment_for(app),   # v25
                 best_fit=bool(getattr(app, 'evaluation_best_fit', False)),
                 compensate=bool(getattr(app, 'evaluation_compensate', True)),
@@ -322,21 +378,31 @@ class EvaluationLeftPanel:
                         variable=self._best_fit_var, font=ctk.CTkFont(size=11),
                         command=self._on_toggle_best_fit).pack(anchor="w", padx=10, pady=(6, 0))
 
-        # v19: แบบจำลองระยะทริกบนผนังเอียง (ผนังตรงได้เท่ากัน) — ให้ข้อมูลจริงตัดสิน
+        # v29: การแก้ค่า 3 ตัวพับไว้ใต้ "Advanced corrections" (เปิดทั้งหมดเป็นค่าเริ่มต้น) — ใช้ปิดทีละตัว
+        #   เพื่อเทียบผล/หาสาเหตุ; ผลที่ใช้จริงแสดงที่บรรทัด "Corrections: …" ใต้ผลเสมอ
+        self._adv_btn = ctk.CTkButton(self.results_frame, text="", height=22, anchor="w",
+                                      fg_color="transparent", hover_color=theme.BG_CARD_HOVER,
+                                      text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11),
+                                      command=self._toggle_advanced)
+        self._adv_btn.pack(fill="x", padx=6, pady=(4, 0))
+        self._adv_frame = ctk.CTkFrame(self.results_frame, fg_color="transparent")
+        self._adv_open = False
+        # v19: แบบจำลองระยะทริกบนผนังเอียง (ผนังตรงได้เท่ากัน)
         self._travel_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_pretravel_travel', True)))
-        ctk.CTkCheckBox(self.results_frame, text="Sloped walls: pretravel along the probing direction",
-                        variable=self._travel_var, font=ctk.CTkFont(size=11),
-                        command=self._on_toggle_travel).pack(anchor="w", padx=10, pady=(4, 0))
         # v25: Feature 1 — แปลงจุดวัดด้วยผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up
         self._align_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_align', True)))
-        ctk.CTkCheckBox(self.results_frame, text="Correct tilt / Z lean / rotation (from Set up)",
-                        variable=self._align_var, font=ctk.CTkFont(size=11),
-                        command=self._on_toggle_align).pack(anchor="w", padx=10, pady=(4, 0))
-        # v23: Effective Tip แยกแกน X / Y จาก Set up (ค่าเริ่มต้นปิด)
-        self._tip_xy_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_tip_xy', False)))
-        ctk.CTkCheckBox(self.results_frame, text="Separate X / Y Effective Tip (from Set up)",
-                        variable=self._tip_xy_var, font=ctk.CTkFont(size=11),
-                        command=self._on_toggle_tip_xy).pack(anchor="w", padx=10, pady=(4, 0))
+        # v23: Effective Tip แยกแกน X / Y จาก Set up
+        self._tip_xy_var = ctk.BooleanVar(value=bool(getattr(self.app, 'evaluation_tip_xy', True)))
+        for text, var, fn in (("Sloped walls: pretravel along the probing direction", self._travel_var,
+                               self._on_toggle_travel),
+                              ("Correct tilt / Z lean / rotation (from Set up)", self._align_var,
+                               self._on_toggle_align),
+                              ("Separate X / Y Effective Tip (from Set up)", self._tip_xy_var,
+                               self._on_toggle_tip_xy)):
+            ctk.CTkCheckBox(self._adv_frame, text=text, variable=var, font=ctk.CTkFont(size=11),
+                            command=lambda f=fn: (self._update_adv_header(), f())
+                            ).pack(anchor="w", padx=10, pady=(4, 0))
+        self._update_adv_header()
 
         self.lbl_failed = ctk.CTkLabel(self.results_frame, text="—",
                                        font=ctk.CTkFont(size=18, weight="bold"))
@@ -344,6 +410,10 @@ class EvaluationLeftPanel:
         self.lbl_hole_rate = ctk.CTkLabel(self.results_frame, text="",
                                           text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=11))
         self.lbl_hole_rate.pack(anchor="w", padx=10, pady=(0, 4))
+        self.lbl_corrections = ctk.CTkLabel(self.results_frame, text="", text_color=theme.TEXT_MUTED,
+                                            font=ctk.CTkFont(size=11), justify="left", anchor="w",
+                                            wraplength=260)   # v29
+        self.lbl_corrections.pack(anchor="w", padx=10, pady=(0, 4))
         self.btn_save_csv = ctk.CTkButton(
             self.results_frame, text="💾 Save results CSV (raw + compensated)", height=26,
             fg_color=theme.BTN_SECONDARY, hover_color=theme.BTN_SECONDARY_HOVER,
@@ -436,7 +506,8 @@ class EvaluationLeftPanel:
             if total_pts:
                 color = _COLOR_GOOD if failed == 0 else _COLOR_BAD
                 self.lbl_failed.configure(
-                    text=f"{result.get('passed_points', total_pts - failed)} / {total_pts} points passed"
+                    text=(f"{failed} of {total_pts} points failed" if failed      # v29: นับจุดไม่ผ่าน
+                          else f"All {total_pts} points passed")
                          + (f"\n⚠ {result['suspect_points']} point(s): the stylus shaft may have touched"
                             f" the wall instead of the ball tip — those values may be off"
                             if result.get('suspect_points') else ""),   # v14/v16: เตือนเท่านั้น
@@ -448,25 +519,19 @@ class EvaluationLeftPanel:
             n_holes = len(holes_r)
             n_pass  = sum(1 for hv in holes_r.values() if hv.get('passed'))
             comp = result.get('compensation')
-            src = (" (this run's outer walls)" if result.get('tip_source') == 'run'
-                   else " (Hardware Setting)") + (
-                ", pretravel along probing dir" if result.get('pretravel') == 'travel' else "") + (
-                ", tilt / Z lean / rotation corrected" if result.get('alignment') else "")   # v19 / v25
-            comp_text = {
-                'on': (f"Tip compensation: r X {result['tip_radius_xy'][0]:.3f} / Y "
-                       f"{result['tip_radius_xy'][1]:.3f} mm{src}" if result.get('tip_radius_xy') else
-                       f"Tip compensation: r = {result.get('tip_radius_mm', 0):.3f} mm{src}"),   # v23
-                'unavailable': "Tip compensation: unavailable (schema has no probe directions"
-                               " — re-export G-code + schema)",
-            }.get(comp, "Tip compensation: off (raw ball centre vs CAD)")
-            comp_text += self._calib_text(result)                  # v19
+            comp_text = self._calib_text(result)   # v29: การชดเชย/การแก้ค่าอยู่ที่ lbl_corrections
+            items, warns = corrections_status(self.app, result)
+            self.lbl_corrections.configure(
+                text="Corrections:\n" + "\n".join(f"  {h}: {t}" for h, t in items)
+                     + "".join(f"\n⚠ {w}" for w in warns),
+                text_color=theme.WARN_TEXT if warns else theme.TEXT_MUTED)
             depth_text, depth_warn = self._depth_status_text()   # v13
             shaft_text = self._shaft_risk_text()                   # v17
             depth_text += shaft_text + self._best_fit_text() + self._z_offset_text(result)   # v18 / v27
             depth_warn = depth_warn or bool(shaft_text)
             self.lbl_hole_rate.configure(
-                text=(f"{n_pass} / {n_holes} holes fully passed\n" if n_holes else "") + comp_text
-                     + depth_text,
+                text=((f"{n_pass} / {n_holes} holes fully passed" if n_holes else "") + comp_text
+                      + depth_text).lstrip("\n"),
                 text_color=(theme.WARN_TEXT if comp == 'unavailable' or depth_warn
                             else theme.TEXT_MUTED),
                 justify="left", wraplength=260)
@@ -474,6 +539,7 @@ class EvaluationLeftPanel:
             self.lbl_log_info.configure(text="No .log file loaded", text_color=theme.TEXT_MUTED)
             self.lbl_failed.configure(text="—", text_color=theme.TEXT)
             self.lbl_hole_rate.configure(text="")
+            self.lbl_corrections.configure(text="")
 
     @staticmethod
     def _z_offset_text(result) -> str:
@@ -567,6 +633,21 @@ class EvaluationLeftPanel:
         if not self._auto_refresh_if_result_exists():
             self.refresh()
 
+    def _update_adv_header(self):
+        """v29: หัวกล่อง Advanced — จำนวนที่เปิด (สีเหลืองถ้ามีตัวที่ปิด)"""
+        n = sum(bool(v.get()) for v in (self._travel_var, self._align_var, self._tip_xy_var))
+        self._adv_btn.configure(text=f"{'▾' if self._adv_open else '▸'} Advanced corrections ({n} / 3 on)",
+                                text_color=theme.TEXT_MUTED if n == 3 else theme.WARN_TEXT)
+
+    def _toggle_advanced(self):
+        """v29: พับ / กาง Advanced corrections"""
+        self._adv_open = not self._adv_open
+        if self._adv_open:
+            self._adv_frame.pack(fill="x", after=self._adv_btn)
+        else:
+            self._adv_frame.pack_forget()
+        self._update_adv_header()
+
     def _best_fit_text(self) -> str:
         """v18: สรุปการเลื่อนของ Best-fit centre (มากสุดของทุกรู)"""
         result = getattr(self.app, 'evaluation_result', None) or {}
@@ -577,8 +658,7 @@ class EvaluationLeftPanel:
         if not offs:
             return "\nBest-fit centre: no hole had enough directions to fit"
         mx = max((o[0] ** 2 + o[1] ** 2 + o[2] ** 2) ** 0.5 for o in offs)
-        return (f"\nBest-fit centre ON — hole positions NOT checked "
-                f"(largest shift {mx:.3f} mm, see each hole)")
+        return f"\nBest-fit centre: largest hole shift {mx:.3f} mm (see each hole)"
 
     def _shaft_risk_text(self) -> str:
         """v17: '⚠ N layer(s) deeper than X mm …' — คำนวณจากขนาดหัวโพรบ ไม่ใช่จากข้อมูลที่วัด"""

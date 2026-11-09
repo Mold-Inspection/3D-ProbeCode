@@ -15,7 +15,10 @@
 #   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
 #                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 30
+# VERSION: 32
+# CHANGE LOG (v31 -> v32): โหลด effective_tip_xy_date (วันที่ตั้ง Effective Tip แยกแกน)
+# CHANGE LOG (v30 -> v31): ค่าเริ่มต้น evaluation_tip_xy = True (Effective Tip แยก X/Y) — sphere 4/11 และ
+#   taper 5/11 (หลังแก้ $1=255) ผนัง X/Y ตรงกัน, roundness 0.3 → 0.05, จุด fail ลดลง
 # CHANGE LOG (v29 -> v30): ค่าเริ่มต้น evaluation_pretravel_travel = True (แบบจำลอง travel บนผนังเอียง)
 # CHANGE LOG (v28 -> v29): part_alignment (Feature 1 — จาก Set up) + evaluation_align (ค่าเริ่มต้นเปิด)
 # CHANGE LOG (v27 -> v28):
@@ -176,6 +179,8 @@ class UIManager:
                                                 'effective_tip_dx', 'effective_tip_dy',
                                                 'stylus_tilt_deg', 'retouch_dwell'))
         self.probe_profile.retouch_count = max(1, int(self.probe_profile.retouch_count))   # v27
+        self.probe_profile.effective_tip_xy_date = str((_saved.get('probe') or {}).get(
+            'effective_tip_xy_date', '') or '')                                                  # v32
         self.probe_profile.z_trigger = bool((_saved.get('probe') or {}).get('z_trigger', False))   # v21
         self.probe_profile.double_touch = bool((_saved.get('probe') or {}).get(
             'double_touch', self.probe_profile.DEFAULT_DOUBLE_TOUCH))                                # v23
@@ -194,7 +199,7 @@ class UIManager:
         # v30: ค่าเริ่มต้น travel — หัวโพรบทริกแนว Z ไม่ได้ (ลูกบอลคงความสูง เครื่องเดินต่อตามทิศที่โพรบ) ทดสอบ
         #      2026-11-04 รู sphere: |dev| 0.198 → 0.113 และผิดพลาดไม่โตตามความลึก
         self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', True))   # v26 / v30
-        self.evaluation_tip_xy = bool(user_settings.get('evaluation_tip_xy', False))   # v28: Effective Tip แยก X/Y
+        self.evaluation_tip_xy = bool(user_settings.get('evaluation_tip_xy', True))   # v28: Effective Tip แยก X/Y
         self.evaluation_align = bool(user_settings.get('evaluation_align', True))      # v29: Feature 1
         self.part_alignment = None   # v29: ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up ล่าสุด
         self.job_gcode   = None   # v24: G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
