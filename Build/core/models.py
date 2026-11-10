@@ -1,49 +1,71 @@
 # ==============================================================================
-# core/models.py — โครงสร้างข้อมูล (data classes) ของรูและ segment
+# core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ
 # ==============================================================================
-# หน้าที่: เก็บโครงสร้างข้อมูลกลางที่ใช้ส่งต่อกันทั่วโปรแกรม
-#   - HoleSegment        : เรขาคณิตดิบของรู 1 ช่วง (ก่อน merge เป็นรู counterbore)
-#   - HoleSegmentSetting : ค่าตั้งค่าการตรวจสอบต่อ segment เดียว (รูหลายระดับเส้นผ่านศูนย์กลาง)
-#   - HoleFeature        : ข้อมูลรูที่ตรวจพบ ใช้แสดงผลฝั่ง UI
-#   - StepHole           : รูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
-#   - StepPocket         : ช่องสี่เหลี่ยม (จัตุรัส/ผืนผ้า มุมคมหรือมุมโค้ง) — v04
-#                          และช่องทรงแคปซูล/slot (corner_radius == half_v) — v05
-#   - rect_wall_contacts(): กระจายจุดสัมผัสผนังของช่องสี่เหลี่ยม — v04
-#   - validate_segment_reachability() : ตรวจสอบว่า segment ที่ลึกกว่าจะถูก
-#     probe เข้าไปถึงได้จริงหรือไม่ เทียบกับคอขวดของ segment ที่ตื้นกว่า
+# สรุปหน้าที่:
+#   โครงสร้างข้อมูลกลางของทั้งโปรแกรม: HoleSegment, HoleSegmentSetting,
+#   HoleFeature (รูที่ UI ใช้), StepHole / StepPocket / StepChannel (รูจาก
+#   B-Rep) และฟังก์ชันช่วยเรื่องชั้น ความลึกพื้น จุดแตะช่องสี่เหลี่ยม
 #
-# ตัวแปรสำคัญที่ปรับจูนได้ (ค่าเริ่มต้นการตรวจสอบต่อรู/segment):
-#   layers            = จำนวนชั้น (layer) ที่จะตรวจสอบตามความลึกของรู
-#   points_per_layer  = จำนวนจุดสัมผัสผนังรูต่อ 1 ชั้น
-#   zigzag_inspection = เปิด/ปิดโหมดหมุนมุมโพรบทีละชั้น (ลดจุดบอดจากการสัมผัสซ้ำมุมเดิม)
-#   zigzag_degree     = องศาสะสมที่หมุนต่อ 1 ชั้น เมื่อเปิดโหมด zigzag
-#   selected_for_inspection (HoleSegmentSetting) = segment นี้ถูกรวมใน
-#     probe path / G-code หรือไม่ (ผู้ใช้ปรับได้ผ่าน checkbox ใน sidebar
-#     ขวา — ค่าเริ่มต้นคำนวณจาก validate_segment_reachability())
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - core/channel_extractor.py — หาร่องเปิด (runner) จาก B-Rep (StepChannel)
+#     - core/evaluation_engine.py — ประเมินจุดวัดเทียบจุดคาดหวัง (ระยะเบี่ยง ⌀ ความกลม PASS/FAIL) (clamp_layers, hole_floor_depth)
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (FLOOR_SAFETY, hole_floor_depth, layer_fractions, rect_wall_contacts, surface_below)
+#     - core/path_planner.py — ชั้นและจุดวัดสำหรับแสดงผล (layer_fractions, surface_below)
+#     - core/pocket_extractor.py — หาช่องสี่เหลี่ยม/แคปซูลจาก B-Rep (StepPocket)
+#     - core/step_extractor.py — หารูจาก B-Rep ของไฟล์ STEP (HoleSegment, StepHole, flip_radius_profile)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (hole_floor_depth)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (set_floor_safety)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (HoleFeature, HoleSegmentSetting, MAX_LAYERS, MIN_LAYERS, clamp_layers, hole_floor_depth, …)
+#   ไลบรารีภายนอก: math, numpy
 #
-# NOTE (v03): hole.segments / sh.segments ถูกเรียงโดย
-# core/step_extractor.py :: _order_segments_deepest_first() เสมอ ให้
-# index 0 = segment ที่ลึกที่สุด และ index สุดท้าย = segment ที่ตื้นที่สุด
-# (ปากรู) — validate_segment_reachability() ด้านล่างถูกปรับให้ตรงกับ
-# ลำดับนี้แล้ว
+# รายละเอียด:
+#   โครงสร้างข้อมูล (data classes) ของรูและ segment
 #
-# NOTE (v04): เพิ่มรูปทรง "ช่องสี่เหลี่ยม" (StepPocket, shape == 'rect') ที่
-# ใช้ร่วมกับ pipeline เดิมทั้งหมด (view → path → G-code → evaluation) ได้
-# เพราะสืบทอดจาก StepHole — radius ของ pocket = ครึ่งหนึ่งของด้านแคบ (วงกลม
-# ที่ใหญ่ที่สุดที่ใส่ในช่องได้) จึงใช้กับการตรวจ probe fit เดิมได้ตรง ๆ
+#   หน้าที่: เก็บโครงสร้างข้อมูลกลางที่ใช้ส่งต่อกันทั่วโปรแกรม
+#     - HoleSegment        : เรขาคณิตดิบของรู 1 ช่วง (ก่อน merge เป็นรู counterbore)
+#     - HoleSegmentSetting : ค่าตั้งค่าการตรวจสอบต่อ segment เดียว (รูหลายระดับเส้นผ่านศูนย์กลาง)
+#     - HoleFeature        : ข้อมูลรูที่ตรวจพบ ใช้แสดงผลฝั่ง UI
+#     - StepHole           : รูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
+#     - StepPocket         : ช่องสี่เหลี่ยม (จัตุรัส/ผืนผ้า มุมคมหรือมุมโค้ง) —
+#                            และช่องทรงแคปซูล/slot (corner_radius == half_v) —
+#     - rect_wall_contacts(): กระจายจุดสัมผัสผนังของช่องสี่เหลี่ยม —
+#     - validate_segment_reachability() : ตรวจสอบว่า segment ที่ลึกกว่าจะถูก
+#       probe เข้าไปถึงได้จริงหรือไม่ เทียบกับคอขวดของ segment ที่ตื้นกว่า
 #
-# NOTE (v05): ช่องทรงแคปซูล (slot) = StepPocket ที่ corner_radius == half_v
-# ผนังปลายทั้งสองด้านจึงไม่มีช่วงตรง — rect_wall_contacts() วางจุดของผนัง
-# ปลายบนส่วนโค้งครึ่งวงกลมแทน (กระจายตามมุม ±RECT_CONTACT_SPAN × 90°)
+#   ตัวแปรสำคัญที่ปรับจูนได้ (ค่าเริ่มต้นการตรวจสอบต่อรู/segment):
+#     layers            = จำนวนชั้น (layer) ที่จะตรวจสอบตามความลึกของรู
+#     points_per_layer  = จำนวนจุดสัมผัสผนังรูต่อ 1 ชั้น
+#     zigzag_inspection = เปิด/ปิดโหมดหมุนมุมโพรบทีละชั้น (ลดจุดบอดจากการสัมผัสซ้ำมุมเดิม)
+#     zigzag_degree     = องศาสะสมที่หมุนต่อ 1 ชั้น เมื่อเปิดโหมด zigzag
+#     selected_for_inspection (HoleSegmentSetting) = segment นี้ถูกรวมใน
+#       probe path / G-code หรือไม่ (ผู้ใช้ปรับได้ผ่าน checkbox ใน sidebar
+#       ขวา — ค่าเริ่มต้นคำนวณจาก validate_segment_reachability())
 #
-# NOTE (v06): ระยะเผื่อพื้น — layer_fractions() ยกชั้นวัดที่ลึกสุดให้สูงกว่าพื้น/ขั้น
-# ใต้ลูกบอลอย่างน้อย รัศมีหัวโพรบ + floor clearance (FLOOR_SAFETY) และ
-# HoleFeature.measure_floor = แตะพื้นก้นรูแนวแกน Z (เฉพาะหัวโพรบที่ทริกแนว Z ได้)
+#   NOTE: hole.segments / sh.segments ถูกเรียงโดย
+#   core/step_extractor.py :: _order_segments_deepest_first() เสมอ ให้
+#   index 0 = segment ที่ลึกที่สุด และ index สุดท้าย = segment ที่ตื้นที่สุด
+#   (ปากรู) — validate_segment_reachability() ด้านล่างถูกปรับให้ตรงกับ
+#   ลำดับนี้แล้ว
 #
-# ตัวแปรที่ปรับจูนได้ (v04):
-#   RECT_CONTACT_SPAN = สัดส่วนช่วงความยาวด้านตรงที่วางจุดสัมผัสได้ (0..1)
-#                       — กันหัวโพรบไม่ให้ไปโดนผนังข้างเคียงใกล้มุม
+#   NOTE: เพิ่มรูปทรง "ช่องสี่เหลี่ยม" (StepPocket, shape == 'rect') ที่
+#   ใช้ร่วมกับ pipeline เดิมทั้งหมด (view → path → G-code → evaluation) ได้
+#   เพราะสืบทอดจาก StepHole — radius ของ pocket = ครึ่งหนึ่งของด้านแคบ (วงกลม
+#   ที่ใหญ่ที่สุดที่ใส่ในช่องได้) จึงใช้กับการตรวจ probe fit เดิมได้ตรง ๆ
+#
+#   NOTE: ช่องทรงแคปซูล (slot) = StepPocket ที่ corner_radius == half_v
+#   ผนังปลายทั้งสองด้านจึงไม่มีช่วงตรง — rect_wall_contacts() วางจุดของผนัง
+#   ปลายบนส่วนโค้งครึ่งวงกลมแทน (กระจายตามมุม ±RECT_CONTACT_SPAN × 90°)
+#
+#   NOTE: ระยะเผื่อพื้น — layer_fractions() ยกชั้นวัดที่ลึกสุดให้สูงกว่าพื้น/ขั้น
+#   ใต้ลูกบอลอย่างน้อย รัศมีหัวโพรบ + floor clearance (FLOOR_SAFETY) และ
+#   HoleFeature.measure_floor = แตะพื้นก้นรูแนวแกน Z (เฉพาะหัวโพรบที่ทริกแนว Z ได้)
+#
+#   ตัวแปรที่ปรับจูนได้:
+#     RECT_CONTACT_SPAN = สัดส่วนช่วงความยาวด้านตรงที่วางจุดสัมผัสได้ (0..1)
+#                         — กันหัวโพรบไม่ให้ไปโดนผนังข้างเคียงใกล้มุม
 # ==============================================================================
+
 import math
 
 import numpy as np
@@ -65,7 +87,7 @@ def clamp_layers(n) -> int:
 
 
 # ------------------------------------------------------------------------------
-# v06: ระยะเผื่อพื้น — ชั้นวัดที่ลึกที่สุดต้องอยู่สูงกว่าพื้น/ขั้นที่อยู่ใต้ลูกบอลอย่างน้อย
+# ระยะเผื่อพื้น — ชั้นวัดที่ลึกที่สุดต้องอยู่สูงกว่าพื้น/ขั้นที่อยู่ใต้ลูกบอลอย่างน้อย
 # (รัศมีหัวโพรบ + floor clearance) กันลูกบอลจมพื้นเมื่อ Set Zero แกน Z ผิดเล็กน้อย
 # — หัวโพรบส่วนใหญ่ทริกเฉพาะแนวด้านข้าง ถ้าชนพื้นเครื่องจะไม่หยุด
 # ค่าใน FLOOR_SAFETY ตั้งจาก Hardware Setting (ui/main_window.py → set_floor_safety)
@@ -165,9 +187,9 @@ class HoleSegmentSetting:
     """การตั้งค่าการตรวจสอบ (inspection) ต่อ segment เดียวของรูหลายระดับ
     เส้นผ่านศูนย์กลาง — แสดงเป็น sub-tab ที่กางออกมาจากการ์ดรูหลักใน
     sidebar ขวา (การ์ดรู 1 ใบ = 1 display_id, กดขยายแล้วเห็น segment ย่อย)
-    v03: seg_idx=0 ตอนนี้คือ segment ที่ลึกที่สุด (mouth = seg_idx สุดท้าย)"""
+    seg_idx=0 ตอนนี้คือ segment ที่ลึกที่สุด (mouth = seg_idx สุดท้าย)"""
     def __init__(self, seg_idx: int, radius_open: float, radius_deep: float, depth: float):
-        self.seg_idx      = seg_idx          # ลำดับ segment: 0 = ลึกที่สุด (v03)
+        self.seg_idx      = seg_idx          # ลำดับ segment: 0 = ลึกที่สุด
         self.radius_open  = radius_open
         self.radius_deep  = radius_deep
         self.depth        = depth
@@ -193,7 +215,7 @@ def validate_segment_reachability(segments: list) -> None:
 
     for i in range(len(segments) - 1):
         deep    = segments[i]       # segment นี้กำลังถูกตรวจสอบว่าเข้าถึงได้ไหม
-        shallow = segments[i + 1]   # เพื่อนบ้านที่ตื้นกว่า/ใกล้ปากรูกว่า (v03: i+1 ไม่ใช่ i-1)
+        shallow = segments[i + 1]   # เพื่อนบ้านที่ตื้นกว่า/ใกล้ปากรูกว่า (i+1 ไม่ใช่ i-1)
 
         shallow_narrow = min(shallow.radius_open, shallow.radius_deep)
         deep_wide      = max(deep.radius_open, deep.radius_deep)
@@ -224,20 +246,20 @@ class HoleFeature:
         self.selected_for_inspection = False
         self.zigzag_inspection = False
         self.zigzag_degree = 45.0
-        self.measure_floor = False   # v06: แตะพื้นก้นรูแนวแกน Z (ต้องเปิด Z trigger ใน Hardware Setting)
+        self.measure_floor = False   # แตะพื้นก้นรูแนวแกน Z (ต้องเปิด Z trigger ใน Hardware Setting)
 
         self.is_rejected = False
         self.reject_reason = ""
         self.position_unknown = False
 
         # segments ว่างเปล่า = รูปกติ (segment เดียว) ; มี 2+ = รูหลายระดับเส้นผ่านศูนย์กลาง
-        # v03: segments[0] = segment ที่ลึกที่สุด
+        # segments[0] = segment ที่ลึกที่สุด
         self.segments: list = []
 
 
 class StepHole:
     """โครงสร้างข้อมูลรูทรงกระบอกที่สกัดมาจาก B-Rep ของไฟล์ STEP
-    v03: self.segments ถูกเรียงแบบ "ลึกสุดก่อน" เสมอโดย
+    self.segments ถูกเรียงแบบ "ลึกสุดก่อน" เสมอโดย
     core/step_extractor.py :: _order_segments_deepest_first()"""
     def __init__(self, open_3d, deep_3d, radius_open, radius_deep, axis_vec, segments=None):
         self.open_3d     = tuple(open_3d)
@@ -498,7 +520,7 @@ def rect_wall_contacts(half_u: float, half_v: float, corner_radius: float,
     contacts = []
     for nu, nv, k, straight_half, dist in walls:
         if straight_half < 1e-6 and corner_radius > 1e-6:
-            # v05: ผนังนี้ไม่มีช่วงตรง (ปลายครึ่งวงกลมของ slot) — กระจายจุดบน
+            # ผนังนี้ไม่มีช่วงตรง (ปลายครึ่งวงกลมของ slot) — กระจายจุดบน
             # ส่วนโค้งตามมุมแทน โพรบเริ่มที่จุดศูนย์กลางส่วนโค้ง เดินออกตามรัศมี
             off = dist - corner_radius
             for f in offsets(k, 1.0):

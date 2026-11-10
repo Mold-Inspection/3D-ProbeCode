@@ -1,45 +1,46 @@
 # ==============================================================================
-# core/log_parser.py — อ่านไฟล์ .log จาก OpenBuilds Control -> รายการจุดที่
-# ถูกโพรบจริง (actual probe points) เรียงตามลำดับที่ไฟล์บันทึกไว้
+# core/log_parser.py — อ่าน .log ของ OpenBuilds เป็นจุดวัด
 # ==============================================================================
-# VERSION: 04
-# CHANGE LOG (v03 -> v04):
-#   REPEAT_MARK (G4 P0.02) ก่อนแตะช้าครั้งที่ 2+ ของจุดเดียวกัน → ค่าของจุด = มัธยฐาน,
-#   'touches' (ทุกครั้ง) และ 'spread' (ช่วงสูงสุดของแกนใดแกนหนึ่ง) — log เก่าได้ผลเหมือนเดิม
-# CHANGE LOG (v02 -> v03):
-#   แตะสองครั้ง (core/gcode_generator.py v13): ระหว่างแตะเร็วกับแตะช้ามีคำสั่ง RETOUCH_MARK
-#   ("G4 P0.01") — เจอบรรทัดนี้ใน log เมื่อไหร่ ทิ้งจุดก่อนหน้า (แตะเร็ว) ใช้จุดแตะช้าแทน
-#   จำนวนจุดจึงยังตรงกับ build_point_map() (log ที่ copy จาก console เองต้องมีบรรทัดคำสั่งด้วย)
-# CHANGE LOG (v01 -> v02):
-#   FIX: [PRB:...] ของ GRBL เป็นพิกัดเครื่อง (MPos) ไม่ใช่พิกัดเทียบ Set Zero —
-#   ถ้าไฟล์มีบรรทัด "; WCO: x,y,z" (เขียนโดย core/openbuilds_link.py) จะลบ work
-#   offset ล่าสุดออกจากทุกจุดที่ตามมา: พิกัดงาน = PRB - WCO  ไฟล์ที่ไม่มี WCO
-#   (copy จาก console เอง) อ่านเหมือนเดิม แต่จุดมี 'wco': None ให้ UI เตือน
-# หน้าที่: แกะบรรทัด GRBL probe-report ("[PRB:x,y,z:s]") ออกจากไฟล์ .log ที่
-# OpenBuilds Control บันทึกไว้หลังรันโปรแกรม G-code จริงบนเครื่อง แปลงเป็น
-# รายการจุด (x, y, z) เรียงตามลำดับที่ปรากฏในไฟล์ — ลำดับนี้ตรงกับลำดับที่
-# core/gcode_generator.py::build_point_map() คำนวณ "จุดที่คาดหวัง" ไว้แล้ว
-# (ดู core/evaluation_engine.py::evaluate_points() ซึ่งจับคู่ทั้งสองฝั่งด้วย
-# sequence index ไม่ใช่ spatial nearest-neighbor — ดูเหตุผลใน
-# PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §3)
+# สรุปหน้าที่:
+#   อ่านไฟล์ .log ของ OpenBuilds → รายการพิกัดจุดแตะจริง [PRB] ลบ WCO
+#   เป็นพิกัดงาน ทิ้งแตะเร็ว และรวมแตะช้าหลายครั้งเป็นมัธยฐาน
 #
-# NOTE (สำคัญ — สมมติฐานรูปแบบไฟล์ ยังไม่เคยเห็นตัวอย่างไฟล์ .log จริง):
-# ยังไม่มีตัวอย่างไฟล์ .log ของ OpenBuilds Control ให้ตรวจสอบจริง จึงเขียน
-# โดยยึดตามรูปแบบ probe report มาตรฐานของเฟิร์มแวร์ GRBL คือ
-#   [PRB:x,y,z:s]
-# โดย s คือ 1 = probe สำเร็จ (touched), 0 = ไม่พบการสัมผัส (probe fail/timeout)
-# — parser ตัวนี้ถูกออกแบบมาแบบ "ป้องกันตัวเอง" (defensive): ใช้ regex ค้นหา
-# รูปแบบ [PRB:...] ที่ไหนก็ได้ในแต่ละบรรทัด (ไม่สนใจ prefix เช่น timestamp,
-# log level, หรือข้อความอื่นรอบ ๆ) และบันทึกบรรทัดที่ parse ไม่ได้ไว้ต่างหาก
-# (ไม่โยน exception ทิ้งข้อมูลไปเฉย ๆ) เพื่อให้แก้ไข regex ได้ง่ายทันทีที่มี
-# ตัวอย่างไฟล์จริงมาเทียบ — ดู PLAN §10 "Remaining Assumption to Flag"
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (REPEAT_MARK, RETOUCH_MARK)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (RETOUCH_MARK, parse_openbuilds_log)
+#   ไลบรารีภายนอก: datetime, os, re
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _PRB_PATTERN       = regex หลักที่ใช้จับบรรทัด probe report — แก้ตรงนี้
-#                         จุดเดียวถ้ารูปแบบไฟล์จริงต่างจากสมมติฐาน
-#   _SKIP_SUCCESS_ONLY = True = เก็บเฉพาะจุดที่ s==1 (probe สำเร็จจริง) ค่า
-#                         เริ่มต้น — ตั้งเป็น False เพื่อเก็บทุกจุดรวม fail ด้วย
+# รายละเอียด:
+#   อ่านไฟล์ .log จาก OpenBuilds Control -> รายการจุดที่
+#   ถูกโพรบจริง (actual probe points) เรียงตามลำดับที่ไฟล์บันทึกไว้
+#
+#   หน้าที่: แกะบรรทัด GRBL probe-report ("[PRB:x,y,z:s]") ออกจากไฟล์ .log ที่
+#   OpenBuilds Control บันทึกไว้หลังรันโปรแกรม G-code จริงบนเครื่อง แปลงเป็น
+#   รายการจุด (x, y, z) เรียงตามลำดับที่ปรากฏในไฟล์ — ลำดับนี้ตรงกับลำดับที่
+#   core/gcode_generator.py::build_point_map() คำนวณ "จุดที่คาดหวัง" ไว้แล้ว
+#   (ดู core/evaluation_engine.py::evaluate_points() ซึ่งจับคู่ทั้งสองฝั่งด้วย
+#   sequence index ไม่ใช่ spatial nearest-neighbor — ดูเหตุผลใน
+#   PLAN_evaluation-tab-openbuilds-log-comparison_v02.md §3)
+#
+#   NOTE (สำคัญ — สมมติฐานรูปแบบไฟล์ ยังไม่เคยเห็นตัวอย่างไฟล์ .log จริง):
+#   ยังไม่มีตัวอย่างไฟล์ .log ของ OpenBuilds Control ให้ตรวจสอบจริง จึงเขียน
+#   โดยยึดตามรูปแบบ probe report มาตรฐานของเฟิร์มแวร์ GRBL คือ
+#     [PRB:x,y,z:s]
+#   โดย s คือ 1 = probe สำเร็จ (touched), 0 = ไม่พบการสัมผัส (probe fail/timeout)
+#   — parser ตัวนี้ถูกออกแบบมาแบบ "ป้องกันตัวเอง" (defensive): ใช้ regex ค้นหา
+#   รูปแบบ [PRB:...] ที่ไหนก็ได้ในแต่ละบรรทัด (ไม่สนใจ prefix เช่น timestamp,
+#   log level, หรือข้อความอื่นรอบ ๆ) และบันทึกบรรทัดที่ parse ไม่ได้ไว้ต่างหาก
+#   (ไม่โยน exception ทิ้งข้อมูลไปเฉย ๆ) เพื่อให้แก้ไข regex ได้ง่ายทันทีที่มี
+#   ตัวอย่างไฟล์จริงมาเทียบ — ดู PLAN §10 "Remaining Assumption to Flag"
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _PRB_PATTERN       = regex หลักที่ใช้จับบรรทัด probe report — แก้ตรงนี้
+#                           จุดเดียวถ้ารูปแบบไฟล์จริงต่างจากสมมติฐาน
+#     _SKIP_SUCCESS_ONLY = True = เก็บเฉพาะจุดที่ s==1 (probe สำเร็จจริง) ค่า
+#                           เริ่มต้น — ตั้งเป็น False เพื่อเก็บทุกจุดรวม fail ด้วย
 # ==============================================================================
+
 import os
 import re
 import datetime
@@ -49,14 +50,14 @@ import datetime
 _PRB_PATTERN = re.compile(
     r"\[PRB:\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*:\s*(\d+)\s*\]"
 )
-# v02: work offset ที่ core/openbuilds_link.py บันทึกไว้ — "; WCO: x,y,z"
+# work offset ที่ core/openbuilds_link.py บันทึกไว้ — "; WCO: x,y,z"
 _WCO_PATTERN = re.compile(
     r"^\s*;\s*WCO:\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)\s*,\s*([-+]?\d*\.?\d+)"
 )
 
-# v03: คำสั่งคั่นระหว่างแตะเร็ว/แตะช้า — gcode_generator ใช้ค่าเดียวกันนี้
+# คำสั่งคั่นระหว่างแตะเร็ว/แตะช้า — gcode_generator ใช้ค่าเดียวกันนี้
 RETOUCH_MARK = "G4 P0.01"
-# v04: ก่อนแตะช้าครั้งที่ 2, 3, … ของจุดเดียวกัน — PRB ถัดไปรวมเข้าจุดก่อนหน้า (ค่าที่ใช้ = มัธยฐาน)
+# ก่อนแตะช้าครั้งที่ 2, 3, … ของจุดเดียวกัน — PRB ถัดไปรวมเข้าจุดก่อนหน้า (ค่าที่ใช้ = มัธยฐาน)
 REPEAT_MARK = "G4 P0.02"
 _RETOUCH_PATTERN = re.compile(r"\[\s*G4\s*P0?\.01\s*\]")
 _REPEAT_PATTERN = re.compile(r"\[\s*G4\s*P0?\.02\s*\]")
@@ -116,7 +117,7 @@ def parse_openbuilds_log(filepath: str) -> list:
     list ของ dict เรียงตามลำดับในไฟล์ แต่ละอันมี:
       seq_idx : ลำดับจุดนี้นับจาก 0 (ลำดับที่ใช้จับคู่กับ EXPECTED points
                 ใน core/evaluation_engine.py::evaluate_points())
-      x, y, z : พิกัดที่ probe รายงานว่าสัมผัส (mm) — v02: ลบ WCO แล้วถ้ามี
+      x, y, z : พิกัดที่ probe รายงานว่าสัมผัส (mm) — ลบ WCO แล้วถ้ามี
       wco     : (x, y, z) work offset ที่ใช้ลบ หรือ None ถ้าไฟล์ไม่มีบรรทัด WCO
                 (= พิกัดเครื่องดิบ)
       status  : สถานะจาก GRBL ("1"=สัมผัสสำเร็จ, "0"=ไม่พบการสัมผัส)
@@ -133,9 +134,9 @@ def parse_openbuilds_log(filepath: str) -> list:
     points   = []
     warnings = []
     matched  = 0
-    wco      = None   # v02: work offset ล่าสุดที่เจอในไฟล์
-    fast_guard = 0    # v03: จำนวนจุดหลังทิ้งแตะเร็วครั้งล่าสุด
-    repeat_next = False   # v04: PRB ถัดไปเป็นการแตะช้าซ้ำของจุดก่อนหน้า
+    wco      = None   # work offset ล่าสุดที่เจอในไฟล์
+    fast_guard = 0    # จำนวนจุดหลังทิ้งแตะเร็วครั้งล่าสุด
+    repeat_next = False   # PRB ถัดไปเป็นการแตะช้าซ้ำของจุดก่อนหน้า
 
     for line_no, raw_line in enumerate(raw_lines, start=1):
         line = raw_line.rstrip("\n\r")
@@ -147,11 +148,11 @@ def parse_openbuilds_log(filepath: str) -> list:
             wco = (float(w.group(1)), float(w.group(2)), float(w.group(3)))
             continue
 
-        if _REPEAT_PATTERN.search(line):    # v04: แตะช้าซ้ำ — รวมเข้าจุดก่อนหน้า
+        if _REPEAT_PATTERN.search(line):    # แตะช้าซ้ำ — รวมเข้าจุดก่อนหน้า
             repeat_next = bool(points)
             continue
 
-        if _RETOUCH_PATTERN.search(line):   # v03: จุดก่อนหน้าคือแตะเร็ว — ใช้แตะช้าที่ตามมาแทน
+        if _RETOUCH_PATTERN.search(line):   # จุดก่อนหน้าคือแตะเร็ว — ใช้แตะช้าที่ตามมาแทน
             if len(points) > fast_guard:      # กันบรรทัด marker ซ้ำ — ทิ้งได้ครั้งเดียวต่อจุดใหม่
                 points.pop()
                 fast_guard = len(points)
@@ -174,9 +175,9 @@ def parse_openbuilds_log(filepath: str) -> list:
             warnings.append(LogParseWarning(line_no, line, f"probe not successful (status={status})"))
             continue
 
-        if wco is not None:   # v02: พิกัดเครื่อง → พิกัดเทียบ Set Zero
+        if wco is not None:   # พิกัดเครื่อง → พิกัดเทียบ Set Zero
             x, y, z = x - wco[0], y - wco[1], z - wco[2]
-        if repeat_next:       # v04: ค่าของจุด = มัธยฐานของการแตะช้าทุกครั้ง
+        if repeat_next:       # ค่าของจุด = มัธยฐานของการแตะช้าทุกครั้ง
             repeat_next = False
             p = points[-1]
             p['touches'].append((x, y, z))
@@ -192,7 +193,7 @@ def parse_openbuilds_log(filepath: str) -> list:
             'wco': wco,
             'status': status,
             'raw': line,
-            'touches': [(x, y, z)],   # v04: ทุกการแตะช้าของจุดนี้
+            'touches': [(x, y, z)],   # ทุกการแตะช้าของจุดนี้
             'spread': 0.0,
         })
 

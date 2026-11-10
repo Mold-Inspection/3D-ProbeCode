@@ -1,42 +1,36 @@
 # ==============================================================================
-# ui/tabs/path_mapper_tab.py — แท็บ "Path Mapper"
+# ui/tabs/path_mapper_tab.py — แท็บ Path Mapper (ลำดับการเดิน)
 # ==============================================================================
-# หน้าที่: วาดหน้าจอ placeholder ของแท็บ Path Mapper (ฟีเจอร์นี้ยังไม่พัฒนา)
-# แสดงไอคอน 🚧 + หัวข้อ + รายการฟีเจอร์ที่จะทำในอนาคต
+# สรุปหน้าที่:
+#   แท็บ Path Mapper: แสดงลำดับการเดินระหว่างรูตามที่ G-code จะเดินจริง
 #
-# ตัวแปรที่ปรับจูนได้:
-#   future_items  = รายการข้อความฟีเจอร์ที่จะขึ้นแสดงใต้หัวข้อ (แก้ไข/เพิ่มได้)
-# ==============================================================================
-# ==============================================================================
-# ui/tabs/path_mapper_tab.py — แท็บ "Path Mapper"
-# ==============================================================================
-# หน้าที่: วาด overview 2D (mesh background + hole markers) พร้อมเส้นทางเดิน
-# เครื่องแบบ preview — ลำดับเดินเครื่องต้องตรงกับที่ G-code จริงจะวิ่ง
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/hole_ordering.py — จัดลำดับรู nearest-neighbor (order_holes_nearest_neighbor, split_step_ready)
+#     - ui/theme.py — สีและธีม (ACCENT, BG_PANEL, PLOT_AX, PLOT_GRID, TEXT, TEXT_MUTED, …)
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (PathMapperTab)
+#   ไลบรารีภายนอก: matplotlib, numpy
 #
-# ตัวแปรที่ปรับจูนได้:
-#   _START_COLOR / _BASE_FACE / _BASE_EDGE / _HILITE_FACE / _HILITE_EDGE / _SKIP_COLOR
-#     = สี marker ในแต่ละสถานะ (จุดเริ่ม / ปกติ / ไฮไลต์ / ข้าม-ไม่มี STEP)
+# รายละเอียด:
+#   แท็บ "Path Mapper"
+#
+#   หน้าที่: วาดหน้าจอ placeholder ของแท็บ Path Mapper (ฟีเจอร์นี้ยังไม่พัฒนา)
+#   แสดงไอคอน 🚧 + หัวข้อ + รายการฟีเจอร์ที่จะทำในอนาคต
+#
+#   ตัวแปรที่ปรับจูนได้:
+#     future_items  = รายการข้อความฟีเจอร์ที่จะขึ้นแสดงใต้หัวข้อ (แก้ไข/เพิ่มได้)
+#
+#   แท็บ "Path Mapper"
+#
+#   หน้าที่: วาด overview 2D (mesh background + hole markers) พร้อมเส้นทางเดิน
+#   เครื่องแบบ preview — ลำดับเดินเครื่องต้องตรงกับที่ G-code จริงจะวิ่ง
+#
+#   ตัวแปรที่ปรับจูนได้:
+#     _START_COLOR / _BASE_FACE / _BASE_EDGE / _HILITE_FACE / _HILITE_EDGE / _SKIP_COLOR
+#       = สี marker ในแต่ละสถานะ (จุดเริ่ม / ปกติ / ไฮไลต์ / ข้าม-ไม่มี STEP)
 # ==============================================================================
-# VERSION: 03
-# CHANGE LOG (v02 -> v03):
-#   FEATURE: Overview travel line now walks holes in the SAME order the
-#   real G-code will visit them (greedy nearest-neighbor over raw 3D
-#   open_3d coordinates), via the new shared core/hole_ordering.py
-#   module — no longer the plain display_id sequential order. Holes
-#   without STEP geometry (mesh-only, can't be G-code exported either)
-#   are excluded from the travel line and shown as small gray "no STEP
-#   data" ✕ markers instead, mirroring gcode_export_panel.py's skip
-#   warning.
-#   FEATURE: highlight_hole()/clear_hole_highlight() added — clicking or
-#   hovering a hole in the right sidebar while on this tab now just
-#   recolors that hole's marker on the SAME overview (no page/view
-#   switch), called from ui/main_window.py's on_hole_select() and the
-#   existing hover bindings.
-#   REMOVED (explicit decision): per-hole zoomed detail view
-#   (_draw_hole_path and the has_hole/has_step routing in
-#   draw_path_mapper()) — overview + highlight fully replaces it. This
-#   tab now only ever shows: "no model" placeholder, "no view rendered
-#   yet" placeholder, "nothing selected" placeholder, or the overview.
+
 import numpy as np
 import matplotlib.pyplot as plt
 

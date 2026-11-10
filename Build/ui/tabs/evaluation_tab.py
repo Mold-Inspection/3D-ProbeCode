@@ -1,86 +1,87 @@
 # ==============================================================================
-# ui/tabs/evaluation_tab.py — แท็บ "Evaluation" (เทียบผลตรวจจริงจาก .log กับรูที่คาดหวัง)
+# ui/tabs/evaluation_tab.py — แท็บ Evaluation (กราฟผล)
 # ==============================================================================
-# VERSION: 03
-# CHANGE LOG (v02 -> v03):
-#   FEATURE (Feature 2): กราฟกลางเป็น 3D แทน heat map 2D — CAD wireframe (≤ MAX_TRIS_3D สามเหลี่ยม) + วงผนัง CAD
-#   ทุกชั้นที่ตรวจ + จุดที่วัดได้ (เขียว/แดง) เลื่อนจากจุด CAD ตามระยะเบี่ยงจริง × k (ขยายให้เห็น บอกค่า k บนกราฟ)
-#   + เส้นรอบรูปที่วัดได้ของแต่ละชั้น; ข้อความเหนือรู = Hole n PASS/FAIL x/y เท่านั้น; ถ้าวาด 3D ไม่ได้ → 2D เดิม
-# CHANGE LOG (v01 -> v02):
-#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
-#   Requirement 4 — remove Accuracy, report Offset/Failed instead):
-#   plot title no longer shows "Overall Accuracy: X%" (that field was
-#   removed entirely from core/evaluation_engine.py v02's return dict —
-#   see that file's changelog). Replaced with a plain
-#   "<failed> / <total> points failed" count sourced from the new
-#   'failed_points' / 'total_points' fields. Marker colors (green/red/
-#   gray per hole) are unchanged — they were never accuracy-based.
-#   No other change — overview drawing, highlight_hole()/
-#   clear_hole_highlight(), and all placeholder states are identical
-#   to v01.
+# สรุปหน้าที่:
+#   แท็บ Evaluation (กราฟกลาง): ภาพ 3D/ภาพตัดของจุดวัดเทียบผิว CAD
+#   ขยายระยะเบี่ยง สีผ่าน/ไม่ผ่าน
 #
-# หน้าที่: วาด overview 2D (mesh background + hole markers) ของแท็บ Evaluation
-# — ตรวจว่าแต่ละรูที่ถูกโพรบจริง (จากไฟล์ .log ของ OpenBuilds Control หรือ
-# จากไฟล์ Expected Points .json ที่โหลดไว้ล่วงหน้า — ดู
-# ui/evaluation_left_panel.py v03) ตรงกับตำแหน่งที่คำนวณไว้จาก STEP ภายใน
-# tolerance ที่ผู้ใช้กำหนดหรือไม่ — สีของแต่ละรูบอกผลรวมของรูนั้น
-# (เขียว = ผ่านทุกจุด, แดง = มีจุดไม่ผ่าน, เทา = ยังไม่มีผลตรวจ/รูถูกข้าม)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/hole_ordering.py — จัดลำดับรู nearest-neighbor (order_holes_nearest_neighbor, split_step_ready)
+#     - core/projector.py — ฉายโมเดล 3D เป็นภาพ 2D ตามมุมมอง (view_rotation_matrix)
+#     - core/work_zero.py — ตำแหน่ง Work Zero ของ G-code (machining_origin)
+#     - ui/theme.py — สีและธีม (ACCENT, BG_PANEL, PLOT_AX, PLOT_GRID, TEXT, TEXT_MUTED, …)
+#   ถูกใช้งานโดย:
+#     - ui/evaluation_report.py — สร้างรายงาน PDF (EvaluationTab)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (EvaluationTab)
+#   ไลบรารีภายนอก: matplotlib, numpy
 #
-# EXPECTED CONTRACT — app.evaluation_result (สร้างโดย
-# core/evaluation_engine.py::evaluate_points(), remapped by
-# ui/evaluation_left_panel.py::_remap_holes_by_gi()) เป็น dict ว่าง None
-# ถ้ายังไม่ได้โหลด .log, หรือมีรูปแบบดังนี้เมื่อโหลดแล้ว:
-#   {
-#     'tolerance_mm':      float,   # ค่า tolerance ที่ใช้ประเมินผลรอบล่าสุด
-#     'log_filename':      str,     # ชื่อไฟล์ .log ที่โหลด
-#     'total_points':      int,
-#     'passed_points':     int,
-#     'failed_points':     int,     # v02 — total_points - passed_points
-#     'failed_point_refs': [ {hole_id, seg_idx, layer_idx, point_idx,
-#                              offset_mm}, ... ],   # v02, flat list
-#     'expected_source':   'live' | 'json',   # v02 (from left panel v03)
-#     'settings_mismatch': [hole_display_id, ...],  # รูที่ค่า setting ไม่ตรงกับตอน export
-#     'holes': {
-#         <global_idx into app.current_holes>: {
-#             'display_id':    str/int,
-#             'passed':        bool,   # True เฉพาะเมื่อทุกจุดของรูนี้ผ่าน
-#             'total_points':  int,
-#             'passed_points': int,
-#             'max_deviation': float,  # mm, ระยะเบี่ยงเบน/offset สูงสุดของรูนี้
-#             'segments': [            # 1 รายการถ้าเป็นรูปกติ (segment เดียว)
-#                 {
-#                     'seg_idx': int,
-#                     'layers': [
-#                         {
-#                             'layer_idx':      int,
-#                             'passed':         bool,
-#                             'max_deviation':  float,
-#                             'points': [
-#                                 {
-#                                     'point_idx':  int,
-#                                     'expected':   (x, y, z),
-#                                     'actual':     (x, y, z),
-#                                     'delta':      (dx, dy, dz),
-#                                     'distance_mm': float,   # "Offset (mm)"
-#                                     'passed':      bool,
-#                                 }, ...
-#                             ],
-#                         }, ...
-#                     ],
-#                 }, ...
-#             ],
-#         }, ...
-#     },
-#   }
-#   NOTE (v02): 'overall_accuracy' no longer exists anywhere in this
-#   contract — removed per Requirement 4. Do not reintroduce a percentage
-#   anywhere in this file.
+# รายละเอียด:
+#   แท็บ "Evaluation" (เทียบผลตรวจจริงจาก .log กับรูที่คาดหวัง)
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _PASS_FACE / _PASS_EDGE   = สี marker ของรูที่ "ผ่าน" ทั้งหมด
-#   _FAIL_FACE / _FAIL_EDGE   = สี marker ของรูที่ "ไม่ผ่าน" (มีอย่างน้อย 1 จุด)
-#   _NODATA_FACE / _NODATA_EDGE = สี marker ของรูที่ยังไม่มีผลตรวจจับคู่ได้
+#   หน้าที่: วาด overview 2D (mesh background + hole markers) ของแท็บ Evaluation
+#   — ตรวจว่าแต่ละรูที่ถูกโพรบจริง (จากไฟล์ .log ของ OpenBuilds Control หรือ
+#   จากไฟล์ Expected Points .json ที่โหลดไว้ล่วงหน้า — ดู
+#   ui/evaluation_left_panel.py) ตรงกับตำแหน่งที่คำนวณไว้จาก STEP ภายใน
+#   tolerance ที่ผู้ใช้กำหนดหรือไม่ — สีของแต่ละรูบอกผลรวมของรูนั้น
+#   (เขียว = ผ่านทุกจุด, แดง = มีจุดไม่ผ่าน, เทา = ยังไม่มีผลตรวจ/รูถูกข้าม)
+#
+#   EXPECTED CONTRACT — app.evaluation_result (สร้างโดย
+#   core/evaluation_engine.py::evaluate_points(), remapped by
+#   ui/evaluation_left_panel.py::_remap_holes_by_gi()) เป็น dict ว่าง None
+#   ถ้ายังไม่ได้โหลด .log, หรือมีรูปแบบดังนี้เมื่อโหลดแล้ว:
+#     {
+#       'tolerance_mm':      float,   # ค่า tolerance ที่ใช้ประเมินผลรอบล่าสุด
+#       'log_filename':      str,     # ชื่อไฟล์ .log ที่โหลด
+#       'total_points':      int,
+#       'passed_points':     int,
+#       'failed_points':     int,     # — total_points - passed_points
+#       'failed_point_refs': [ {hole_id, seg_idx, layer_idx, point_idx,
+#                                offset_mm}, ... ],   #, flat list
+#       'expected_source':   'live' | 'json',   # (from left panel)
+#       'settings_mismatch': [hole_display_id, ...],  # รูที่ค่า setting ไม่ตรงกับตอน export
+#       'holes': {
+#           <global_idx into app.current_holes>: {
+#               'display_id':    str/int,
+#               'passed':        bool,   # True เฉพาะเมื่อทุกจุดของรูนี้ผ่าน
+#               'total_points':  int,
+#               'passed_points': int,
+#               'max_deviation': float,  # mm, ระยะเบี่ยงเบน/offset สูงสุดของรูนี้
+#               'segments': [            # 1 รายการถ้าเป็นรูปกติ (segment เดียว)
+#                   {
+#                       'seg_idx': int,
+#                       'layers': [
+#                           {
+#                               'layer_idx':      int,
+#                               'passed':         bool,
+#                               'max_deviation':  float,
+#                               'points': [
+#                                   {
+#                                       'point_idx':  int,
+#                                       'expected':   (x, y, z),
+#                                       'actual':     (x, y, z),
+#                                       'delta':      (dx, dy, dz),
+#                                       'distance_mm': float,   # "Offset (mm)"
+#                                       'passed':      bool,
+#                                   }, ...
+#                               ],
+#                           }, ...
+#                       ],
+#                   }, ...
+#               ],
+#           }, ...
+#       },
+#     }
+#     NOTE: 'overall_accuracy' no longer exists anywhere in this
+#     contract — removed per Requirement 4. Do not reintroduce a percentage
+#     anywhere in this file.
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _PASS_FACE / _PASS_EDGE   = สี marker ของรูที่ "ผ่าน" ทั้งหมด
+#     _FAIL_FACE / _FAIL_EDGE   = สี marker ของรูที่ "ไม่ผ่าน" (มีอย่างน้อย 1 จุด)
+#     _NODATA_FACE / _NODATA_EDGE = สี marker ของรูที่ยังไม่มีผลตรวจจับคู่ได้
 # ==============================================================================
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -93,7 +94,7 @@ _FAIL_EDGE    = '#ff8a80'
 _NODATA_FACE  = '#555555'
 _NODATA_EDGE  = '#888888'
 _HILITE_EDGE  = '#ffee58'
-MAX_TRIS_3D   = 2500   # v03: สามเหลี่ยม CAD สูงสุดในกราฟ 3D (มาก = ละเอียดแต่หมุนช้า)
+MAX_TRIS_3D   = 2500   # สามเหลี่ยม CAD สูงสุดในกราฟ 3D (มาก = ละเอียดแต่หมุนช้า)
 
 
 class EvaluationTab:
@@ -104,7 +105,7 @@ class EvaluationTab:
         self._overview_base_face = []
         self._overview_base_edge = []
         self._highlighted_gidx   = None
-        self._hole_artists       = {}   # v03: gi -> {'scatter': [...], 'text': Text}
+        self._hole_artists       = {}   # gi -> {'scatter': [...], 'text': Text}
 
     # ------------------------------------------------------------------
     def draw_evaluation(self):
@@ -156,7 +157,7 @@ class EvaluationTab:
             return
 
         try:
-            self._draw_3d(evaluation_result)   # v03
+            self._draw_3d(evaluation_result)
         except Exception as e:
             print(f"[evaluation_tab] 3D view failed, using 2D: {e!r}")
             app.fig.clf()
@@ -185,7 +186,7 @@ class EvaluationTab:
 
     # ------------------------------------------------------------------
     def _work_mesh(self):
-        """v03: (vertices, faces) ของ CAD ในพิกัดงาน (เดียวกับจุดใน Schema/log): หมุนตามมุมมอง − Work zero
+        """(vertices, faces) ของ CAD ในพิกัดงาน (เดียวกับจุดใน Schema/log): หมุนตามมุมมอง − Work zero
         ลดจำนวนสามเหลี่ยมเหลือ ≤ MAX_TRIS_3D (หมุนกราฟได้ลื่น — วัดไว้ ~160 ms/ภาพที่ 2k)"""
         app = self.app
         from core.projector import view_rotation_matrix
@@ -209,7 +210,7 @@ class EvaluationTab:
         return 200
 
     def _draw_3d(self, evaluation_result: dict):
-        """v03: กราฟ 3D แทน heat map — CAD (wireframe จาง + วงผนัง CAD ทุกชั้นที่ตรวจ) + จุดที่วัดได้
+        """กราฟ 3D แทน heat map — CAD (wireframe จาง + วงผนัง CAD ทุกชั้นที่ตรวจ) + จุดที่วัดได้
         สีเขียว/แดงต่อจุด เลื่อนออกจากจุด CAD ตามระยะเบี่ยงจริง × k (ขยายให้เห็น) พร้อมเส้นเชื่อม
         และเส้นรอบรูปที่วัดได้ของแต่ละชั้น (× k) — ข้อความเหนือรูแสดงเฉพาะผลสำคัญ"""
         app = self.app
@@ -391,8 +392,8 @@ class EvaluationTab:
         self._overview_base_edge = list(edge_colors)
         self._overview_index_map = {gidx_of[id(h)]: i for i, h in enumerate(selected_holes)}
 
-        # v02: no more "Overall Accuracy: X%" — replaced with a plain
-        # failed/total points count sourced from evaluation_engine v02's
+        # no more "Overall Accuracy: X%" — replaced with a plain
+        # failed/total points count sourced from evaluation_engine's
         # 'failed_points' field (Requirement 4).
         failed_pts = evaluation_result.get('failed_points')
         total_pts  = evaluation_result.get('total_points')
@@ -439,7 +440,7 @@ class EvaluationTab:
         """เรียกจาก ui/main_window.py ตอน hover/click รูใน sidebar ขณะอยู่แท็บ
         Evaluation — ไฮไลต์ marker บน overview เดิม ไม่สลับหน้า (แบบเดียวกับ
         path_mapper_tab.py)"""
-        arts = (self._hole_artists or {}).get(global_idx)   # v03: กราฟ 3D
+        arts = (self._hole_artists or {}).get(global_idx)   # กราฟ 3D
         if arts is not None:
             self._highlighted_gidx = global_idx
             if arts.get('text') is not None:
@@ -461,7 +462,7 @@ class EvaluationTab:
         self.app.canvas.draw_idle()
 
     def clear_hole_highlight(self):
-        arts = (self._hole_artists or {}).get(self._highlighted_gidx)   # v03: กราฟ 3D
+        arts = (self._hole_artists or {}).get(self._highlighted_gidx)   # กราฟ 3D
         if arts is not None:
             if arts.get('text') is not None:
                 arts['text'].set_color(arts.get('base_color', _PASS_FACE))

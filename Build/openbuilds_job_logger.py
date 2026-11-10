@@ -1,19 +1,32 @@
 # ==============================================================================
-# openbuilds_job_logger.py — โปรแกรมเสริมของ OpenBuilds Control: บันทึกไฟล์ .log
-# ให้ทุก job อัตโนมัติ (เปิดทิ้งไว้ข้าง OpenBuilds ก็พอ ไม่ต้องเปิด 3D ProbeCode)
+# openbuilds_job_logger.py — โปรแกรมเสริมบันทึก .log ทุก job (รันแยก)
 # ==============================================================================
-# VERSION: 01
-# OpenBuilds Control ไม่มีระบบ plugin ให้เขียนไฟล์ได้ — โปรแกรมนี้จึงต่อเข้า server
-# ของ OpenBuilds (localhost:3000) แบบเดียวกับหน้าจอของมันเอง ฟังทุก job แล้วเขียน
-# <out>/job_<วันเวลา>.log หลัง job จบ (รูปแบบเดียวกับปุ่ม Record ในแท็บ Evaluation —
-# มีบรรทัด "; WCO:" ให้ log_parser แปลงพิกัดเครื่องเป็นพิกัดเทียบ Set Zero ได้)
+# สรุปหน้าที่:
+#   โปรแกรมเสริมที่รันแยก (start_openbuilds_logger.bat) บันทึก .log ของทุก job
+#   จาก OpenBuilds Control โดยไม่ต้องเปิด 3D ProbeCode — ใช้โค้ดชุดเดียวกับ
+#   core/openbuilds_link.py
 #
-# วิธีใช้:
-#   python openbuilds_job_logger.py                 (เก็บที่ Documents\3D ProbeCode\Logs)
-#   python openbuilds_job_logger.py --out D:\logs   (เลือกโฟลเดอร์เอง)
-#   python openbuilds_job_logger.py --all           (เก็บ job ที่ไม่มีจุดโพรบด้วย)
-#   หยุด: Ctrl+C
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/openbuilds_link.py — เชื่อม socket.io ของ OpenBuilds และบันทึก job เป็น .log (DEFAULT_HOST, DEFAULT_PORT, JobRecorder, OpenBuildsLink, default_log_dir, write_job_log)
+#   ไลบรารีภายนอก: argparse, datetime, os, queue, sys
+#
+# รายละเอียด:
+#   โปรแกรมเสริมของ OpenBuilds Control: บันทึกไฟล์ .log
+#   ให้ทุก job อัตโนมัติ (เปิดทิ้งไว้ข้าง OpenBuilds ก็พอ ไม่ต้องเปิด 3D ProbeCode)
+#
+#   OpenBuilds Control ไม่มีระบบ plugin ให้เขียนไฟล์ได้ — โปรแกรมนี้จึงต่อเข้า server
+#   ของ OpenBuilds (localhost:3000) แบบเดียวกับหน้าจอของมันเอง ฟังทุก job แล้วเขียน
+#   <out>/job_<วันเวลา>.log หลัง job จบ (รูปแบบเดียวกับปุ่ม Record ในแท็บ Evaluation —
+#   มีบรรทัด "; WCO:" ให้ log_parser แปลงพิกัดเครื่องเป็นพิกัดเทียบ Set Zero ได้)
+#
+#   วิธีใช้:
+#     python openbuilds_job_logger.py                 (เก็บที่ Documents\3D ProbeCode\Logs)
+#     python openbuilds_job_logger.py --out D:\logs   (เลือกโฟลเดอร์เอง)
+#     python openbuilds_job_logger.py --all           (เก็บ job ที่ไม่มีจุดโพรบด้วย)
+#     หยุด: Ctrl+C
 # ==============================================================================
+
 import argparse
 import datetime
 import os

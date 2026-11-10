@@ -1,72 +1,25 @@
 # ==============================================================================
-# core/step_extractor.py — สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
+# core/step_extractor.py — หารูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# VERSION: 06
-# CHANGE LOG (v05 -> v06):
-#   FIX: ความลึกพื้นก้นรูวัดก่อนรู้ว่าปลายไหนคือปากรู — ถ้า B-Rep ให้ปลายพื้นเป็น open_3d (เช่น
-#   taper test.STEP) ยิงเส้นจากพื้นออกทางปากรู ไม่ชนอะไร → รูตันกลายเป็น "รูทะลุ" (floor_depth=None)
-#   ระยะเผื่อพื้นและการแตะพื้นจึงหายไป — ตอนนี้วัดทั้งสองทาง (floor_depth / floor_depth_rev)
-#   แล้วสลับตามตอนกลับปากรูใน get_step_holes_in_view() / _orient_segments_by_mesh()
-# CHANGE LOG (v04 -> v05):
-#   FIX: หลุมทรงกลม (sphere cap) ที่ CAD แบ่งเป็นหลายผิว (เช่น ซ้าย/ขวา) ถูกตรวจเป็นหลายรู
-#   ที่เยื้องกัน — _sphere_groups() จับกลุ่มผิวที่จุดศูนย์กลาง + รัศมีเดียวกัน แล้ว
-#   _sphere_group_geometry() คิดแกน/ปาก/ก้นจากทุกผิวรวมกันเป็นหลุมเดียว (ผิวเดียวเหมือนเดิม)
-# CHANGE LOG (v03 -> v04):
-#   FEATURE: _measure_floor_depths() — ยิงเส้นจากปากรูลงตามแกน เก็บความลึกถึงพื้น
-#   ที่กลางรูไว้ที่ h.floor_depth (None = รูทะลุ) ใช้กันชั้นวัดชนพื้น และเป็นค่า CAD
-#   ของความลึกพื้นก้นรู (โพรบแนว Z / เวอร์เนียร์ในแท็บ Evaluation)
-# CHANGE LOG (v02 -> v03):
-#   FEATURE: ช่องสี่เหลี่ยม (จัตุรัส/ผืนผ้า มุมคมและมุมโค้ง) — extract()
-#   เรียก core/pocket_extractor.py::extract_rect_pockets() ก่อน แล้ว:
-#     - ข้ามผิวทรงกระบอกที่เป็นมุมโค้งของช่อง (เดิมช่องมุมโค้ง 1 ช่องถูก
-#       ตรวจเป็น "รูกลม" ปลอม 4 รู)
-#     - เติม StepPocket ต่อท้ายรายการรู "หลัง" _merge_half_faces /
-#       _merge_counterbores เพื่อไม่ให้ช่องถูก merge เข้ากับรูกลม
+# สรุปหน้าที่:
+#   หัวใจของการ "หารูอัตโนมัติ": วิเคราะห์ผิว B-Rep ทีละผิว (ทรงกระบอก กรวย
+#   ทอรัส ทรงกลม) หาแกน รัศมี ความลึก ปากรู รวมผิวที่ถูกแบ่ง รวม counterbore
+#   และเลือกรูที่มองเห็นจากแต่ละมุมมอง
+#
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/channel_extractor.py — หาร่องเปิด (runner) จาก B-Rep (_Rays, extract_channels)
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (_orthonormal_basis)
+#     - core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ (HoleSegment, StepHole, flip_radius_profile)
+#     - core/pocket_extractor.py — หาช่องสี่เหลี่ยม/แคปซูลจาก B-Rep (extract_rect_pockets)
+#   ถูกใช้งานโดย:
+#     - core/geometry_engine.py — MoldGeometry รวมโมดูลเรขาคณิต (StepExtractor)
+#   ไลบรารีภายนอก: OCC, OCP, copy, datetime, math, numpy, os
+#
+# รายละเอียด:
+#   สกัดข้อมูลรูจาก B-Rep ของไฟล์ STEP
 # ==============================================================================
-# VERSION: 02 (superseded by v03 above — kept for history)
-# CHANGE LOG (v01 -> v02):
-#   FIX (PLAN_segment-diameter-direction-fix.md): new helper
-#   _orient_each_segment_to_hole_mouth(h) — forces EVERY individual
-#   segment's own open_3d/radius_open to always be the end that is
-#   closer to the whole hole's true mouth (h.open_3d), and
-#   deep_3d/radius_deep to always be the farther/deeper end — decided
-#   purely by axial projection distance from h.open_3d along h.axis,
-#   independent of whether that segment happens to be the deepest or
-#   shallowest segment of the hole.
-#   Previously only two corrections existed: _orient_segments_by_mesh()
-#   (fixes which end is the mouth for the WHOLE hole, via mesh surface
-#   distance) and _order_segments_deepest_first() (fixes the LIST INDEX
-#   order so segments[0] = deepest) — neither of these guaranteed that
-#   a given segment's OWN open_3d/deep_3d labels pointed mouth-ward vs
-#   deep-ward consistently with its neighbors. That gap is why the
-#   Customization tab's per-segment diameter label
-#   (⌀radius_open*2 → ⌀radius_deep*2) could show two adjacent segments
-#   both displaying the SAME value as their "open" (mouth-side) figure,
-#   even though physically that shared value is one segment's mouth-side
-#   boundary and the other segment's deep-side boundary at the same
-#   junction point — i.e. the diameters looked discontinuous / hard to
-#   read. Called right after _order_segments_deepest_first(h) for every
-#   hole in extract(). Downstream consumers (path_planner.py,
-#   gcode_generator.py) already re-sort/re-derive layer order and
-#   min/max bounds independently of per-segment open/deep labeling, so
-#   this fix does not change probe path point sets or G-code travel —
-#   only makes the displayed/underlying open->deep radius direction of
-#   each segment consistent and physically continuous across the hole.
-# ==============================================================================
-# VERSION: 01 (superseded by v02 above — kept for history)
-# CHANGE LOG (no marker -> v01):
-#   FEATURE (Fix 1 of PLAN_segment-order-and-rotation-fixes.md): new helper
-#   _order_segments_deepest_first(h) — always re-sorts h.segments so index 0
-#   is the DEEPEST segment (farthest along h.axis from h.open_3d) and the
-#   LAST index is the shallowest/mouth segment, regardless of whether a mesh
-#   was available. Called unconditionally right after
-#   _orient_segments_by_mesh(h, mesh) for every hole in extract(), since by
-#   that point h.open_3d (mouth) and h.axis are already correctly established
-#   at the whole-hole level. This is a pure ordering fix — does not change
-#   which end is the mouth (that's still _orient_segments_by_mesh's job).
-#   See core/models.py v03 for the matching downstream fix in
-#   validate_segment_reachability().
-# ==============================================================================
+
 import numpy as np
 import math
 import copy
@@ -150,7 +103,7 @@ def _arc_radius(edge) -> float:
     return 0.0
 
 def _sphere_groups(faces):
-    """v05: ผิวทรงกลมที่จุดศูนย์กลาง + รัศมีเดียวกัน = หลุมทรงกลมเดียวที่ CAD แบ่งเป็นหลายผิว
+    """ผิวทรงกลมที่จุดศูนย์กลาง + รัศมีเดียวกัน = หลุมทรงกลมเดียวที่ CAD แบ่งเป็นหลายผิว
     (เช่น ครึ่งซ้าย/ครึ่งขวา) — คืน ({index ผิวแรก: [ผิวทั้งกลุ่ม]}, {index ผิวที่เหลือในกลุ่ม})
     เดิมแต่ละผิวถูกคิดเป็นรูแยก แกนเอียงไปทางซีกของตัวเอง → หลุมเดียวกลายเป็น 2 รู"""
     from OCP.BRepAdaptor import BRepAdaptor_Surface
@@ -174,7 +127,7 @@ def _sphere_groups(faces):
 
 
 def _sphere_group_geometry(group, c0, R, off):
-    """v05: ปาก/ก้นของหลุมทรงกลมจากทุกผิวในกลุ่มรวมกัน
+    """ปาก/ก้นของหลุมทรงกลมจากทุกผิวในกลุ่มรวมกัน
     แกน = จุดศูนย์กลางมวล (ถ่วงด้วยพื้นที่) ของทุกผิว − จุดศูนย์กลางทรงกลม
     ระดับปาก = จุดบนขอบที่ใกล้จุดศูนย์กลางทรงกลมที่สุดตามแกน → รัศมีปากจากสูตรทรงกลม"""
     off = np.asarray(off, dtype=float)
@@ -352,7 +305,7 @@ def _orient_segments_by_mesh(h, mesh):
         h.open_3d, h.deep_3d         = h.deep_3d, h.open_3d
         h.radius_open, h.radius_deep = h.radius_deep, h.radius_open
         h.radius                     = h.radius_open
-        _swap_floor_depths(h)   # v06
+        _swap_floor_depths(h)
 
 def _order_segments_deepest_first(h):
     """เรียง h.segments ใหม่เสมอให้ index 0 = segment ที่ลึกที่สุด (ไกลจากปากรู
@@ -363,7 +316,7 @@ def _order_segments_deepest_first(h):
 
     หมายเหตุ: ฟังก์ชันนี้จัดแค่ "ลำดับ index ใน list" เท่านั้น ไม่ได้แก้ทิศ
     open/deep ภายในแต่ละ segment เอง — ดู _orient_each_segment_to_hole_mouth()
-    (v02) สำหรับส่วนนั้น"""
+ สำหรับส่วนนั้น"""
     if not h.segments or len(h.segments) < 2:
         return
     axis = np.array(h.axis, dtype=float)
@@ -378,7 +331,7 @@ def _order_segments_deepest_first(h):
          f"(index 0 = deepest, index {len(h.segments)-1} = mouth)")
 
 def _orient_each_segment_to_hole_mouth(h):
-    """v02 (PLAN_segment-diameter-direction-fix.md): บังคับให้ seg.open_3d /
+    """(PLAN_segment-diameter-direction-fix.md): บังคับให้ seg.open_3d /
     seg.radius_open ของ "ทุก" segment อยู่ฝั่งที่ใกล้ปากรูจริงของทั้งรู
     (h.open_3d) เสมอ และ seg.deep_3d / seg.radius_deep คือฝั่งตรงข้าม (ลึกเข้า
     ไปในรูมากกว่า) — ตัดสินด้วยระยะ projection ตามแกน h.axis เทียบกับ
@@ -609,13 +562,13 @@ def _measure_radius_profiles(holes, step_data, mesh_centroid):
 
 
 def _swap_floor_depths(h):
-    """v06: สลับความลึกพื้นตอนกลับด้านปากรู/ก้นรู (วัดไว้ทั้งสองทางใน _measure_floor_depths)"""
+    """สลับความลึกพื้นตอนกลับด้านปากรู/ก้นรู (วัดไว้ทั้งสองทางใน _measure_floor_depths)"""
     if hasattr(h, 'floor_depth') or hasattr(h, 'floor_depth_rev'):
         h.floor_depth, h.floor_depth_rev = getattr(h, 'floor_depth_rev', None), getattr(h, 'floor_depth', None)
 
 
 def _measure_floor_depths(holes, step_data, mesh_centroid):
-    """v04: ความลึกจากปากรูถึง "ผิวแรกที่อยู่ใต้กลางรู" ตามแกนรู — ยิงเส้นจากปากรูลงไป
+    """ความลึกจากปากรูถึง "ผิวแรกที่อยู่ใต้กลางรู" ตามแกนรู — ยิงเส้นจากปากรูลงไป
     เก็บที่ h.floor_depth (mm) หรือ None ถ้าไม่ชนอะไร (รูทะลุ)
     ใช้ (1) เว้นระยะชั้นวัดให้สูงกว่าพื้น (core/models.py::layer_fractions) และ
     (2) เป็นค่าความลึก CAD ของพื้นก้นรูที่โพรบแนว Z / เวอร์เนียร์เทียบ (แท็บ Evaluation)"""
@@ -642,7 +595,7 @@ def _measure_floor_depths(holes, step_data, mesh_centroid):
             eps = min(0.05, 0.01 * length)
             hit = rays.dist(o + eps * axis, axis, max_d=3.0 * length + 50.0)
             h.floor_depth = None if hit is None else float(hit + eps)
-            # v06: วัดอีกทาง (จากปลาย deep ย้อนไปทางปลาย open) — ใช้เมื่อปากรูจริงอยู่ฝั่ง deep_3d
+            # วัดอีกทาง (จากปลาย deep ย้อนไปทางปลาย open) — ใช้เมื่อปากรูจริงอยู่ฝั่ง deep_3d
             hit = rays.dist(d - eps * axis, -axis, max_d=3.0 * length + 50.0)
             h.floor_depth_rev = None if hit is None else float(hit + eps)
         except Exception as e:
@@ -693,7 +646,7 @@ class StepExtractor:
         total_faces       = 0
         skipped_convex    = 0   # ผิวโค้งด้านนอก (มุมโค้ง, boss) ที่ไม่ใช่ผนังรู
 
-        # v03: ช่องสี่เหลี่ยม — มุมโค้งของช่อง (corner_faces) ไม่ใช่รูกลม ต้องข้าม
+        # ช่องสี่เหลี่ยม — มุมโค้งของช่อง (corner_faces) ไม่ใช่รูกลม ต้องข้าม
         try:
             pockets, corner_faces = extract_rect_pockets(step_data, mesh_centroid, log=_dbg)
         except Exception as e:
@@ -709,13 +662,13 @@ class StepExtractor:
             channels, channel_faces, channel_openings = [], [], []
 
         all_faces = step_data.faces().vals()
-        sphere_first, sphere_rest = _sphere_groups(all_faces)   # v05
+        sphere_first, sphere_rest = _sphere_groups(all_faces)
 
         for face_idx, face in enumerate(all_faces):
             total_faces += 1
             geom_type = face.geomType()
 
-            if face_idx in sphere_rest:   # v05: ส่วนหนึ่งของหลุมทรงกลมที่คิดรวมไว้แล้ว
+            if face_idx in sphere_rest:   # ส่วนหนึ่งของหลุมทรงกลมที่คิดรวมไว้แล้ว
                 _dbg(f"SKIP face#{total_faces} (SPHERE): part of a split sphere cap (merged)")
                 continue
 
@@ -737,7 +690,7 @@ class StepExtractor:
 
             analytical_success = False
 
-            if face_idx in sphere_first:   # v05: หลุมทรงกลมที่ถูกแบ่งหลายผิว — คิดรวมเป็นหลุมเดียว
+            if face_idx in sphere_first:   # หลุมทรงกลมที่ถูกแบ่งหลายผิว — คิดรวมเป็นหลุมเดียว
                 try:
                     from OCP.BRepAdaptor import BRepAdaptor_Surface
                     sph = BRepAdaptor_Surface(face.wrapped).Sphere()
@@ -1088,16 +1041,16 @@ class StepExtractor:
         holes = _merge_half_faces(holes)
         holes = _merge_counterbores(holes)
         _mark_channel_openings(holes, channel_openings)
-        holes += pockets   # v03: ต่อท้ายหลัง merge — ช่องสี่เหลี่ยมไม่ merge กับรูกลม
+        holes += pockets   # ต่อท้ายหลัง merge — ช่องสี่เหลี่ยมไม่ merge กับรูกลม
         holes += channels  # ร่องเปิด (runner) — แยกเป็นรายการของตัวเอง
         for h in holes:
             _orient_segments_by_mesh(h, mesh)
-            _order_segments_deepest_first(h)          # v01: always run — mesh-independent, keeps segments[0] = deepest
-            _orient_each_segment_to_hole_mouth(h)      # v02: always run — keeps radius_open facing the hole's true mouth per segment
+            _order_segments_deepest_first(h)          # always run — mesh-independent, keeps segments[0] = deepest
+            _orient_each_segment_to_hole_mouth(h)      # always run — keeps radius_open facing the hole's true mouth per segment
 
         # รัศมีจริงทุกระดับความลึก — ต้องวัดหลังจัดทิศปาก/ก้นของรูและ segment เสร็จแล้ว
         _measure_radius_profiles(holes, step_data, mesh_centroid)
-        _measure_floor_depths(holes, step_data, mesh_centroid)   # v04: พื้นก้นรู / รูทะลุ
+        _measure_floor_depths(holes, step_data, mesh_centroid)   # พื้นก้นรู / รูทะลุ
 
         self._step_holes_cache = holes
         print(f"[geo] STEP holes extracted: {len(holes)} "
@@ -1170,7 +1123,7 @@ class StepExtractor:
                 hc.radius_open, hc.radius_deep = hc.radius_deep, hc.radius_open
                 hc.radius = hc.radius_open   # FIX: ขนาดที่แสดง (hole list/Properties) ต้องเป็นปากรูฝั่งกล้อง
                 flip_radius_profile(hc)
-                _swap_floor_depths(hc)       # v06: ความลึกพื้นวัดจากปากรูฝั่งกล้อง
+                _swap_floor_depths(hc)       # ความลึกพื้นวัดจากปากรูฝั่งกล้อง
                 
                 # 2. แก้ไขจุดที่เป็นบั๊ก: สลับ Segment ย่อยทั้งหมดให้ตรงกับปากรูใหม่
                 hc.segments.reverse() # สลับ Segment เดิมที่ลึกสุด ให้ขึ้นมาตื้นสุด

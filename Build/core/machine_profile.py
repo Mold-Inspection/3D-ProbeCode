@@ -1,31 +1,27 @@
 # ==============================================================================
-# core/machine_profile.py — ขนาดพื้นที่ทำงานจริงของเครื่อง CNC (physical
-# machine travel / work area) — ส่วนหนึ่งของ "Hardware Setting" ใน sidebar ซ้าย
+# core/machine_profile.py — ระยะเดินของเครื่อง
 # ==============================================================================
-# VERSION: 03
-# CHANGE LOG (v02 -> v03):
-#   ตัด z_height ออก — ใช้คำนวณ Padding Height อย่างเดียว ซึ่งตัดออกแล้ว
-# CHANGE LOG (v01 -> v02):
-#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 2):
-#   added `z_height` — the fixed physical distance from the floor to the
-#   underside of the Z-axis carriage, measured with the Z-axis at its home
-#   / fully-retracted (top of stroke) position. Unlike `x_travel`/
-#   `y_travel`/`z_travel` (still reference/display only — see note below),
-#   `z_height` is the FIRST field in this class that actually feeds a real
-#   calculation: core/gcode_generator.py v06's suggest_padding_height()
-#   uses it together with core/probe_profile.py's `stylus_holder_height` +
-#   `stylus_length` and this class's own `z_travel` to compute how much
-#   riser/padding height a workpiece needs so the probe tip can physically
-#   reach it within the machine's downward Z travel range. See the PLAN
-#   doc for the full formula derivation and confirmed measurement point.
-# ==============================================================================
-# หน้าที่: เก็บระยะเดินสูงสุดของแต่ละแกน (X/Y/Z, mm) ตามสเปกเครื่องจริง
-# — ใช้ตรวจระยะเดินตอน export G-code (Travel Check ใน core/gcode_export_panel.py)
+# สรุปหน้าที่:
+#   ระยะเดินของเครื่อง X/Y/Z (Machine Travel)
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   x_travel / y_travel / z_travel = ระยะเดินสูงสุดแต่ละแกน (mm) — ปรับตามสเปกเครื่อง
-#   DEFAULT_X / DEFAULT_Y / DEFAULT_Z = ค่าเริ่มต้นเมื่อกด "Reset to Default"
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (MachineProfile)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (MachineProfile)
+#   ไลบรารีภายนอก: dataclasses
+#
+# รายละเอียด:
+#   ขนาดพื้นที่ทำงานจริงของเครื่อง CNC (physical
+#   machine travel / work area) — ส่วนหนึ่งของ "Hardware Setting" ใน sidebar ซ้าย
+#
+#   หน้าที่: เก็บระยะเดินสูงสุดของแต่ละแกน (X/Y/Z, mm) ตามสเปกเครื่องจริง
+#   — ใช้ตรวจระยะเดินตอน export G-code (Travel Check ใน core/gcode_export_panel.py)
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     x_travel / y_travel / z_travel = ระยะเดินสูงสุดแต่ละแกน (mm) — ปรับตามสเปกเครื่อง
+#     DEFAULT_X / DEFAULT_Y / DEFAULT_Z = ค่าเริ่มต้นเมื่อกด "Reset to Default"
 # ==============================================================================
+
 from dataclasses import dataclass, field
  
 @dataclass

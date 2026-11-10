@@ -1,14 +1,28 @@
 # ==============================================================================
-# ui/compensation_info_dialog.py — หน้าต่าง "ค่าชดเชยมาจากไหน" (ปุ่ม ⓘ Details ในแผงขวาของแท็บ Evaluation)
+# ui/compensation_info_dialog.py — หน้าต่างอธิบายที่มาของค่าชดเชยหัววัด
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: แสดงแบบอ่านอย่างเดียว ในกรอบเดียวกับ Hardware Setting (ui/settings_dialog_base.py):
-#   Summary       — ชดเชยหรือไม่, r ที่ใช้, มาจากไหน, แบบจำลองระยะทริก, จุดที่คิดจาก B-Rep
-#   Effective Tip — ค่าใน Hardware Setting, ผล Set up (Find centre + เวอร์เนียร์), คาลิเบรตผนังนอกของรอบนี้
-#   Repeatability — ผลแตะซ้ำต่อผนังจาก Set up ล่าสุด
-#   Equations     — สมการที่ใช้กับตัวเลขในหน้า Evaluation (core/evaluation_engine.py v12)
-# ข้อมูลมาจาก app.evaluation_result, app.probe_profile และ app.setup_info (ui/hardware_setting_dialog.py v16)
+# สรุปหน้าที่:
+#   หน้าต่างอธิบายว่าค่าชดเชยหัววัดแต่ละค่ามาจากไหน
+#
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - ui/settings_dialog_base.py — โครงหน้าต่างตั้งค่าแบบมีหมวด (SettingsDialogBase)
+#     - ui/theme.py — สีและธีม (BG_CARD, FONT_MONO, TEXT_MUTED, TEXT_SECONDARY, WARN_TEXT)
+#   ถูกใช้งานโดย:
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (show_compensation_info)
+#   ไลบรารีภายนอก: customtkinter
+#
+# รายละเอียด:
+#   หน้าต่าง "ค่าชดเชยมาจากไหน" (ปุ่ม ⓘ Details ในแผงขวาของแท็บ Evaluation)
+#
+#   หน้าที่: แสดงแบบอ่านอย่างเดียว ในกรอบเดียวกับ Hardware Setting (ui/settings_dialog_base.py):
+#     Summary       — ชดเชยหรือไม่, r ที่ใช้, มาจากไหน, แบบจำลองระยะทริก, จุดที่คิดจาก B-Rep
+#     Effective Tip — ค่าใน Hardware Setting, ผล Set up (Find centre + เวอร์เนียร์), คาลิเบรตผนังนอกของรอบนี้
+#     Repeatability — ผลแตะซ้ำต่อผนังจาก Set up ล่าสุด
+#     Equations     — สมการที่ใช้กับตัวเลขในหน้า Evaluation (core/evaluation_engine.py)
+#   ข้อมูลมาจาก app.evaluation_result, app.probe_profile และ app.setup_info (ui/hardware_setting_dialog.py)
 # ==============================================================================
+
 import customtkinter as ctk
 
 from ui import theme
@@ -138,7 +152,7 @@ class CompensationInfoDialog:
                       "The inspection uses the slow touch only (double touch).")
 
     def _build_equations(self, parent):
-        _title(parent, "Per point (core/evaluation_engine.py v12)")
+        _title(parent, "Per point (core/evaluation_engine.py)")
         _rows(parent, [
             ("P", "PRB − WCO = ball centre when the probe triggered"),
             ("S, n", "start point and direction of the G38.2 move"),

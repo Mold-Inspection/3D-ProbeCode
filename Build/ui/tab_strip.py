@@ -1,16 +1,29 @@
 # ==============================================================================
-# ui/tab_strip.py — แถบแท็บแบบเอกสาร (Selection / Customization / ...)
+# ui/tab_strip.py — แถบปุ่มสลับแท็บ
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: แทน ctk.CTkSegmentedButton ตัวเดิมของ ui/main_window.py ด้วยแท็บ
-# แบบ "document tab" (แท็บที่เลือกมีพื้นขาว + เส้นใต้สี ACCENT) วางเต็มความกว้าง
-# ใต้ ribbon — API เหมือนเดิม (.set() / .get() / command) จึงใช้แทน
-# self.nav_selector ได้โดยไม่ต้องแก้ on_nav_change()
+# สรุปหน้าที่:
+#   แถบปุ่มสลับแท็บ
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _STRIP_HEIGHT = ความสูงแถบแท็บ (พิกเซล)
-#   _TAB_WIDTH    = ความกว้างแต่ละแท็บ (พิกเซล)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - ui/theme.py — สีและธีม (ACCENT, BG_CANVAS, BG_CARD_HOVER, BG_PANEL, TEXT, TEXT_SECONDARY)
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (TabStrip)
+#   ไลบรารีภายนอก: customtkinter
+#
+# รายละเอียด:
+#   แถบแท็บแบบเอกสาร (Selection / Customization / ...)
+#
+#   หน้าที่: แทน ctk.CTkSegmentedButton ตัวเดิมของ ui/main_window.py ด้วยแท็บ
+#   แบบ "document tab" (แท็บที่เลือกมีพื้นขาว + เส้นใต้สี ACCENT) วางเต็มความกว้าง
+#   ใต้ ribbon — API เหมือนเดิม (.set() / .get() / command) จึงใช้แทน
+#   self.nav_selector ได้โดยไม่ต้องแก้ on_nav_change()
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _STRIP_HEIGHT = ความสูงแถบแท็บ (พิกเซล)
+#     _TAB_WIDTH    = ความกว้างแต่ละแท็บ (พิกเซล)
 # ==============================================================================
+
 import customtkinter as ctk
 
 from ui import theme

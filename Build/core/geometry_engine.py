@@ -1,15 +1,35 @@
 # ==============================================================================
-# core/geometry_engine.py — MoldGeometry: ศูนย์กลางเชื่อมโมดูล Backend ทั้งหมด
+# core/geometry_engine.py — MoldGeometry รวมโมดูลเรขาคณิต
 # ==============================================================================
-# หน้าที่: เป็น facade ที่รวม 4 โมดูลย่อยเข้าด้วยกัน แล้วเปิด method กลาง
-# ให้ฝั่ง UI เรียกใช้โดยไม่ต้องรู้รายละเอียดภายใน
-#   - loader    (CADLoader)    โหลดไฟล์ STEP/STP
-#   - projector (Projector)    แปลงพิกัด 3D → 2D ตามมุมมอง
-#   - extractor (StepExtractor) สกัดข้อมูลรูจาก B-Rep
-#   - planner   (PathPlanner)  คำนวณเส้นทางโพรบทีละชั้น
+# สรุปหน้าที่:
+#   Facade ของฝั่งเรขาคณิต: รวม CADLoader, Projector, StepExtractor,
+#   PathPlanner ไว้ในคลาส MoldGeometry เดียว ฝั่ง UI
+#   เรียกผ่านคลาสนี้โดยไม่ต้องรู้รายละเอียดข้างใน
 #
-# ไฟล์นี้ไม่มีตัวแปรที่ต้องปรับจูนโดยตรง — ค่าคงที่ต่าง ๆ อยู่ในแต่ละโมดูลย่อย
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/cad_loader.py — อ่านไฟล์ STEP เป็น mesh + B-Rep (CADLoader)
+#     - core/path_planner.py — ชั้นและจุดวัดสำหรับแสดงผล (PathPlanner)
+#     - core/projector.py — ฉายโมเดล 3D เป็นภาพ 2D ตามมุมมอง (Projector)
+#     - core/step_extractor.py — หารูจาก B-Rep ของไฟล์ STEP (StepExtractor)
+#     - core/surface_oracle.py — คำนวณจุดแตะลูกบอลจากผิว B-Rep (ตาราง s(ρ)) (py, set_model)
+#   ถูกใช้งานโดย:
+#     - main.py — จุดเริ่มโปรแกรม (MoldGeometry)
+#   ไลบรารีภายนอก: numpy
+#
+# รายละเอียด:
+#   MoldGeometry: ศูนย์กลางเชื่อมโมดูล Backend ทั้งหมด
+#
+#   หน้าที่: เป็น facade ที่รวม 4 โมดูลย่อยเข้าด้วยกัน แล้วเปิด method กลาง
+#   ให้ฝั่ง UI เรียกใช้โดยไม่ต้องรู้รายละเอียดภายใน
+#     - loader    (CADLoader)    โหลดไฟล์ STEP/STP
+#     - projector (Projector)    แปลงพิกัด 3D → 2D ตามมุมมอง
+#     - extractor (StepExtractor) สกัดข้อมูลรูจาก B-Rep
+#     - planner   (PathPlanner)  คำนวณเส้นทางโพรบทีละชั้น
+#
+#   ไฟล์นี้ไม่มีตัวแปรที่ต้องปรับจูนโดยตรง — ค่าคงที่ต่าง ๆ อยู่ในแต่ละโมดูลย่อย
 # ==============================================================================
+
 import numpy as np
 
 from core.cad_loader import CADLoader

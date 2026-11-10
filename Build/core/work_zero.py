@@ -1,32 +1,44 @@
 # ==============================================================================
-# core/work_zero.py — ตำแหน่ง Work Zero (X0 Y0 Z0) ของ G-code
+# core/work_zero.py — ตำแหน่ง Work Zero ของ G-code
 # ==============================================================================
-# VERSION: 05
-# CHANGE LOG (v04 -> v05):
-#   ตัด calib_enabled()/calib_box() — ไม่มีการแตะผนังนอกใน G-code ตรวจรูแล้ว
-# CHANGE LOG (v03 -> v04):
-#   calib_box(): กรอบชิ้นงานในพิกัด G-code (ลบ machining_origin แล้ว) สำหรับจุดแตะผนังนอก
-#   คาลิเบรตหัวโพรบ (core/gcode_generator.py v17) — None ถ้าไม่ได้ติ๊ก "Calibrate tip on outer walls"
-# CHANGE LOG (-> v03):
-#   machining_origin(): เลื่อน Z ตามวิธีตั้ง Z0 (app.z0_ref: 'tip' = ก้นลูกบอลแตะผิวบน —
-#   ค่าเริ่มต้น, 'center' = จุดศูนย์กลางลูกบอลอยู่ที่ผิวบน) + z0_note() สำหรับหัว G-code
-#   work_zero_origin() เดิมไม่เปลี่ยน (เครื่องหมาย X0 Y0 บนจอยังอยู่ที่ผิวบน)
-# หน้าที่: ให้ผู้ใช้เลือกได้ว่าจุด zero ของโปรแกรม G-code อยู่ตรงไหนของชิ้นงาน
-# (ตั้งค่าที่ G-code Export → Export Settings → "Work zero") แล้วคำนวณ
-# "origin" = ตำแหน่งของจุดนั้นในพิกัดเครื่อง (machining frame) เพื่อนำไปลบออก
-# จากพิกัดทุกจุดก่อนเขียน G-code / expected points ของ Schema
+# สรุปหน้าที่:
+#   กำหนดตำแหน่ง Work Zero (X0 Y0 Z0) ของ G-code: กึ่งกลางชิ้นงาน มุมต่าง ๆ
+#   หรือ centroid และวิธีอ้างอิง Z0
 #
-# ตัวเลือก (ซ้าย/ขวา/บน/ล่าง = ตามที่เห็นบนจอ, X+ = ขวา, Y+ = ขึ้นบนจอ):
-#   centroid     — จุดศูนย์กลางมวลของ mesh (ค่าเริ่มต้น = พฤติกรรมเดิมทุกประการ)
-#   center       — กึ่งกลางกรอบชิ้นงาน (bounding box), Z0 = ผิวบนสุด
-#   upper_left / upper_right / lower_left / lower_right
-#                — มุมของกรอบชิ้นงาน, Z0 = ผิวบนสุด
-# ("ผิวบนสุด" = ด้านที่หันเข้าหาหัวโพรบในมุมมองที่ใช้ export)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/projector.py — ฉายโมเดล 3D เป็นภาพ 2D ตามมุมมอง (view_rotation_matrix)
+#   ถูกใช้งานโดย:
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (DEFAULT_WORK_ZERO, describe, label_of, machining_origin, test_zero_name, z0_note, …)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (machining_origin)
+#     - ui/evaluation_report.py — สร้างรายงาน PDF (machining_origin)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (WORK_ZERO_CHOICES, Z0_REF_CHOICES, label_of, mode_of_label, z0_ref_label, z0_ref_of_label, …)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (DEFAULT_WORK_ZERO, DEFAULT_Z0_REF, WORK_ZERO_CHOICES, Z0_REF_CHOICES)
+#     - ui/tabs/customization_tab.py — แท็บ Customization (ภาพ 3D เส้นทางโพรบ) (machining_origin, zero_in_view)
+#     - ui/tabs/evaluation_tab.py — แท็บ Evaluation (กราฟผล) (machining_origin)
+#     - ui/tabs/selection_tab.py — แท็บ Selection (ภาพ 2D ความลึก) (zero_in_view)
+#   ไลบรารีภายนอก: numpy
 #
-# พิกัดเครื่อง = พิกัดโมเดล (ย้ายจุดศูนย์กลางมวลไป 0,0,0 แล้วใน cad_loader)
-# หมุนด้วย core/projector.py::view_rotation_matrix — เมทริกซ์เดียวกับ
-# core/gcode_generator.py::apply_view_transform() และกับจอ
+# รายละเอียด:
+#   ตำแหน่ง Work Zero (X0 Y0 Z0) ของ G-code
+#
+#   หน้าที่: ให้ผู้ใช้เลือกได้ว่าจุด zero ของโปรแกรม G-code อยู่ตรงไหนของชิ้นงาน
+#   (ตั้งค่าที่ G-code Export → Export Settings → "Work zero") แล้วคำนวณ
+#   "origin" = ตำแหน่งของจุดนั้นในพิกัดเครื่อง (machining frame) เพื่อนำไปลบออก
+#   จากพิกัดทุกจุดก่อนเขียน G-code / expected points ของ Schema
+#
+#   ตัวเลือก (ซ้าย/ขวา/บน/ล่าง = ตามที่เห็นบนจอ, X+ = ขวา, Y+ = ขึ้นบนจอ):
+#     centroid     — จุดศูนย์กลางมวลของ mesh (ค่าเริ่มต้น = พฤติกรรมเดิมทุกประการ)
+#     center       — กึ่งกลางกรอบชิ้นงาน (bounding box), Z0 = ผิวบนสุด
+#     upper_left / upper_right / lower_left / lower_right
+#                  — มุมของกรอบชิ้นงาน, Z0 = ผิวบนสุด
+#   ("ผิวบนสุด" = ด้านที่หันเข้าหาหัวโพรบในมุมมองที่ใช้ export)
+#
+#   พิกัดเครื่อง = พิกัดโมเดล (ย้ายจุดศูนย์กลางมวลไป 0,0,0 แล้วใน cad_loader)
+#   หมุนด้วย core/projector.py::view_rotation_matrix — เมทริกซ์เดียวกับ
+#   core/gcode_generator.py::apply_view_transform() และกับจอ
 # ==============================================================================
+
 import numpy as np
 
 DEFAULT_WORK_ZERO = "centroid"
@@ -82,7 +94,7 @@ def zero_hint_text(app) -> str:
 
 
 # ------------------------------------------------------------------------------
-# v03: Z0 ตั้งด้วยก้นลูกบอล หรือจุดศูนย์กลางลูกบอล
+# Z0 ตั้งด้วยก้นลูกบอล หรือจุดศูนย์กลางลูกบอล
 # พิกัดใน G-code คือจุดศูนย์กลางลูกบอล — ถ้า Set Zero Z ตอน "ก้นลูกบอลแตะผิวบน" (วิธีที่ทำกัน
 # ปกติ) ลูกบอลจะสูงกว่าที่โปรแกรมคิดเท่ารัศมี จึงเลื่อน Z ของทุกจุด (G-code + Schema) ลง r
 # ------------------------------------------------------------------------------

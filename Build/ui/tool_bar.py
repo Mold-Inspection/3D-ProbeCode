@@ -1,29 +1,32 @@
 # ==============================================================================
-# ui/tool_bar.py — Ribbon ด้านบนของหน้าต่าง (ปุ่มไอคอน + ข้อความ จัดเป็นกลุ่ม)
+# ui/tool_bar.py — แถบเครื่องมือด้านบน
 # ==============================================================================
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   เปลี่ยนจาก toolbar ไอคอนล้วนแบบ Thonny เป็น ribbon ตาม mockup "A · Metrology":
-#   ปุ่มที่เคยอยู่ใน sidebar ซ้าย (Upload / Generate Holes / Clear / ปุ่มมุมมอง 6 ปุ่ม)
-#   ย้ายมาอยู่ที่นี่ทั้งหมด จัดเป็นกลุ่มมีชื่อกำกับ:
-#     MODEL  [Open] [Detect] [Clear]
-#     VIEW   [Top Front Left / Bottom Back Right] [Rotate] [Reset]
-#     SETUP  [Hardware]
-#     ขวาสุด: สวิตช์ Light/Dark + ปุ่มหลัก "Export G-code"
-#   handler ทุกตัวยังเป็นของ UIManager เหมือนเดิม (app.open_file_dialog,
-#   app.on_generate_holes, app.on_clear_holes, app.show_view, app.rotate_screen,
-#   app.reset_position) — ย้ายแค่ตำแหน่งปุ่ม
+# สรุปหน้าที่:
+#   แถบเครื่องมือด้านบน (เปิดไฟล์ Generate Holes ปุ่มมุมมอง หมุน Hardware
+#   Setting G-code Export ธีม) พร้อม tooltip
 #
-# attribute สาธารณะที่ ui/main_window.py ใช้ .configure(state=...):
-#   btn_open, btn_detect, btn_clear, btn_rotate, btn_reset, view_buttons (dict)
-# set_active_view(name) — ไฮไลต์ปุ่มมุมมองที่กำลังแสดงอยู่ (เรียกจาก show_view)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - ui/icon_loader.py — วาดไอคอนปุ่ม (get_icon)
+#     - ui/theme.py — สีและธีม (ACCENT, ACCENT_HOVER, BG_CARD, BG_CARD_HOVER, BG_PANEL, BORDER, …)
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (ToolBar)
+#   ไลบรารีภายนอก: customtkinter, tkinter
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _RIBBON_HEIGHT    = ความสูงของ ribbon (พิกเซล)
-#   _ICON_SIZE        = ขนาดไอคอนในปุ่มใหญ่ (พิกเซล)
-#   _TOOLTIP_DELAY_MS = หน่วงเวลาก่อนโชว์ tooltip หลัง hover ค้าง (ms)
-#   _VIEW_GRID        = ตำแหน่งปุ่มมุมมอง (ชื่อ, แถว, คอลัมน์)
+# รายละเอียด:
+#   Ribbon ด้านบนของหน้าต่าง (ปุ่มไอคอน + ข้อความ จัดเป็นกลุ่ม)
+#
+#   attribute สาธารณะที่ ui/main_window.py ใช้ .configure(state=...):
+#     btn_open, btn_detect, btn_clear, btn_rotate, btn_reset, view_buttons (dict)
+#   set_active_view(name) — ไฮไลต์ปุ่มมุมมองที่กำลังแสดงอยู่ (เรียกจาก show_view)
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _RIBBON_HEIGHT    = ความสูงของ ribbon (พิกเซล)
+#     _ICON_SIZE        = ขนาดไอคอนในปุ่มใหญ่ (พิกเซล)
+#     _TOOLTIP_DELAY_MS = หน่วงเวลาก่อนโชว์ tooltip หลัง hover ค้าง (ms)
+#     _VIEW_GRID        = ตำแหน่งปุ่มมุมมอง (ชื่อ, แถว, คอลัมน์)
 # ==============================================================================
+
 import tkinter as tk
 import customtkinter as ctk
 

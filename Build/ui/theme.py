@@ -1,29 +1,54 @@
 # ==============================================================================
-# ui/theme.py — สี / ฟอนต์ / ระยะ ของทั้งโปรแกรม (Design tokens) — Light + Dark
+# ui/theme.py — สีและธีม
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: รวมค่าสีที่เคย hardcode กระจายอยู่ทุกไฟล์ใน ui/ และ core/ ไว้ที่
-# เดียว — ไฟล์อื่นให้ `from ui import theme` แล้วอ้าง theme.BG_CARD ฯลฯ
-# แทนการเขียน hex ตรง ๆ (สไตล์ "A · Metrology" ใน mockup)
+# สรุปหน้าที่:
+#   สีและธีม (โหมดสว่าง/มืด) ของทั้งโปรแกรม
 #
-# ทุก token สีเป็นคู่ (light, dark):
-#   - widget ของ customtkinter รับคู่นี้ได้ตรง ๆ (fg_color=theme.BG_CARD) และ
-#     สลับสีเองเมื่อเรียก ctk.set_appearance_mode()
-#   - ของที่ไม่ใช่ customtkinter (matplotlib, tk.Label, tk.Canvas) ต้องแปลง
-#     เป็น hex เดี่ยวของโหมดปัจจุบันก่อนด้วย theme.c(theme.BG_CARD)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (ACCENT, ACCENT_HOVER, BORDER, BTN_SECONDARY, BTN_SECONDARY_HOVER, TEXT_MUTED, …)
+#     - ui/centre_check_dialog.py — ถามว่า Set up แล้วหรือยังก่อน Run inspection (ACCENT, ACCENT_HOVER, BTN_SECONDARY, BTN_SECONDARY_HOVER, TEXT, WARN_TEXT)
+#     - ui/compensation_info_dialog.py — หน้าต่างอธิบายที่มาของค่าชดเชยหัววัด (BG_CARD, FONT_MONO, TEXT_MUTED, TEXT_SECONDARY, WARN_TEXT)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (ACCENT, ACCENT_HOVER, BG_CARD, BG_CARD_HOVER, BORDER, BTN_SECONDARY, …)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (ACCENT, ACCENT_HOVER, BG_CARD, BG_CARD_HOVER, BG_INPUT, BTN_SECONDARY, …)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (ACCENT, ACCENT_HOVER, BG_CARD, BORDER, BTN_SECONDARY, BTN_SECONDARY_HOVER, …)
+#     - ui/icon_loader.py — วาดไอคอนปุ่ม (ICON)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (ACCENT, ACCENT_HOVER, ACCENT_TEXT, BG_CANVAS, BG_CARD, BG_CARD_HOVER, …)
+#     - ui/settings_dialog_base.py — โครงหน้าต่างตั้งค่าแบบมีหมวด (BG_CANVAS, BG_CARD, BG_CARD_HOVER, BG_INPUT, BG_PANEL, BORDER, …)
+#     - ui/tab_strip.py — แถบปุ่มสลับแท็บ (ACCENT, BG_CANVAS, BG_CARD_HOVER, BG_PANEL, TEXT, TEXT_SECONDARY)
+#     - ui/tabs/customization_tab.py — แท็บ Customization (ภาพ 3D เส้นทางโพรบ) (PLOT_AX, TEXT, VIEW3D_BG, VIEW3D_MUTED, VIEW3D_TEXT, c)
+#     - ui/tabs/evaluation_tab.py — แท็บ Evaluation (กราฟผล) (ACCENT, BG_PANEL, PLOT_AX, PLOT_GRID, TEXT, TEXT_MUTED, …)
+#     - ui/tabs/path_mapper_tab.py — แท็บ Path Mapper (ลำดับการเดิน) (ACCENT, BG_PANEL, PLOT_AX, PLOT_GRID, TEXT, TEXT_MUTED, …)
+#     - ui/tabs/selection_tab.py — แท็บ Selection (ภาพ 2D ความลึก) (BG_PANEL, BORDER_STRONG, PLOT_GRID, TEXT, TEXT_MUTED, c)
+#     - ui/tool_bar.py — แถบเครื่องมือด้านบน (ACCENT, ACCENT_HOVER, BG_CARD, BG_CARD_HOVER, BG_PANEL, BORDER, …)
+#   ไลบรารีภายนอก: customtkinter, matplotlib
 #
-# กติกา:
-#   - ปุ่มสี ACCENT = action หลัก 1 อันต่อหน้าจอ (Export, Apply, Generate)
-#   - ปุ่มรอง = BTN_SECONDARY, ปุ่มลบ/ล้าง = DANGER (ตัวอักษรขาวทั้งคู่)
-#   - *_BG = พื้นจาง ๆ ของสถานะ (ใช้คู่กับตัวอักษร TEXT / *_TEXT)
-#   - *_FILL = พื้นเข้มของสถานะ (ใช้คู่กับตัวอักษรขาว)
+# รายละเอียด:
+#   สี / ฟอนต์ / ระยะ ของทั้งโปรแกรม (Design tokens) — Light + Dark
 #
-# apply()             — เรียกครั้งเดียวก่อนสร้าง ctk.CTk() (ใน ui/main_window.py)
-# apply_matplotlib()  — เรียกตอนเริ่ม และทุกครั้งที่สลับ Light/Dark
+#   หน้าที่: รวมค่าสีที่เคย hardcode กระจายอยู่ทุกไฟล์ใน ui/ และ core/ ไว้ที่
+#   เดียว — ไฟล์อื่นให้ `from ui import theme` แล้วอ้าง theme.BG_CARD ฯลฯ
+#   แทนการเขียน hex ตรง ๆ (สไตล์ "A · Metrology" ใน mockup)
 #
-# สีข้อมูลบนกราฟ (สีแต่ละ layer, marker pass/fail, highlight) ยังอยู่ในไฟล์
-# tab ของตัวเอง — ไฟล์นี้คุมเฉพาะ "โครง" UI และพื้นหลัง/ตัวอักษรของกราฟ
+#   ทุก token สีเป็นคู่ (light, dark):
+#     - widget ของ customtkinter รับคู่นี้ได้ตรง ๆ (fg_color=theme.BG_CARD) และ
+#       สลับสีเองเมื่อเรียก ctk.set_appearance_mode()
+#     - ของที่ไม่ใช่ customtkinter (matplotlib, tk.Label, tk.Canvas) ต้องแปลง
+#       เป็น hex เดี่ยวของโหมดปัจจุบันก่อนด้วย theme.c(theme.BG_CARD)
+#
+#   กติกา:
+#     - ปุ่มสี ACCENT = action หลัก 1 อันต่อหน้าจอ (Export, Apply, Generate)
+#     - ปุ่มรอง = BTN_SECONDARY, ปุ่มลบ/ล้าง = DANGER (ตัวอักษรขาวทั้งคู่)
+#     - *_BG = พื้นจาง ๆ ของสถานะ (ใช้คู่กับตัวอักษร TEXT / *_TEXT)
+#     - *_FILL = พื้นเข้มของสถานะ (ใช้คู่กับตัวอักษรขาว)
+#
+#   apply()             — เรียกครั้งเดียวก่อนสร้าง ctk.CTk() (ใน ui/main_window.py)
+#   apply_matplotlib()  — เรียกตอนเริ่ม และทุกครั้งที่สลับ Light/Dark
+#
+#   สีข้อมูลบนกราฟ (สีแต่ละ layer, marker pass/fail, highlight) ยังอยู่ในไฟล์
+#   tab ของตัวเอง — ไฟล์นี้คุมเฉพาะ "โครง" UI และพื้นหลัง/ตัวอักษรของกราฟ
 # ==============================================================================
+
 import customtkinter as ctk
 
 DEFAULT_MODE = "Light"   # โหมดตอนเปิดโปรแกรม — "Light" หรือ "Dark"

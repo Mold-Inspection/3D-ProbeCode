@@ -1,15 +1,23 @@
-# ui/settings_dialog_base.py — Shared VS Code-style dialog chrome for
-# floating settings dialogs (Hardware Setting / G-code Export)
 # ==============================================================================
-# VERSION: 07
-# CHANGE LOG (v06 -> v07):
-#   FIX: Dialog is now a fixed size with a scrollable content area.
-#   - Replaced _DIALOG_MIN_WIDTH/HEIGHT with fixed _DIALOG_WIDTH/HEIGHT (640x640).
-#   - Categories now use ctk.CTkScrollableFrame so content taller than the 
-#     window will scroll internally instead of stretching the toplevel.
-#   - Removed dynamic sizing methods (_fit_to_content, _apply_fit_geometry, 
-#     _second_pass_fit) as geometry is now statically set once in show().
+# ui/settings_dialog_base.py — โครงหน้าต่างตั้งค่าแบบมีหมวด
 # ==============================================================================
+# สรุปหน้าที่:
+#   โครงหน้าต่างตั้งค่าแบบมีหมวด ใช้ร่วมกันหลายหน้าต่าง
+#
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - ui/theme.py — สีและธีม (BG_CANVAS, BG_CARD, BG_CARD_HOVER, BG_INPUT, BG_PANEL, BORDER, …)
+#   ถูกใช้งานโดย:
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (SettingsDialogBase)
+#     - ui/compensation_info_dialog.py — หน้าต่างอธิบายที่มาของค่าชดเชยหัววัด (SettingsDialogBase)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (SettingsDialogBase)
+#   ไลบรารีภายนอก: ctypes, customtkinter, sys, tkinter
+#
+# รายละเอียด:
+#   Shared VS Code-style dialog chrome for
+#   floating settings dialogs (Hardware Setting / G-code Export)
+# ==============================================================================
+
 import sys
 import tkinter.messagebox as _mb
 import customtkinter as ctk
@@ -30,7 +38,7 @@ _COLOR_FIELD_BG  = theme.BG_INPUT
 
 class SettingsDialogBase:
     """กรอบ dialog กลาง (VS Code Settings-style) — ใช้ร่วมกันระหว่าง
-    Hardware Setting และ G-code Export dialogs. MODAL, ขนาดคงที่ (v07)
+    Hardware Setting และ G-code Export dialogs. MODAL, ขนาดคงที่
     และสามารถเลื่อนดูเนื้อหาภายในได้หากมีขนาดใหญ่เกินหน้าต่าง"""
 
     def __init__(self, master, title: str):
@@ -272,7 +280,7 @@ class SettingsDialogBase:
 
         cat = self._categories[key]
         if cat['frame'] is None:
-            # v07: เปลี่ยนไปใช้ CTkScrollableFrame เพื่อให้เลื่อนดูข้อมูลได้
+            # เปลี่ยนไปใช้ CTkScrollableFrame เพื่อให้เลื่อนดูข้อมูลได้
             cat['frame'] = ctk.CTkScrollableFrame(self._content_frame, fg_color="transparent")
             cat['build_fn'](cat['frame'])
         cat['frame'].pack(fill="both", expand=True)

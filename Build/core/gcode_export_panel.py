@@ -1,94 +1,27 @@
-# core/gcode_export_panel.py
-# VERSION: 20
-# CHANGE LOG (v19 -> v20):
-#   ตัดตัวเลือก "Calibrate tip on outer walls first" — Set up (Find centre + เวอร์เนียร์) หา Effective Tip
-#   และตั้ง zero ไปแล้วก่อนรัน การแตะผนังนอกซ้ำใน G-code ตรวจรูจึงไม่จำเป็น (และดันชิ้นงานที่ไม่ได้ยึดให้เลื่อน)
-# CHANGE LOG (v18 -> v19):
-#   ตัวเลือก "Calibrate tip on outer walls" (จำค่า) → G-code แตะผนังนอก 4 ด้านก่อนเข้ารู
-#   (core/gcode_generator.py v17) Schema ใช้ point map ชุดเดียวกับ G-code (ตารางจุดแตะ B-Rep)
-# CHANGE LOG (v17 -> v18):
-#   ตัดช่อง Padding Height + ปุ่ม Suggest ออก (Z0 อยู่ที่ผิวบนชิ้นงานเสมอ)
-# CHANGE LOG (v16 -> v17):
-#   Export G-code สำเร็จ → ตั้ง app.job_gcode, ปิด dialog แล้วสลับไปแท็บ Evaluation (รันจากที่นั่น)
-# CHANGE LOG (v15 -> v16):
-#   จุด zero ของ G-code/Schema มาจาก core/work_zero.py::machining_origin() — เลื่อน Z ลง
-#   เท่ารัศมีลูกบอลเมื่อตั้ง Z0 ด้วยก้นลูกบอล (ค่าเริ่มต้น) + หัวไฟล์บอกวิธีตั้ง Z0
-# CHANGE LOG (v14 -> v15):
-#   Schema ส่ง probe_profile.z_trigger ให้ build_point_map() (จุดพื้นก้นรู) และหน้า
-#   Probe Test เตือนว่า Z− จะ ALARM:5 ถ้าหัวโพรบไม่ทริกแนว Z
-# CHANGE LOG (v13 -> v14):
-#   ทุกครั้งที่บันทึก G-code จำชื่อไฟล์ไว้ที่ app.last_gcode_name — ใช้ตั้งชื่อ log
-#   ของ job ถัดไป (ui/openbuilds_logger.py) เพราะ OpenBuilds ไม่บอกชื่อไฟล์ที่รัน
-# CHANGE LOG (v12 -> v13):
-#   FEATURE: หมวด "Probe Test" — สร้าง G-code G38.2 ทีละทิศ (X+, X-, Y+, Y-, Z-)
-#   แยกไฟล์ละ 1 ทิศ จาก core/probe_test.py ไว้เช็คว่าเครื่องรับสัญญาณโพรบหรือไม่
-#   ระยะเดิน / feedrate / back-off กรอกเองได้ และจำค่าไว้; ติ๊ก "Return to start
-#   point" = กลับจุด Set Zero หลังแตะ (core/probe_test.py v02)
-# CHANGE LOG (v11 -> v12):
-#   FIX: ส่งการหมุนจอ (app.screen_rotation) เข้า generate_gcode() /
-#   export_schema_json() / build_settings_snapshot() — X/Y ของ G-code และ
-#   Schema ตรงกับที่เห็นบนจอหลังกด Rotate (ดู gcode_generator.py v08)
-# CHANGE LOG (v10 -> v11):
-#   FEATURE: หมวด "Axis Test (X/Y)" ในหน้าต่าง G-code Export — สร้างไฟล์
-#   G-code ทดสอบแกนจาก core/axis_test.py: เข็มเริ่มที่มุมซ้ายบนของชิ้นงาน
-#   (Set Zero ไว้แล้ว) เดินไปครบ 4 มุมแล้วกลับจุด zero ไว้เช็คทิศ/ระยะแกน
-#   X/Y ใน OpenBuilds Control ก่อนรันโปรแกรมโพรบจริง — ขนาดชิ้นงานดึงจาก
-#   โมเดลในมุมมองปัจจุบันบนจอ (แก้เองได้) ไม่ต้องมีรูที่เลือกไว้
+# ==============================================================================
+# core/gcode_export_panel.py — หน้าต่าง G-code Export
+# ==============================================================================
+# สรุปหน้าที่:
+#   หน้าต่าง G-code Export: ตั้งค่า export, Axis Test, Probe Test
+#   และเป็นจุดที่เรียก generate_gcode + export_schema_json
 #
-# CHANGE LOG (v09 -> v10):
-#   FEATURE (user request — "after exporting G-code, auto-set the Schema
-#   as the active one, without the user picking it by hand"): both
-#   sidecar-writing paths now push the schema they just wrote straight
-#   into the app's "active schema" state — the exact same state
-#   ui/evaluation_left_panel.py v08's "📂 Load Schema (.json)" button
-#   sets, just without a file dialog:
-#     - _capture_export_record() (the automatic sidecar after
-#       "🖨 Export G-code")
-#     - _on_export_points_only() (the standalone "📄 Export Schema Only"
-#       button)
-#   New shared helper _auto_load_schema(payload, filepath) does this:
-#   sets app.loaded_schema / loaded_expected_points / _source / _view
-#   from the `payload` dict that core/expected_points_io.py v04's
-#   export_schema_json() now RETURNS (no re-reading the file back from
-#   disk, no recomputing build_point_map() a second time). Does NOT call
-#   apply_settings_snapshot() — unnecessary here, since the
-#   settings_snapshot was built from app.current_holes at the exact
-#   moment of export, i.e. it already IS the current configuration,
-#   nothing to replace. Also calls
-#   app.evaluation_left_panel._auto_refresh_if_result_exists() (added in
-#   v08) so an already-loaded .log's results are recomputed immediately
-#   too, and refreshes the evaluation left/right sidebars + redraws the
-#   Evaluation tab if it's the one currently visible — all best-effort
-#   (wrapped so a UI refresh failure never affects the export that
-#   already succeeded).
-#   Both success toasts now mention that the schema was set active (and
-#   whether results were refreshed), so the user doesn't have to guess.
-#
-# CHANGE LOG (v08 -> v09):
-#   FEATURE (user request, follow-up to
-#   PLAN_merged-export-record-non-destructive_v01.md): renamed the
-#   written sidecar from "<name>.export.json" to "<name>_schema.json"
-#   (matches core/expected_points_io.py v03's export_schema_json() /
-#   load_schema_json() rename), and the standalone button now suggests
-#   that filename as its default save name too.
-#   FIX (bug report — see core/evaluation_engine.py v04's changelog):
-#   the settings snapshot written into the schema file must capture ALL
-#   current holes (selected AND unselected), not just the ones currently
-#   selected for inspection — otherwise a loaded schema can never
-#   restore "which holes were selected at export time" at all, since
-#   unselected holes never appeared in the snapshot in the first place.
-#   _build_snapshot_or_none() now takes the holes to snapshot as an
-#   explicit parameter and both call sites (_capture_export_record(),
-#   _on_export_points_only()) now pass `app.current_holes` (ALL holes)
-#   instead of the `selected` list used for the G-code/points
-#   calculation — those two lists serve different purposes and are now
-#   kept explicitly separate: `selected` still drives build_point_map()/
-#   generate_gcode() (only selected holes are ever machined/probed), while
-#   `app.current_holes` drives the settings snapshot (needs the full
-#   picture so a later full-replace restore is possible).
-#   Renamed export_combined_record_json import -> export_schema_json to
-#   match core/expected_points_io.py v03. Wording updated from "Export
-#   Record" to "Schema" throughout button labels/dialogs/messages.
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/axis_test.py — G-code ทดสอบแกน X/Y (AxisTestSettings, generate_axis_test_gcode, generate_hole_center_test_gcode, hole_centers_from_view)
+#     - core/evaluation_engine.py — ประเมินจุดวัดเทียบจุดคาดหวัง (ระยะเบี่ยง ⌀ ความกลม PASS/FAIL) (build_settings_snapshot)
+#     - core/expected_points_io.py — อ่าน/เขียนไฟล์ _schema.json (export_schema_json)
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (GCodeSettings, contact_plan_report, exact_touch_report, gcode_extents, generate_gcode, probe_safety_report, …)
+#     - core/probe_test.py — G-code ทดสอบหัววัดทีละทิศ (DIRECTIONS, ProbeTestSettings, generate_probe_test_gcode)
+#     - core/user_settings.py — จำค่าตั้งใน settings.json (get, py, save_section)
+#     - core/work_zero.py — ตำแหน่ง Work Zero ของ G-code (DEFAULT_WORK_ZERO, describe, label_of, machining_origin, test_zero_name, z0_note, …)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (EvaluationLeftPanel)
+#     - ui/settings_dialog_base.py — โครงหน้าต่างตั้งค่าแบบมีหมวด (SettingsDialogBase)
+#     - ui/theme.py — สีและธีม (ACCENT, ACCENT_HOVER, BORDER, BTN_SECONDARY, BTN_SECONDARY_HOVER, TEXT_MUTED, …)
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (GCodeExportPanel)
+#   ไลบรารีภายนอก: customtkinter, os
+# ==============================================================================
+
 import os
 import customtkinter as ctk
 
@@ -129,7 +62,7 @@ class GCodeExportPanel:
 
     def _zero_origin(self, view_name):
         """ตำแหน่งจุด zero ในพิกัดเครื่อง — ลบออกจากทุกพิกัดของ G-code / Schema"""
-        # v16: รวมการเลื่อน Z ตามวิธีตั้ง Z0 (ก้นลูกบอล / จุดศูนย์กลางลูกบอล)
+        # รวมการเลื่อน Z ตามวิธีตั้ง Z0 (ก้นลูกบอล / จุดศูนย์กลางลูกบอล)
         return machining_origin(self.app, view_name, getattr(self.app, 'screen_rotation', 0))
 
     def _zero_note(self):
@@ -214,7 +147,7 @@ class GCodeExportPanel:
             font=ctk.CTkFont(size=13, weight="bold"), height=34,
             command=self._on_export).pack(fill="x")
 
-        # v09: standalone action — still no GCodeSettings needed at all
+        # standalone action — still no GCodeSettings needed at all
         # (only needs a loaded model + selected holes + current view),
         # deliberately placed outside the field-validation flow above.
         # Writes the "<name>_schema.json" combined format (points + full
@@ -235,7 +168,7 @@ class GCodeExportPanel:
         ).pack(anchor="w", pady=(8, 0))
 
     # ------------------------------------------------------------------
-    # v11: Axis Test — corner trace G-code
+    # Axis Test — corner trace G-code
     # ------------------------------------------------------------------
     def _axis_intro_text(self) -> str:
         return ("Checks that the X/Y axes move the right way and the right "
@@ -348,7 +281,7 @@ class GCodeExportPanel:
         return settings
 
     def _remember_gcode_name(self, filepath: str):
-        """v14: ชื่อ G-code ล่าสุด = ชื่อ job ของ log ถัดไป (ui/openbuilds_logger.py)"""
+        """ชื่อ G-code ล่าสุด = ชื่อ job ของ log ถัดไป (ui/openbuilds_logger.py)"""
         self.app.last_gcode_name = os.path.splitext(os.path.basename(filepath))[0]
 
     def _save_test_gcode(self, gcode_text, suffix, title, summary, zero_name="UPPER-LEFT corner"):
@@ -385,7 +318,7 @@ class GCodeExportPanel:
             f"ขนาด X {settings.width_x:.2f} × Y {settings.length_y:.2f} mm", zero_name)
 
     def _on_export_hole_center_test(self):
-        """v11: เดินไปจุดศูนย์กลางของทุกรูที่เลือกไว้ตรวจ — zero เดียวกับ corner trace"""
+        """เดินไปจุดศูนย์กลางของทุกรูที่เลือกไว้ตรวจ — zero เดียวกับ corner trace"""
         app = self.app
         if app.geo.mesh is None or getattr(app, 'current_x', None) is None:
             self.dialog.showwarning("No Model", "กรุณาโหลดโมเดลก่อน")
@@ -410,7 +343,7 @@ class GCodeExportPanel:
             f"{len(centers)} รู — เดินไปจุดศูนย์กลางทีละรูแล้วกลับจุด zero", zero_name)
 
     # ------------------------------------------------------------------
-    # v13: Probe Test — G38.2 ทีละทิศ แยกไฟล์ (core/probe_test.py)
+    # Probe Test — G38.2 ทีละทิศ แยกไฟล์ (core/probe_test.py)
     # ------------------------------------------------------------------
     def _build_probe_test_fields(self, parent):
         ctk.CTkLabel(
@@ -641,7 +574,7 @@ class GCodeExportPanel:
             "\n\nChange Points/Layer or Zigzag in Properties to place them on a wall. Export anyway?")
 
     def _exact_ok(self, point_map) -> bool:
-        """v19: เตือนจุดที่ตารางจุดแตะ B-Rep บอกว่าลูกบอลจริงจะแตะขอบ/ขั้นก่อนผนัง หรือชนตั้งแต่จุดเริ่ม"""
+        """เตือนจุดที่ตารางจุดแตะ B-Rep บอกว่าลูกบอลจริงจะแตะขอบ/ขั้นก่อนผนัง หรือชนตั้งแต่จุดเริ่ม"""
         from core.gcode_generator import exact_touch_report
         rep = exact_touch_report(point_map)
         if not rep:
@@ -694,7 +627,7 @@ class GCodeExportPanel:
         return "Top"
 
     def _default_schema_filename(self) -> str:
-        """v09: suggested filename for the standalone save dialog —
+        """suggested filename for the standalone save dialog —
         "<step basename>_schema.json" when a STEP file is loaded,
         otherwise just "schema.json"."""
         app = self.app
@@ -750,9 +683,9 @@ class GCodeExportPanel:
             self.dialog.showerror("Save Failed", f"บันทึกไฟล์ไม่สำเร็จ:\n{e!r}")
             return
 
-        self._remember_gcode_name(filepath)                                         # v14
+        self._remember_gcode_name(filepath)
         schema_report = self._capture_export_record(selected, view_name, filepath,
-                                                    points=point_map)   # v09/v10 (+ v19 point map เดียวกัน)
+                                                    points=point_map)   #/(+ point map เดียวกัน)
 
         # popup ยืนยันว่า export เสร็จ — ใช้ messagebox ที่มี dialog นี้เป็นเจ้าของ
         # (toast ของ app.notify วางอยู่บนหน้าต่างหลัก จึงถูก dialog นี้บังไว้)
@@ -769,7 +702,7 @@ class GCodeExportPanel:
             msg += f"\n\nข้ามรู {len(skipped)} รูที่ไม่มีข้อมูล STEP (mesh-only): {names}"
         if unsafe:
             msg += f"\n\nข้ามรู {len(unsafe)} รูที่หัวโพรบปัจจุบันโพรบได้ไม่ปลอดภัย: {', '.join(unsafe)}"
-        # v17: G-code นี้พร้อมรันจากแท็บ Evaluation — ปิด dialog แล้วพาไปหน้านั้นเลย
+        # G-code นี้พร้อมรันจากแท็บ Evaluation — ปิด dialog แล้วพาไปหน้านั้นเลย
         from ui.evaluation_left_panel import EvaluationLeftPanel
         app.job_gcode = EvaluationLeftPanel.make_job(filepath, gcode_text)
         msg += "\n\nไปที่แท็บ Evaluation — กด ▶ Run inspection เพื่อรันผ่านโปรแกรมนี้"
@@ -791,7 +724,7 @@ class GCodeExportPanel:
         validating/requiring any G-code Export Settings field and without
         writing a .gcode file at all. Writes the combined format (points
         + FULL settings snapshot, built from ALL current holes — see
-        file changelog) as "<name>_schema.json", then (v10) immediately
+        file changelog) as "<name>_schema.json", then immediately
         sets it as the app's active schema — see _auto_load_schema()."""
         app = self.app
         selected = self._get_selected_holes_or_warn()
@@ -812,7 +745,7 @@ class GCodeExportPanel:
         if not filepath:
             return
 
-        # v09: snapshot ALL current holes (selected + unselected), not
+        # snapshot ALL current holes (selected + unselected), not
         # just `selected` — the schema must be able to fully replace the
         # current configuration on load, including which holes are
         # selected at all.
@@ -826,13 +759,13 @@ class GCodeExportPanel:
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
                 screen_rot=getattr(self.app, 'screen_rotation', 0),
                 origin=self._zero_origin(view_name), work_zero=self._work_zero(),
-                z_trigger=app.probe_profile.z_trigger,   # v15: + จุดพื้นก้นรู
-                probe_r=app.probe_profile.tip_radius)   # v19
+                z_trigger=app.probe_profile.z_trigger,   # + จุดพื้นก้นรู
+                probe_r=app.probe_profile.tip_radius)
         except Exception as e:
             self.dialog.showerror("Export Failed", f"เขียนไฟล์ Schema ไม่สำเร็จ:\n{e!r}")
             return
 
-        # v10: this schema was just built from the CURRENT app.current_holes
+        # this schema was just built from the CURRENT app.current_holes
         # config — set it active immediately, same as picking it via
         # "Load Schema (.json)" would, minus the file dialog.
         refreshed = self._auto_load_schema(payload, filepath)
@@ -844,7 +777,7 @@ class GCodeExportPanel:
 
     # ------------------------------------------------------------------
     def _build_snapshot_or_none(self, holes_to_snapshot, view_name):
-        """v09: best-effort build of the settings snapshot — returns None
+        """best-effort build of the settings snapshot — returns None
         (never raises) if core/evaluation_engine.py isn't importable yet
         or the build itself fails, so a schema can still be written with
         a placeholder empty snapshot rather than failing the whole
@@ -870,7 +803,7 @@ class GCodeExportPanel:
         """หลัง export G-code สำเร็จ — สร้าง settings snapshot จากรูทั้งหมด
         (app.current_holes ไม่ใช่แค่ selected_holes) ครั้งเดียว แล้วเขียน
         ไฟล์ Schema "<name>_schema.json" ไฟล์เดียว — best-effort, ความ
-        ล้มเหลวที่นี่ต้องไม่กระทบการ export G-code ที่สำเร็จไปแล้ว v10:
+        ล้มเหลวที่นี่ต้องไม่กระทบการ export G-code ที่สำเร็จไปแล้ว
         ยังตั้ง schema ที่เพิ่งเขียนเป็น "schema ที่ใช้งานอยู่" ของแอปทันที
         ผ่าน _auto_load_schema() ด้วย
 
@@ -880,12 +813,12 @@ class GCodeExportPanel:
         เพื่อแต่งข้อความ toast เท่านั้น ไม่มีผลต่อการ export G-code
         """
         app = self.app
-        snapshot = self._build_snapshot_or_none(app.current_holes, view_name)   # v09: ALL holes
+        snapshot = self._build_snapshot_or_none(app.current_holes, view_name)   # ALL holes
         if snapshot is not None:
             app.last_export_snapshot = snapshot   # kept in-memory for this session's stale-settings guard
 
         try:
-            sidecar_path = os.path.splitext(gcode_filepath)[0] + "_schema.json"   # v09: renamed
+            sidecar_path = os.path.splitext(gcode_filepath)[0] + "_schema.json"   # renamed
             payload = export_schema_json(
                 selected_holes, view_name, sidecar_path,
                 settings_snapshot=snapshot or {'view_name': view_name, 'holes': {}},
@@ -893,19 +826,19 @@ class GCodeExportPanel:
                 tolerance_mm_at_export=getattr(app, 'evaluation_tolerance_mm', None),
                 screen_rot=getattr(self.app, 'screen_rotation', 0),
                 origin=self._zero_origin(view_name), work_zero=self._work_zero(),
-                z_trigger=app.probe_profile.z_trigger,   # v15: + จุดพื้นก้นรู
-                probe_r=app.probe_profile.tip_radius, points=points)   # v19: point map ชุดเดียวกับ G-code ที่เพิ่งเขียน
+                z_trigger=app.probe_profile.z_trigger,   # + จุดพื้นก้นรู
+                probe_r=app.probe_profile.tip_radius, points=points)   # point map ชุดเดียวกับ G-code ที่เพิ่งเขียน
             print(f"[gcode_export_panel] schema written to {sidecar_path}")
         except Exception as e:
             print(f"[gcode_export_panel] schema write failed (non-blocking): {e!r}")
             return {'written': False, 'refreshed': False, 'path': None}
 
-        refreshed = self._auto_load_schema(payload, sidecar_path)   # v10
+        refreshed = self._auto_load_schema(payload, sidecar_path)
         return {'written': True, 'refreshed': refreshed, 'path': sidecar_path}
 
     # ------------------------------------------------------------------
     def _auto_load_schema(self, payload: dict, filepath: str) -> bool:
-        """v10: sets `payload` (the schema dict just written to `filepath`)
+        """sets `payload` (the schema dict just written to `filepath`)
         as the app's active schema — the same app-state fields
         ui/evaluation_left_panel.py's "📂 Load Schema (.json)" sets, minus
         the file dialog and minus apply_settings_snapshot() (not needed

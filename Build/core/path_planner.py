@@ -1,37 +1,33 @@
 # ==============================================================================
-# core/path_planner.py — คำนวณเส้นทางโพรบ (probe path) แบบทีละชั้น
+# core/path_planner.py — ชั้นและจุดวัดสำหรับแสดงผล
 # ==============================================================================
-# หน้าที่: จากข้อมูลรู (open_3d → deep_3d) คำนวณตำแหน่งจุดสัมผัสผนังรูในแต่ละ
-# "ชั้น" (layer) ตามความลึก เพื่อนำไปวาดเส้นทางโพรบและจุดวัด
-#   - get_probe_path_layers()       ใช้กับรูปกติ (segment เดียว หรือรูเรียว/กรวยต่อเนื่อง)
-#   - get_probe_path_layers_multi() ใช้กับรูหลายระดับเส้นผ่านศูนย์กลาง (counterbore)
-#     คำนวณแยกทีละ segment ไม่ interpolate รัศมีข้ามขั้น
+# สรุปหน้าที่:
+#   คำนวณชั้นและจุดวัดของรูสำหรับ "แสดงผล" ในแท็บ Customization
+#   (ใช้ฟังก์ชันชุดเดียวกับ G-code เพื่อให้ตรงกัน)
 #
-# ตัวแปรสำคัญที่ปรับจูนได้ (ส่งเข้ามาจาก UI ต่อรู/segment ไม่ใช่ค่าคงที่ในไฟล์นี้):
-#   n_layers / cfg.layers            = จำนวนชั้นตรวจสอบ
-#   zigzag_inspection / cfg.zigzag_inspection = เปิด/ปิดการหมุนมุมโพรบต่อชั้น
-#   zigzag_degree / cfg.zigzag_degree = องศาสะสมที่หมุนต่อ 1 ชั้น
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (_layer_contacts, _orthonormal_basis, channel_layer_fields)
+#     - core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ (layer_fractions, surface_below)
+#   ถูกใช้งานโดย:
+#     - core/geometry_engine.py — MoldGeometry รวมโมดูลเรขาคณิต (PathPlanner)
+#   ไลบรารีภายนอก: numpy
+#
+# รายละเอียด:
+#   คำนวณเส้นทางโพรบ (probe path) แบบทีละชั้น
+#
+#   หน้าที่: จากข้อมูลรู (open_3d → deep_3d) คำนวณตำแหน่งจุดสัมผัสผนังรูในแต่ละ
+#   "ชั้น" (layer) ตามความลึก เพื่อนำไปวาดเส้นทางโพรบและจุดวัด
+#     - get_probe_path_layers()       ใช้กับรูปกติ (segment เดียว หรือรูเรียว/กรวยต่อเนื่อง)
+#     - get_probe_path_layers_multi() ใช้กับรูหลายระดับเส้นผ่านศูนย์กลาง (counterbore)
+#       คำนวณแยกทีละ segment ไม่ interpolate รัศมีข้ามขั้น
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้ (ส่งเข้ามาจาก UI ต่อรู/segment ไม่ใช่ค่าคงที่ในไฟล์นี้):
+#     n_layers / cfg.layers            = จำนวนชั้นตรวจสอบ
+#     zigzag_inspection / cfg.zigzag_inspection = เปิด/ปิดการหมุนมุมโพรบต่อชั้น
+#     zigzag_degree / cfg.zigzag_degree = องศาสะสมที่หมุนต่อ 1 ชั้น
 # ==============================================================================
-# VERSION: 04
-# CHANGE LOG (v03 -> v04):
-#   ตำแหน่งชั้นมาจาก core/models.py::layer_fractions() (ระยะเผื่อพื้น/ขั้นใต้ลูกบอล)
-#   — ตัวเดียวกับ G-code ภาพ preview จึงตรงกับเครื่องจริง
-# CHANGE LOG (v02 -> v03):
-#   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — get_probe_path_layers() เติม key
-#   'contacts_display' ให้แต่ละ layer: list ของ (start_xyz, wall_xyz) ใน
-#   พิกัดจอ (project แล้ว) คำนวณจาก core/gcode_generator.py::
-#   _layer_contacts() ตัวเดียวกับ G-code — จุดที่เห็นใน Customization tab จึง
-#   ตรงกับจุดที่เครื่องจะโพรบจริง รูกลมไม่มี key นี้ (พฤติกรรมเดิม)
-# CHANGE LOG (v01 -> v02):
-#   FIX: get_probe_path_layers_multi() now SKIPS any segment whose
-#   cfg.selected_for_inspection is False (see core/models.py
-#   HoleSegmentSetting + validate_segment_reachability()) — a segment
-#   the UI has marked unreachable/deselected no longer produces any
-#   layer points, so it's excluded from both the on-screen preview
-#   (Customization tab / Path Mapper) and — since G-code export walks
-#   the same per-segment cfg list — from the exported program too.
-#   layer_idx numbering only counts included (selected) layers, so
-#   numbering stays contiguous for whatever actually gets probed.
+
 import numpy as np
 
 from core.models import layer_fractions, surface_below
@@ -89,7 +85,7 @@ class PathPlanner:
     @staticmethod
     def _rect_contacts_display(hole, center, angle_offset, n_points,
                                projector, view_name, screen_rot, t=0.5, radius=None) -> list:
-        """v03: จุดเริ่ม/จุดสัมผัสผนังของ 1 layer ในพิกัดจอ — ช่องสี่เหลี่ยม,
+        """จุดเริ่ม/จุดสัมผัสผนังของ 1 layer ในพิกัดจอ — ช่องสี่เหลี่ยม,
         ร่องเปิด (channel) และรูกลมที่มีมุมห้ามโพรบ (ปากร่องที่วิ่งเข้ามา)"""
         from core.gcode_generator import _layer_contacts, _orthonormal_basis, channel_layer_fields
 

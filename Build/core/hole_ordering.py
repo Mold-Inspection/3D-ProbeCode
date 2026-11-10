@@ -1,19 +1,33 @@
 # ==============================================================================
-# core/hole_ordering.py — จัดลำดับการเดินเครื่องระหว่างรู (nearest-neighbor)
+# core/hole_ordering.py — จัดลำดับรู nearest-neighbor
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: คำนวณลำดับการเข้าตรวจสอบรูแบบ nearest-neighbor บนพิกัด 3D ดิบ
-# (raw CAD-space, ไม่ใช่พิกัดที่ projected ตามมุมมองหน้าจอ) เพื่อให้ทั้ง
-# G-code export (core/gcode_generator.py) และ Path Mapper preview
-# (ui/tabs/path_mapper_tab.py) ใช้ลำดับเดียวกันเป๊ะ ๆ — ไม่มีสองแหล่งความจริง
+# สรุปหน้าที่:
+#   จัดลำดับการเดินระหว่างรูแบบ nearest-neighbor ใช้ร่วมกันระหว่าง G-code
+#   และแท็บ Path Mapper
 #
-# ใช้ได้เฉพาะรูที่มีข้อมูล STEP (h._step_hole ไม่ใช่ None) เพราะต้องมีพิกัด
-# 3D ดิบ (open_3d) มาคำนวณระยะทางจริง — รูที่ไม่มี STEP (mesh-only) ให้แยก
-# ออกด้วย split_step_ready() ก่อนส่งเข้า order_holes_nearest_neighbor()
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (order_holes_nearest_neighbor, split_step_ready)
+#     - ui/tabs/evaluation_tab.py — แท็บ Evaluation (กราฟผล) (order_holes_nearest_neighbor, split_step_ready)
+#     - ui/tabs/path_mapper_tab.py — แท็บ Path Mapper (ลำดับการเดิน) (order_holes_nearest_neighbor, split_step_ready)
+#   ไลบรารีภายนอก: numpy
 #
-# ตัวแปรที่ปรับจูนได้: ไม่มี — อัลกอริทึม greedy nearest-neighbor ล้วน ๆ
-# เริ่มจากรูที่ใกล้ (0,0) ที่สุด แล้ววิ่งหารูถัดไปที่ใกล้สุดเรื่อย ๆ
+# รายละเอียด:
+#   จัดลำดับการเดินเครื่องระหว่างรู (nearest-neighbor)
+#
+#   หน้าที่: คำนวณลำดับการเข้าตรวจสอบรูแบบ nearest-neighbor บนพิกัด 3D ดิบ
+#   (raw CAD-space, ไม่ใช่พิกัดที่ projected ตามมุมมองหน้าจอ) เพื่อให้ทั้ง
+#   G-code export (core/gcode_generator.py) และ Path Mapper preview
+#   (ui/tabs/path_mapper_tab.py) ใช้ลำดับเดียวกันเป๊ะ ๆ — ไม่มีสองแหล่งความจริง
+#
+#   ใช้ได้เฉพาะรูที่มีข้อมูล STEP (h._step_hole ไม่ใช่ None) เพราะต้องมีพิกัด
+#   3D ดิบ (open_3d) มาคำนวณระยะทางจริง — รูที่ไม่มี STEP (mesh-only) ให้แยก
+#   ออกด้วย split_step_ready() ก่อนส่งเข้า order_holes_nearest_neighbor()
+#
+#   ตัวแปรที่ปรับจูนได้: ไม่มี — อัลกอริทึม greedy nearest-neighbor ล้วน ๆ
+#   เริ่มจากรูที่ใกล้ (0,0) ที่สุด แล้ววิ่งหารูถัดไปที่ใกล้สุดเรื่อย ๆ
 # ==============================================================================
+
 import numpy as np
 
 

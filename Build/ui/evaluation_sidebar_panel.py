@@ -1,80 +1,45 @@
 # ==============================================================================
-# ui/evaluation_sidebar_panel.py — Right sidebar แทนที่ "Detected Holes" ปกติ
-# ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
-# comparison_v02.md)
+# ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด)
 # ==============================================================================
-# VERSION: 13
-# CHANGE LOG (v12 -> v13): หัวการ์ดแสดงเฉพาะจำนวนจุดที่ไม่ผ่าน (FAIL 3 pts) ให้ตรงกับข้อความเหนือการ์ด;
-#   แสดง Roundness (mm) ต่อชั้น และเปลี่ยนชื่อ % Circularity → Roundness margin
-# CHANGE LOG (v11 -> v12): การแสดงผลชัดขึ้น (Feature 2):
-#   - ผลรวมทุกรูบนสุดของรายการ + ข้อความ PASS / FAIL ตัวใหญ่เหนือการ์ดแต่ละรู (1 จุดไม่ผ่าน = รูไม่ผ่าน)
-#   - หัวการ์ดแสดงเฉพาะค่าสำคัญ; ในการ์ด: max |dev|, % ความเป็นวงกลม, จุดลึกสุด (core hole_metrics v16)
-#   - แสดงทุกจุดของทุกรูเป็นค่าเริ่มต้น (แถวเขียว/แดง, dev มีเครื่องหมาย, ทิศที่แตะ) — สร้างตารางเมื่อเปิดการ์ด
-#     (รายการใหญ่ > _AUTO_OPEN_POINTS จุด เปิดการ์ดเองทีละรู กันหน้าจอหน่วง)
-#   - ปุ่ม Export PDF report → ui/evaluation_report.py
-# CHANGE LOG (v10 -> v11):
-#   การ์ด "Tip compensation" ใต้ Tolerance: สวิตช์เปิด/ปิดการชดเชย (จำค่า, คำนวณผลใหม่ทันที), r ที่ใช้
-#   + ที่มา และปุ่ม ⓘ Details → ui/compensation_info_dialog.py (ย้ายมาจากแผงซ้าย)
-# CHANGE LOG (v09 -> v10):
-#   Apply tolerance ใช้ evaluation_kwargs(app) ตัวเดียวกับแผงซ้าย (ชดเชย/คาลิเบรตผนังนอก)
-# CHANGE LOG (v08 -> v09):
-#   Best-fit centre: การ์ดรูแสดงระยะที่เลื่อน (ตำแหน่งรูเยื้องจาก CAD) + Apply tolerance ส่ง best_fit
-# CHANGE LOG (v07 -> v08):
-#   เตือนจากเรขาคณิต: ชั้นที่ลึกกว่า probe_profile.shaft_contact_depth() → "ก้านอาจแตะขอบปากรูก่อน
-#   หัวโพรบ" ที่หัวการ์ดรูและหัวชั้น (เตือนเท่านั้น ไม่ตัดจุด)
-# CHANGE LOG (v06 -> v07):
-#   จุดที่ก้านโพรบอาจแตะผนัง: สีผ่าน/ไม่ผ่านตามปกติ + ⚠ ท้ายแถว (เตือนเท่านั้น ไม่ตัดออก)
-# CHANGE LOG (v05 -> v06):
-#   จุดที่สงสัยก้านโพรบชน (core/evaluation_engine.py v09 — p['suspect']) แสดงสีเทา ⚠ ไม่นับผ่าน/
-#   ไม่ผ่าน; หัวชั้นบอก "shaft contact?" + ผนังเลื่อนเทียบชั้นบน; การ์ดรูบอกจำนวนจุดที่ตัดออก
-# CHANGE LOG (v04 -> v05):
-#   FIX (layout): warning_frame ว่าง (CTkFrame สูง 200 px โดยปริยาย) ถูก pack ไว้เสมอ
-#   ดันการ์ดรูลงไปกลางจอ — ตอนนี้ pack เฉพาะเมื่อมีข้อความ การ์ดแรกอยู่ใต้ Tolerance 5 px
-#   FEATURE: เตือนให้กรอก Caliper depth — รูที่มีพื้นแต่โพรบไม่ได้แตะพื้นและยังไม่มีค่า:
-#   แบนเนอร์สีส้มใต้ Tolerance (+ ปุ่ม 'Fill in ▸' เปิดการ์ดและโฟกัสช่องกรอก),
-#   แท็ก '⚠ caliper depth' บนหัวการ์ด, กรอบช่องกรอกสีส้ม + '(required)' และสรุป
-#   'Depth checked x / y holes' ที่แผงซ้าย — หายเองเมื่อกรอกครบ
-# CHANGE LOG (v03 -> v04):
-#   FEATURE: ส่วน "Depth" ในการ์ดรู — ความลึกสูงสุดตาม CAD (ถึงพื้น หรือรูทะลุ + ช่วงของ
-#   แต่ละ segment), ความลึกพื้นที่โพรบวัดได้ (เมื่อเปิด Z trigger) และช่องกรอกค่าจาก
-#   เวอร์เนียร์ (เทียบกับ CAD ด้วย tolerance เดียวกัน, จำค่าไว้ต่อไฟล์ STEP ใน
-#   settings.json) — แสดงได้แม้ยังไม่ได้โหลด .log (การ์ดขึ้น "no data")
-#   หัวการ์ดแสดงความลึก (↧) ด้วย
-# CHANGE LOG (v02 -> v03):
-#   FEATURE (PLAN_evaluation-expected-points-json-and-offset-only_v01.md
-#   Requirement 5 — "แสดงผลลัพธ์...ให้อะไรที่ผ่าน threshold เป็นสีเขียว
-#   ไม่ผ่านเป็นสีแดง โดยให้บอกค่าที่วัดได้ และค่าในอุดมคติ และบอกความต่าง"):
-#     - Point table columns renamed: "Expected"->"Ideal", "Actual"->
-#       "Measured", "Δ(mm)"->"Offset(mm)" (wording only — same underlying
-#       fields, core/evaluation_engine.py's 'expected'/'actual'/
-#       'distance_mm' are unchanged).
-#     - Each point row now gets an explicit GREEN/RED background
-#       (fg_color on the row frame), not just text color on the offset
-#       column, so pass/fail reads at a glance per Requirement 5.
-#     - "Max deviation" label renamed "Max Offset" for wording
-#       consistency with the rest of the plan (same value/field).
-#   NOTE (Requirement 6 — single failing point fails the whole hole):
-#   already correct upstream in core/evaluation_engine.py (hole_entry
-#   ['passed'] requires ALL points to pass) — this file only renders
-#   what evaluate_points() already computed; see the comment on
-#   _build_hole_card() below. No logic change needed here.
-#   No other functional change — hole card badges, layer rows, and the
-#   tolerance apply flow are unchanged from v02.
+# สรุปหน้าที่:
+#   แผงขวาของ Evaluation: tolerance, สรุป PASS/FAIL, การ์ดผลต่อรู/ชั้น/จุด,
+#   ความลึกพื้น, Save CSV และ Export PDF
 #
-# หน้าที่: แสดงผลตรวจ (app.evaluation_result) แบบ read-only — การ์ดต่อรู
-# (เฉพาะรูที่ selected_for_inspection) → ขยายดู segment → ขยายดู layer →
-# ขยายดูตารางจุดวัดรายจุด (ideal / measured / offset / pass-fail) พร้อม
-# ตัวเลือก "show failed only" (ค่าเริ่มต้น) / "show all points"
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/evaluation_engine.py — ประเมินจุดวัดเทียบจุดคาดหวัง (ระยะเบี่ยง ⌀ ความกลม PASS/FAIL) (_hole_fingerprint, evaluate_points, hole_metrics)
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (layer_depths)
+#     - core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ (hole_floor_depth)
+#     - core/user_settings.py — จำค่าตั้งใน settings.json (get, save_section)
+#     - ui/compensation_info_dialog.py — หน้าต่างอธิบายที่มาของค่าชดเชยหัววัด (show_compensation_info)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (_remap_holes_by_gi, evaluation_kwargs)
+#     - ui/evaluation_report.py — สร้างรายงาน PDF (export_pdf_dialog)
+#     - ui/theme.py — สีและธีม (ACCENT, ACCENT_HOVER, BG_CARD, BG_CARD_HOVER, BG_INPUT, BTN_SECONDARY, …)
+#   ถูกใช้งานโดย:
+#     - ui/evaluation_report.py — สร้างรายงาน PDF (EvaluationSidebarPanel, _dir_label)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (EvaluationSidebarPanel)
+#   ไลบรารีภายนอก: customtkinter, numpy, tkinter
 #
-# ต่างจากการ์ดรูปกติใน ui/main_window.py ตรงที่:
-#   - ไม่มี checkbox, ไม่มีปุ่ม "Apply Selection" (อ่านอย่างเดียว)
-#   - แสดงเฉพาะรูที่ถูกเลือกไว้สำหรับ inspection (รูอื่นไม่เคยถูกโพรบจริง)
-#   - ด้านบนสุดมีช่อง Tolerance (mm) + ปุ่ม Apply แยกต่างหาก
+# รายละเอียด:
+#   Right sidebar แทนที่ "Detected Holes" ปกติ
+#   ขณะอยู่แท็บ "Evaluation" (§4 ของ PLAN_evaluation-tab-openbuilds-log-
+#   comparison_v02.md)
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _BADGE_PASS/_BADGE_FAIL/_BADGE_NODATA colors ของการ์ดหัวรู
-#   _ROW_PASS/_ROW_FAIL colors ของพื้นหลังแถวจุดวัดรายจุด (v03)
+#   หน้าที่: แสดงผลตรวจ (app.evaluation_result) แบบ read-only — การ์ดต่อรู
+#   (เฉพาะรูที่ selected_for_inspection) → ขยายดู segment → ขยายดู layer →
+#   ขยายดูตารางจุดวัดรายจุด (ideal / measured / offset / pass-fail) พร้อม
+#   ตัวเลือก "show failed only" (ค่าเริ่มต้น) / "show all points"
+#
+#   ต่างจากการ์ดรูปกติใน ui/main_window.py ตรงที่:
+#     - ไม่มี checkbox, ไม่มีปุ่ม "Apply Selection" (อ่านอย่างเดียว)
+#     - แสดงเฉพาะรูที่ถูกเลือกไว้สำหรับ inspection (รูอื่นไม่เคยถูกโพรบจริง)
+#     - ด้านบนสุดมีช่อง Tolerance (mm) + ปุ่ม Apply แยกต่างหาก
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _BADGE_PASS/_BADGE_FAIL/_BADGE_NODATA colors ของการ์ดหัวรู
+#     _ROW_PASS/_ROW_FAIL colors ของพื้นหลังแถวจุดวัดรายจุด
 # ==============================================================================
+
 import customtkinter as ctk
 import numpy as np
 import tkinter.messagebox as _mb
@@ -89,15 +54,15 @@ _COLOR_PASS   = theme.OK_FILL
 _COLOR_FAIL   = theme.ERR_FILL
 _COLOR_NODATA = theme.BTN_SECONDARY
 
-# v03 — per-point row background (Requirement 5: green pass / red fail)
+# — per-point row background (Requirement 5: green pass / red fail)
 _ROW_PASS = theme.OK_BG
 _ROW_FAIL = theme.ERR_BG
 
-_AUTO_OPEN_POINTS = 48    # v12: เปิดการ์ดทุกรู (ตารางทุกจุด) อัตโนมัติถ้าจุดรวมไม่เกินนี้ (~30 ms ต่อแถว)
+_AUTO_OPEN_POINTS = 48    # เปิดการ์ดทุกรู (ตารางทุกจุด) อัตโนมัติถ้าจุดรวมไม่เกินนี้ (~30 ms ต่อแถว)
 
 
 def _dir_label(d):
-    """v12: ทิศที่โพรบเดินตอนแตะ → 'X−' / 'Y+' / '45°' (ผนังเอียงไม่ตรงแกน)"""
+    """ทิศที่โพรบเดินตอนแตะ → 'X−' / 'Y+' / '45°' (ผนังเอียงไม่ตรงแกน)"""
     if not d:
         return ""
     dx, dy = float(d[0]), float(d[1])
@@ -128,7 +93,7 @@ class EvaluationSidebarPanel:
 
         # --- tolerance row ---------------------------------------------
         tol_frame = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
-        tol_frame.pack(padx=20, pady=(0, 5), fill="x")   # v05: การ์ดแรกอยู่ใต้ Tolerance 5 px
+        tol_frame.pack(padx=20, pady=(0, 5), fill="x")   # การ์ดแรกอยู่ใต้ Tolerance 5 px
         row = ctk.CTkFrame(tol_frame, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=8)
         ctk.CTkLabel(row, text="Tolerance (mm):", text_color=theme.TEXT_SECONDARY).pack(side="left")
@@ -137,11 +102,11 @@ class EvaluationSidebarPanel:
         self.tol_entry.pack(side="left", padx=(8, 8))
         ctk.CTkButton(row, text="Apply", width=70, fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
                      command=self._on_apply_tolerance).pack(side="left")
-        self._pdf_btn = ctk.CTkButton(row, text="Export PDF", width=96, fg_color=theme.BTN_SECONDARY,   # v12
+        self._pdf_btn = ctk.CTkButton(row, text="Export PDF", width=96, fg_color=theme.BTN_SECONDARY,
                                       hover_color=theme.BTN_SECONDARY_HOVER, command=self._on_export_pdf)
         self._pdf_btn.pack(side="right")
 
-        # v11: สวิตช์ชดเชยรัศมีหัวโพรบ + ค่าที่ใช้ + ปุ่มที่มาของค่า
+        # สวิตช์ชดเชยรัศมีหัวโพรบ + ค่าที่ใช้ + ปุ่มที่มาของค่า
         comp = ctk.CTkFrame(parent, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS)
         comp.pack(padx=20, pady=(0, 5), fill="x")
         crow = ctk.CTkFrame(comp, fg_color="transparent")
@@ -158,7 +123,7 @@ class EvaluationSidebarPanel:
                                      font=ctk.CTkFont(size=11), text_color=theme.TEXT_SECONDARY)
         self.lbl_comp.pack(fill="x", padx=10, pady=(2, 8))
 
-        # v05: pack เฉพาะเมื่อมีข้อความเตือน (_pack_warning_frame)
+        # pack เฉพาะเมื่อมีข้อความเตือน (_pack_warning_frame)
         self.warning_frame = ctk.CTkFrame(parent, fg_color="transparent", height=1)
         self._depth_banner = None
 
@@ -185,9 +150,9 @@ class EvaluationSidebarPanel:
         self._hole_widgets = {}
 
         result = getattr(app, 'evaluation_result', None)
-        self._refresh_comp(result)   # v11
+        self._refresh_comp(result)
         if not result:
-            # v04: ยังแสดงการ์ดรูได้ (ส่วน Depth + กรอกค่าเวอร์เนียร์) แม้ยังไม่มี .log
+            # ยังแสดงการ์ดรูได้ (ส่วน Depth + กรอกค่าเวอร์เนียร์) แม้ยังไม่มี .log
             ctk.CTkLabel(
                 self.list_frame,
                 text="No probe data yet — load or record a .log from the left panel.\n"
@@ -203,7 +168,7 @@ class EvaluationSidebarPanel:
         self._metrics = {gi: hole_metrics(holes_result[gi], tol, self._depth_info(h)[0])
                          for gi, h in sel if holes_result.get(gi) is not None}
         if result and sel:
-            self._build_overall_banner(sel, holes_result, tol)   # v12
+            self._build_overall_banner(sel, holes_result, tol)
         total_pts = sum(m['n'] for m in self._metrics.values())
         self._auto_open = total_pts <= _AUTO_OPEN_POINTS
         any_card = False
@@ -217,10 +182,10 @@ class EvaluationSidebarPanel:
                 self.list_frame, text="No holes are currently selected for inspection.",
                 text_color=theme.TEXT_MUTED, font=ctk.CTkFont(size=12)
             ).pack(pady=20, padx=10)
-        self._update_depth_prompts()   # v05: แบนเนอร์ความลึก + แสดง/ซ่อนพื้นที่เตือน
+        self._update_depth_prompts()   # แบนเนอร์ความลึก + แสดง/ซ่อนพื้นที่เตือน
 
     def _refresh_comp(self, result):
-        """v11: ข้อความใต้สวิตช์ — r ที่ใช้และมาจากไหน"""
+        """ข้อความใต้สวิตช์ — r ที่ใช้และมาจากไหน"""
         app = self.app
         on = bool(getattr(app, 'evaluation_compensate', True))
         if on:
@@ -243,7 +208,7 @@ class EvaluationSidebarPanel:
         self.lbl_comp.configure(text=txt, text_color=theme.TEXT_SECONDARY if on else theme.WARN_TEXT)
 
     def _on_toggle_comp(self):
-        """v11: เปิด/ปิดการชดเชย (จำค่า) แล้วคำนวณผลใหม่ด้วย log ที่โหลดอยู่"""
+        """เปิด/ปิดการชดเชย (จำค่า) แล้วคำนวณผลใหม่ด้วย log ที่โหลดอยู่"""
         self.app.evaluation_compensate = bool(self._comp_switch.get())
         user_settings.save_section("evaluation_compensate", self.app.evaluation_compensate)
         left = getattr(self.app, 'evaluation_left_panel', None)
@@ -255,7 +220,7 @@ class EvaluationSidebarPanel:
         show_compensation_info(self.app)
 
     def _build_warning_banner(self, result: dict):
-        # v03: the §6 stale-settings guard has nothing to warn about when
+        # the §6 stale-settings guard has nothing to warn about when
         # expected points came from a loaded JSON (it IS the frozen
         # source of truth) — ui/evaluation_left_panel.py already forces
         # settings_mismatch = [] in that case, so this banner naturally
@@ -289,7 +254,7 @@ class EvaluationSidebarPanel:
             self._bind_hover_recursive(child, on_enter, on_leave)
 
     def _build_hole_card(self, parent, gi, hole, info):
-        """v03 note (Requirement 6): 'info.get(\"passed\")' below comes
+        """note (Requirement 6): 'info.get(\"passed\")' below comes
         straight from core/evaluation_engine.py's hole_entry['passed'],
         which is True only if EVERY point of this hole passed — a single
         failing point already flips this to False (and the badge to ❌)
@@ -301,9 +266,9 @@ class EvaluationSidebarPanel:
         tol = float((getattr(self.app, 'evaluation_result', None) or {}).get('tolerance_mm', 0.5) or 0.5)
 
         item_frame = ctk.CTkFrame(parent, fg_color="transparent")
-        item_frame.pack(fill="x", padx=10, pady=(0, 10))   # v05: ชิดด้านบน
+        item_frame.pack(fill="x", padx=10, pady=(0, 10))   # ชิดด้านบน
 
-        # v12: ข้อความผลตัวใหญ่เหนือการ์ด — 1 จุดไม่ผ่าน = รูไม่ผ่าน
+        # ข้อความผลตัวใหญ่เหนือการ์ด — 1 จุดไม่ผ่าน = รูไม่ผ่าน
         if info is None:
             verdict, vcol = "NO DATA — this hole is not in the log", theme.TEXT_MUTED
         elif info.get('passed'):
@@ -320,16 +285,16 @@ class EvaluationSidebarPanel:
             badge, color = "no data", _COLOR_NODATA
         elif info.get('passed'):
             badge, color = f"PASS all {info.get('total_points', 0)}", _COLOR_PASS
-        else:   # v13: นับเฉพาะจุดที่ไม่ผ่าน (ให้ตรงกับข้อความเหนือการ์ด)
+        else:   # นับเฉพาะจุดที่ไม่ผ่าน (ให้ตรงกับข้อความเหนือการ์ด)
             nf = info.get('total_points', 0) - info.get('passed_points', 0)
             badge = f"FAIL {nf} pt{'s' if nf != 1 else ''}"
             color = _COLOR_FAIL
         if m and m.get('max_abs') is not None:
             badge += f"  max {m['max_abs']:.3f}"
-        if info is not None and info.get('suspect_points'):   # v06: ก้านโพรบชน — ไม่นับ
+        if info is not None and info.get('suspect_points'):   # ก้านโพรบชน — ไม่นับ
             badge += f"  ⚠{info['suspect_points']} stylus?"
 
-        # v08: ชั้นที่ลึกเกินจุดที่ก้านโพรบแตะขอบปากรู (คำนวณจากเรขาคณิต)
+        # ชั้นที่ลึกเกินจุดที่ก้านโพรบแตะขอบปากรู (คำนวณจากเรขาคณิต)
         crit = self.app.probe_profile.shaft_contact_depth()
         try:
             from core.gcode_generator import layer_depths
@@ -342,7 +307,7 @@ class EvaluationSidebarPanel:
         if risky:
             badge += f"  ⚠ stylus L{','.join(str(i + 1) for i in risky)}"
 
-        floor, length, _parts = self._depth_info(hole)   # v04: ความลึกบนหัวการ์ด
+        floor, length, _parts = self._depth_info(hole)   # ความลึกบนหัวการ์ด
         depth_tag = (f"   ↧{floor:.2f}" if floor is not None else
                      f"   ↧{length:.2f} thru" if length is not None else "")
         btn = ctk.CTkButton(
@@ -351,7 +316,7 @@ class EvaluationSidebarPanel:
             command=lambda: self._toggle_hole(gi))
         btn.pack(fill="x")
         widgets['btn'] = btn
-        widgets['btn_text'] = f"Hole {hole.display_id}   {badge}{depth_tag}"   # v05
+        widgets['btn_text'] = f"Hole {hole.display_id}   {badge}{depth_tag}"
         widgets.update(hole=hole, floor=floor, fp=_hole_fingerprint(hole),
                        probed_floor=bool((info or {}).get('floor')))
 
@@ -367,7 +332,7 @@ class EvaluationSidebarPanel:
 
         body = ctk.CTkFrame(item_frame, fg_color=theme.BG_INPUT, corner_radius=6)
         widgets['body'] = body
-        self._build_depth_block(body, hole, info, gi)   # v04
+        self._build_depth_block(body, hole, info, gi)
 
         if info is None:
             ctk.CTkLabel(
@@ -377,8 +342,8 @@ class EvaluationSidebarPanel:
                 wraplength=280, justify="left"
             ).pack(padx=10, pady=8, anchor="w")
         else:
-            self._build_summary_block(body, info, m, tol)   # v12: max |dev|, ความกลม %, จุดลึกสุด
-            bf = info.get('best_fit_offset')   # v09: ตำแหน่งรูจริงเยื้องจาก CAD = −(การเลื่อน)
+            self._build_summary_block(body, info, m, tol)   # max |dev|, ความกลม %, จุดลึกสุด
+            bf = info.get('best_fit_offset')   # ตำแหน่งรูจริงเยื้องจาก CAD = −(การเลื่อน)
             if bf:
                 d = (bf[0] ** 2 + bf[1] ** 2 + bf[2] ** 2) ** 0.5
                 ctk.CTkLabel(
@@ -392,7 +357,7 @@ class EvaluationSidebarPanel:
             body.pack(fill="x", pady=(4, 0))
 
     def _render_body(self, gi):
-        """v12: สร้างแถวชั้น + ตารางจุดตอนเปิดการ์ดครั้งแรกเท่านั้น (รูเยอะไม่หน่วงตอน refresh)"""
+        """สร้างแถวชั้น + ตารางจุดตอนเปิดการ์ดครั้งแรกเท่านั้น (รูเยอะไม่หน่วงตอน refresh)"""
         widgets = self._hole_widgets.get(gi)
         if widgets is None or widgets.get('rendered') or widgets.get('info') is None:
             return
@@ -413,7 +378,7 @@ class EvaluationSidebarPanel:
 
     # ------------------------------------------------------------------
     def _build_overall_banner(self, sel, holes_result, tol):
-        """v12: ผลรวมทุกรูบนสุดของรายการ"""
+        """ผลรวมทุกรูบนสุดของรายการ"""
         n_fail = sum(1 for gi, _h in sel if holes_result.get(gi) is not None and not holes_result[gi].get('passed'))
         n_nod = sum(1 for gi, _h in sel if holes_result.get(gi) is None)
         n_ok = len(sel) - n_fail - n_nod
@@ -433,7 +398,7 @@ class EvaluationSidebarPanel:
                      wraplength=440, justify="left", anchor="w").pack(fill="x", padx=10, pady=8)
 
     def _build_summary_block(self, parent, info, m, tol):
-        """v12: ค่าสำคัญของรู — max |dev|, % ความเป็นวงกลมต่อชั้น, จุดลึกสุด"""
+        """ค่าสำคัญของรู — max |dev|, % ความเป็นวงกลมต่อชั้น, จุดลึกสุด"""
         if not m:
             return
         lines = [f"Max |dev| {m['max_abs']:.3f} mm  (tolerance ±{tol:g})" if m['max_abs'] is not None
@@ -477,7 +442,7 @@ class EvaluationSidebarPanel:
         layer_idx = layer.get('layer_idx', 0)
         key = (gi, seg_idx, layer_idx)
         state = self._hole_widgets[gi]['layer_state'].setdefault(
-            key, {'expanded': True, 'show_all': True})   # v12: เปิดทุกชั้น แสดงทุกจุด
+            key, {'expanded': True, 'show_all': True})   # เปิดทุกชั้น แสดงทุกจุด
 
         row = ctk.CTkFrame(parent, fg_color=theme.BG_CARD_HOVER, corner_radius=5)
         row.pack(fill="x", padx=4, pady=2)
@@ -495,17 +460,17 @@ class EvaluationSidebarPanel:
         lm = next((l for l in ((getattr(self, '_metrics', {}).get(gi) or {}).get('layers') or [])
                    if l['seg'] == seg_idx and l['layer'] == layer_idx), None)
 
-        if depth is not None and crit is not None and depth > crit:   # v08: คำนวณจากเรขาคณิต
+        if depth is not None and crit is not None and depth > crit:   # คำนวณจากเรขาคณิต
             text += (f"\n   ⚠ deeper than {crit:.1f} mm: the stylus shaft"
                      f"\n      may touch the hole edge before the ball tip"
                      f"\n      triggers — this layer may be off")
-        if layer.get('shaft_suspect'):   # v06: ผนังเข้ามาใกล้กว่าชั้นบน — ก้านแตะก่อนลูกบอล
+        if layer.get('shaft_suspect'):   # ผนังเข้ามาใกล้กว่าชั้นบน — ก้านแตะก่อนลูกบอล
             text += (f"\n   ⚠ stylus shaft may touch the wall instead of the ball tip"
                      f"\n      (walls {layer.get('wall_shift', 0):+.2f} mm vs top layer) — values may be off")
         ctk.CTkButton(
             row, text=text, anchor="w",
             fg_color="transparent", hover_color=theme.SELECT_BG,
-            text_color=theme.OK_TEXT if layer.get('passed') else theme.ERR_TEXT,   # v12
+            text_color=theme.OK_TEXT if layer.get('passed') else theme.ERR_TEXT,
             font=ctk.CTkFont(size=11, weight="bold"),
             command=lambda: self._toggle_layer(gi, seg_idx, layer_idx)
         ).pack(fill="x", padx=4, pady=4)
@@ -572,11 +537,11 @@ class EvaluationSidebarPanel:
             command=lambda: self._toggle_show_all(gi, seg_idx, layer_idx)
         ).pack(anchor="w", pady=(2, 4))
 
-        # v03: "Expected"/"Actual"/"Δ(mm)" -> "Ideal"/"Measured"/"Offset(mm)"
+        # "Expected"/"Actual"/"Δ(mm)" -> "Ideal"/"Measured"/"Offset(mm)"
         # (Requirement 5 wording — same underlying fields, display only)
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x")
-        # v12: + ทิศที่แตะ, dev มีเครื่องหมาย (− = เนื้อชิ้นงานเกิน/รูเล็ก, + = เนื้อหาย/รูใหญ่)
+        # + ทิศที่แตะ, dev มีเครื่องหมาย (− = เนื้อชิ้นงานเกิน/รูเล็ก, + = เนื้อหาย/รูใหญ่)
         for text, w in (("#", 20), ("Dir", 30), ("Ideal (x, y, z)", 118), ("Measured", 118), ("Dev", 52), ("", 40)):
             ctk.CTkLabel(header, text=text, text_color=theme.TEXT_MUTED,
                         font=ctk.CTkFont(size=9, weight="bold"), width=w).pack(side="left")
@@ -587,9 +552,9 @@ class EvaluationSidebarPanel:
             dev  = p.get('dev')
             dist = p.get('distance_mm', 0.0)
             ok   = p.get('passed', False)
-            sus  = bool(p.get('suspect'))   # v06: ก้านชน — ไม่นับ
+            sus  = bool(p.get('suspect'))   # ก้านชน — ไม่นับ
 
-            # v03: explicit green/red ROW background (Requirement 5),
+            # explicit green/red ROW background (Requirement 5),
             # not just text color on the offset column.
             row_color = _ROW_PASS if ok else _ROW_FAIL
             r = ctk.CTkFrame(parent, fg_color=row_color, corner_radius=3)
@@ -623,7 +588,7 @@ class EvaluationSidebarPanel:
 
 
     # ------------------------------------------------------------------
-    # v04: ความลึกของรู — CAD / โพรบแตะพื้น (Z trigger) / เวอร์เนียร์ (กรอกเอง)
+    # ความลึกของรู — CAD / โพรบแตะพื้น (Z trigger) / เวอร์เนียร์ (กรอกเอง)
     # ------------------------------------------------------------------
     @staticmethod
     def _depth_info(hole):
@@ -697,7 +662,7 @@ class EvaluationSidebarPanel:
         lbl.pack(side="left")
         ent = ctk.CTkEntry(row, width=70, height=24, font=ctk.CTkFont(size=11), placeholder_text="mm")
         ent.pack(side="left", padx=(6, 6))
-        if gi is not None:   # v05: ให้ _update_depth_prompts() เน้นช่องนี้ได้
+        if gi is not None:   # ให้ _update_depth_prompts() เน้นช่องนี้ได้
             w = self._hole_widgets[gi]
             w.update(caliper_entry=ent, caliper_label=lbl,
                      entry_border=ent.cget("border_color"), entry_border_w=ent.cget("border_width"))
@@ -729,7 +694,7 @@ class EvaluationSidebarPanel:
                     return
                 self._save_manual_depth(fp, value)
                 show(value)
-            self._update_depth_prompts()   # v05
+            self._update_depth_prompts()
 
         ent.bind("<Return>", commit)
         ent.bind("<FocusOut>", commit)
@@ -737,7 +702,7 @@ class EvaluationSidebarPanel:
 
 
     # ------------------------------------------------------------------
-    # v05: เตือนให้กรอกความลึกจากเวอร์เนียร์ — รูที่มีพื้นแต่โพรบไม่ได้แตะพื้น
+    # เตือนให้กรอกความลึกจากเวอร์เนียร์ — รูที่มีพื้นแต่โพรบไม่ได้แตะพื้น
     # ------------------------------------------------------------------
     def _needs_caliper(self, gi) -> bool:
         w = self._hole_widgets.get(gi) or {}
@@ -820,7 +785,7 @@ class EvaluationSidebarPanel:
 
     # ------------------------------------------------------------------
     def _on_export_pdf(self):
-        """v12: รายงาน PDF (ตาราง + ภาพตัดมองจากบนทุกชั้นของทุกรู) — สร้างใน thread แยก"""
+        """รายงาน PDF (ตาราง + ภาพตัดมองจากบนทุกชั้นของทุกรู) — สร้างใน thread แยก"""
         from ui.evaluation_report import export_pdf_dialog
         export_pdf_dialog(self.app, self._pdf_btn)
 
@@ -839,7 +804,7 @@ class EvaluationSidebarPanel:
         if result is None:
             # nothing to re-run yet — value is stored and will be used the
             # next time a .log is loaded from the left panel
-            self.refresh()   # v04: ผลเทียบค่าเวอร์เนียร์ใช้ tolerance นี้ด้วย
+            self.refresh()   # ผลเทียบค่าเวอร์เนียร์ใช้ tolerance นี้ด้วย
             return
 
         try:
@@ -862,17 +827,17 @@ class EvaluationSidebarPanel:
         try:
             from ui.evaluation_left_panel import evaluation_kwargs
             new_result = evaluate_points(expected_points, actual_points, tol,
-                                         **evaluation_kwargs(app))   # v09/v10
+                                         **evaluation_kwargs(app))   #/
         except Exception as e:
             _mb.showerror("Evaluation Failed", f"ประเมินผลใหม่ไม่สำเร็จ:\n{e!r}")
             return
 
         new_result['log_filename']           = result.get('log_filename')
-        new_result['log_path']               = result.get('log_path')   # v10
+        new_result['log_path']               = result.get('log_path')
         new_result['tolerance_mm']           = tol
         new_result['settings_mismatch']      = result.get('settings_mismatch', [])
-        new_result['expected_source']        = result.get('expected_source')        # v03
-        new_result['expected_source_name']   = result.get('expected_source_name')   # v03
+        new_result['expected_source']        = result.get('expected_source')
+        new_result['expected_source_name']   = result.get('expected_source_name')
         new_result['_expected_points']       = expected_points
         new_result['_actual_points']         = actual_points
 

@@ -1,52 +1,28 @@
 # ==============================================================================
-# core/probe_profile.py — ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
+# core/probe_profile.py — ข้อมูลหัววัดและ Effective Tip
 # ==============================================================================
-# VERSION: 09
-# CHANGE LOG (v08 -> v09): effective_tip_xy_date — วันที่ตั้ง Effective Tip แยกแกน ("" = ไม่ทราบ)
-# CHANGE LOG (v07 -> v08): effective_tip_dx / effective_tip_dy — Effective Tip ⌀ แยกแกนจาก Set up
-#   (0 = ไม่มี ใช้ effective_tip_diameter ทุกทิศ) และ effective_tip_radius_xy
-# CHANGE LOG (v06 -> v07):
-#   retouch_count = จำนวนครั้งแตะช้าต่อจุด (ใช้ค่ามัธยฐาน), retouch_dwell = หน่วงก่อนแตะช้า (s)
-#   retouch_distance ค่าเริ่มต้น 1.0 → 1.5 มม. (ให้หัววัด Kinematic คืนตัวเต็มที่ก่อนแตะซ้ำ)
-# CHANGE LOG (v05 -> v06):
-#   ตัด stylus_holder_height ออก — ใช้คำนวณ Padding Height อย่างเดียว ซึ่งตัดออกแล้ว
-# CHANGE LOG (v04 -> v05):
-#   stylus_shaft_diameter / stylus_tilt_deg + shaft_contact_depth(): ความลึก (ศูนย์กลางลูกบอลใต้
-#   ปากรู) ที่ก้านโพรบเริ่มแตะขอบปากรูก่อนหัวโพรบทริก — ดูสูตรใน docstring
-# CHANGE LOG (v03 -> v04):
-#   double_touch     = แตะสองครั้งทุกจุด: แตะเร็ว → ถอย retouch_distance → แตะช้า (retouch_feed)
-#                      ใช้ค่าครั้งที่สอง (ลด pre-travel และความแปรปรวนจากความเร็ว)
-#   retouch_distance = ระยะถอยก่อนแตะซ้ำ (mm)   retouch_feed = ความเร็วแตะซ้ำ (mm/min)
-# CHANGE LOG (v02 -> v03):
-#   z_trigger       = หัวโพรบทริกเมื่อถูกดันขึ้นแนวแกน Z ได้หรือไม่ (ค่าเริ่มต้น False —
-#                     หัวโพรบหลายรุ่นทริกเฉพาะด้านข้าง) เปิดแล้วจึงแตะพื้นก้นรูได้
-#   floor_clearance = ระยะว่างขั้นต่ำระหว่างลูกบอลกับพื้น/ขั้นใต้ชั้นวัดที่ลึกสุด (mm)
-#                     กันลูกบอลจมพื้นเมื่อ Set Zero แกน Z ผิดเล็กน้อย
-# CHANGE LOG (v01 -> v02):
-#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 1):
-#   added `stylus_holder_height` — the height of the probe holder itself
-#   (the block that clamps the stylus rod and attaches to the underside of
-#   the Z-axis carriage), SEPARATE from `stylus_length` (the rod length
-#   below the holder). These two values used to only need to exist
-#   individually for display purposes; starting with
-#   core/gcode_generator.py v06's suggest_padding_height(), both are read
-#   together (along with core/machine_profile.py's new `z_height`) to
-#   compute how much padding/riser height a workpiece needs so the probe
-#   tip can physically reach it within the machine's Z travel range — see
-#   the PLAN doc for the full formula derivation.
-#   No behavior change to can_reach_depth()/can_fit_in_hole()/check_hole():
-#   holder height does not affect whether the stylus ROD can physically
-#   enter a given hole depth, so those methods are untouched.
-# ==============================================================================
-# หน้าที่: เก็บขนาดหัวโพรบ (ตัวจับ + ก้าน + ปลายทรงกลม) และตรวจสอบว่าโพรบตัวนี้
-# เข้าไปวัดรู (ความลึก/ขนาด) ที่ต้องการได้จริงหรือไม่ ก่อนจะสั่งวิ่งจริง
+# สรุปหน้าที่:
+#   ข้อมูลหัววัด: ความยาวก้าน ⌀ ลูกบอล ⌀ ก้าน Effective Tip (รวม/แยก X-Y)
+#   ทริกแกน Z และตรวจว่าหัววัดเข้ารูได้หรือไม่
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   stylus_length  = ความยาวก้านโพรบ (mm) — ระยะลึกสุดที่โพรบลงไปวัดได้
-#   tip_diameter   = เส้นผ่าศูนย์กลางหัวโพรบทรงกลม (mm)
-#   DEFAULT_LENGTH = ค่าความยาวก้านเริ่มต้นเมื่อกด "Reset to Default"
-#   DEFAULT_TIP_D  = ค่าเส้นผ่าศูนย์กลางหัวเริ่มต้นเมื่อกด "Reset to Default"
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (ProbeProfile)
+#   ไลบรารีภายนอก: dataclasses, math
+#
+# รายละเอียด:
+#   ข้อมูลทางกายภาพของ 3D Touch Probe Stylus
+#
+#   หน้าที่: เก็บขนาดหัวโพรบ (ตัวจับ + ก้าน + ปลายทรงกลม) และตรวจสอบว่าโพรบตัวนี้
+#   เข้าไปวัดรู (ความลึก/ขนาด) ที่ต้องการได้จริงหรือไม่ ก่อนจะสั่งวิ่งจริง
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     stylus_length  = ความยาวก้านโพรบ (mm) — ระยะลึกสุดที่โพรบลงไปวัดได้
+#     tip_diameter   = เส้นผ่าศูนย์กลางหัวโพรบทรงกลม (mm)
+#     DEFAULT_LENGTH = ค่าความยาวก้านเริ่มต้นเมื่อกด "Reset to Default"
+#     DEFAULT_TIP_D  = ค่าเส้นผ่าศูนย์กลางหัวเริ่มต้นเมื่อกด "Reset to Default"
 # ==============================================================================
+
 import math
 from dataclasses import dataclass, field
  
@@ -60,21 +36,21 @@ class ProbeProfile:
     # เส้นผ่าศูนย์กลางหัวโพรบ "ที่ใช้งานจริง" จากการ calibrate กับ Ring Gauge — เล็กกว่าขนาด
     # ลูกบอลเล็กน้อยเพราะก้านโพรบโก่งก่อน trigger ใช้ชดเชยรัศมีตอนประเมินผล (0 = ใช้ tip_diameter)
     effective_tip_diameter: float = 0.0   # mm
-    # v08: แยกแกน X / Y จากผนังนอกตอน Set up — หัวโพรบ kinematic ทริกไม่เท่ากันแต่ละทิศ (0 = ไม่มี)
+    # แยกแกน X / Y จากผนังนอกตอน Set up — หัวโพรบ kinematic ทริกไม่เท่ากันแต่ละทิศ (0 = ไม่มี)
     effective_tip_dx: float = 0.0   # mm
     effective_tip_dy: float = 0.0   # mm
-    effective_tip_xy_date: str = ""   # v09: YYYY-MM-DD ที่ตั้งค่าแยกแกนจาก Set up ("" = ไม่ทราบ)
-    # v03: ระยะว่างขั้นต่ำระหว่างลูกบอลกับพื้น/ขั้นที่อยู่ใต้ชั้นวัดที่ลึกที่สุด — ชั้นจะถูกยกขึ้นให้เอง
+    effective_tip_xy_date: str = ""   # YYYY-MM-DD ที่ตั้งค่าแยกแกนจาก Set up ("" = ไม่ทราบ)
+    # ระยะว่างขั้นต่ำระหว่างลูกบอลกับพื้น/ขั้นที่อยู่ใต้ชั้นวัดที่ลึกที่สุด — ชั้นจะถูกยกขึ้นให้เอง
     floor_clearance: float = 1.0   # mm
-    # v03: หัวโพรบทริกเมื่อถูกดันขึ้นตรง ๆ (แนว Z) ได้ไหม — ปิด = ไม่มีคำสั่งแตะพื้นใน G-code เลย
+    # หัวโพรบทริกเมื่อถูกดันขึ้นตรง ๆ (แนว Z) ได้ไหม — ปิด = ไม่มีคำสั่งแตะพื้นใน G-code เลย
     z_trigger: bool = False
-    # v04: แตะสองครั้ง (เร็ว → ถอย → ช้า) ใช้ค่าครั้งที่สอง
+    # แตะสองครั้ง (เร็ว → ถอย → ช้า) ใช้ค่าครั้งที่สอง
     double_touch: bool = True
-    retouch_distance: float = 1.5   # mm — 0.5 ทำให้ ALARM:4 บนเครื่องจริง (2026-10-21); v07: 1.0 → 1.5
+    retouch_distance: float = 1.5   # mm — 0.5 ทำให้ ALARM:4 บนเครื่องจริง (2026-10-21); 1.0 → 1.5
     retouch_feed: float = 20.0      # mm/min
-    retouch_count: int = 3          # v07: แตะช้ากี่ครั้งต่อจุด (ค่าที่ใช้ = มัธยฐาน — ตัดค่ากระโดดทิ้ง)
-    retouch_dwell: float = 0.2      # v07: หน่วงก่อนแตะช้าแต่ละครั้ง (s) ให้เครื่อง/ก้านนิ่งหลังถอย
-    # v05: ก้านโพรบ — ใช้หาความลึกที่ก้านเริ่มแตะขอบปากรูก่อนหัวโพรบ (shaft_contact_depth)
+    retouch_count: int = 3          # แตะช้ากี่ครั้งต่อจุด (ค่าที่ใช้ = มัธยฐาน — ตัดค่ากระโดดทิ้ง)
+    retouch_dwell: float = 0.2      # หน่วงก่อนแตะช้าแต่ละครั้ง (s) ให้เครื่อง/ก้านนิ่งหลังถอย
+    # ก้านโพรบ — ใช้หาความลึกที่ก้านเริ่มแตะขอบปากรูก่อนหัวโพรบ (shaft_contact_depth)
     stylus_shaft_diameter: float = 1.0   # mm — ⌀ ก้านตรงส่วนที่ลงไปในรู (วัดด้วยเวอร์เนียร์)
     stylus_tilt_deg: float = 0.0         # องศา — ก้านเอียงจากแนวดิ่ง (0 = ตั้งตรง)
  
@@ -82,15 +58,15 @@ class ProbeProfile:
     DEFAULT_TIP_D:  float = field(default=2.0,  init=False, repr=False)
     DEFAULT_CLEARANCE: float = field(default=0.5, init=False, repr=False)
     DEFAULT_EFFECTIVE_TIP_D: float = field(default=0.0, init=False, repr=False)
-    DEFAULT_FLOOR_CLEARANCE: float = field(default=1.0, init=False, repr=False)   # v03
-    DEFAULT_Z_TRIGGER: bool = field(default=False, init=False, repr=False)        # v03
-    DEFAULT_DOUBLE_TOUCH: bool = field(default=True, init=False, repr=False)      # v04
-    DEFAULT_RETOUCH_DISTANCE: float = field(default=1.5, init=False, repr=False)  # v04 (v07: 1.5)
-    DEFAULT_RETOUCH_COUNT: int = field(default=3, init=False, repr=False)         # v07
-    DEFAULT_RETOUCH_DWELL: float = field(default=0.2, init=False, repr=False)     # v07
-    DEFAULT_RETOUCH_FEED: float = field(default=20.0, init=False, repr=False)     # v04
-    DEFAULT_SHAFT_D: float = field(default=1.0, init=False, repr=False)           # v05
-    DEFAULT_TILT_DEG: float = field(default=0.0, init=False, repr=False)          # v05
+    DEFAULT_FLOOR_CLEARANCE: float = field(default=1.0, init=False, repr=False)
+    DEFAULT_Z_TRIGGER: bool = field(default=False, init=False, repr=False)
+    DEFAULT_DOUBLE_TOUCH: bool = field(default=True, init=False, repr=False)
+    DEFAULT_RETOUCH_DISTANCE: float = field(default=1.5, init=False, repr=False)  # (1.5)
+    DEFAULT_RETOUCH_COUNT: int = field(default=3, init=False, repr=False)
+    DEFAULT_RETOUCH_DWELL: float = field(default=0.2, init=False, repr=False)
+    DEFAULT_RETOUCH_FEED: float = field(default=20.0, init=False, repr=False)
+    DEFAULT_SHAFT_D: float = field(default=1.0, init=False, repr=False)
+    DEFAULT_TILT_DEG: float = field(default=0.0, init=False, repr=False)
  
     # ------------------------------------------------------------------
     @property
@@ -105,7 +81,7 @@ class ProbeProfile:
  
     @property
     def effective_tip_radius_xy(self):
-        """v08: (rX, rY) จาก Set up — None ถ้ายังไม่มีค่าแยกแกน"""
+        """(rX, rY) จาก Set up — None ถ้ายังไม่มีค่าแยกแกน"""
         if self.effective_tip_dx > 0 and self.effective_tip_dy > 0:
             return self.effective_tip_dx / 2.0, self.effective_tip_dy / 2.0
         return None
@@ -118,7 +94,7 @@ class ProbeProfile:
         return max(0.0, (self.tip_diameter - self.effective_tip_diameter) / 2.0)
 
     def shaft_contact_depth(self):
-        """v05: ความลึกของศูนย์กลางลูกบอลใต้ปากรู (mm) ที่ก้านเริ่มแตะขอบปากรูก่อนโพรบทริก
+        """ความลึกของศูนย์กลางลูกบอลใต้ปากรู (mm) ที่ก้านเริ่มแตะขอบปากรูก่อนโพรบทริก
         — None = ไม่เกิด (ก้านตั้งตรงและยังไม่รู้ pre-travel)
 
         ผนังตั้งตรง ลูกบอลรัศมี R แตะผนัง ก้านรัศมี r ยังห่างผนัง R − r ที่ทุกความสูง แต่:
