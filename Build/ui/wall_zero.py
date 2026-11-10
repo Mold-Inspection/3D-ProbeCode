@@ -1,78 +1,29 @@
 # ==============================================================================
-# ui/wall_zero.py — หา X0 Y0 = กึ่งกลางชิ้นงาน (+ Z0 = ผิวบน) ด้วยการแตะผนังด้านนอก 4 ด้าน
+# ui/wall_zero.py — ขั้นตอน Set up / Find centre
 # ==============================================================================
-# VERSION: 14
-# CHANGE LOG (v13 -> v14): หา Z0 (ผิวบนจริง) จากขอบบนด้วยการแตะด้านข้าง — ไม่ต้องทริกแนว Z (CentreSettings.edge_z)
-#   ต่อผนังนอกทั้ง 4: แตะหน้าผนังที่ Z−2 (อ้างอิง f) แล้วแตะด้านข้าง G38.3 (ไม่ทริก = ไม่ ALARM) ที่ความสูง
-#   ก้นลูกบอล b ไล่ขึ้นทีละ edge_step ใกล้ผิวบน — ศูนย์กลางลูกบอลอยู่เหนือผิวบน u = b + R − t (0 < u < R)
-#   ลูกบอลชนมุมขอบช้ากว่าหน้าผนัง Δ = R − √(R² − u²) (pretravel ทิศเดียวกันหักล้าง) ⇒ t = b + R − √(R² − (R−Δ)²)
-#   ใช้จุดที่ Δ ∈ [_EDGE_DMIN, _EDGE_DMAX] → self.edge = {'top': มัธยฐาน t, 'walls': ..., ...} — แสดงผลเท่านั้น
-#   ไม่เปลี่ยน Z0 เอง; เดินเลยหน้าผนังได้สูงสุด _EDGE_PAST มม. (กันไถขอบ)
-# CHANGE LOG (v12 -> v13): Feature 1 — วัดเอียง / แกน Z เอียง / หมุน หลังตั้ง X0 Y0 (CentreSettings.align):
-#   (ก) แตะผิวบนด้วย G38.2 Z 4 จุด (2 ครั้ง/จุด) → ระนาบผิวบน z = a + gx·dx + gy·dy (a = Z ที่ทริกเหนือศูนย์)
-#   (ข) แตะผนังนอก 4 ด้านอีกครั้งที่ความลึกที่ 2 → ศูนย์เลื่อนต่อความลึก k = Δศูนย์ / Δz (รวมชิ้นงานเอียง +
-#       แกน Z เครื่องเอียง; ผนังเดียวกันทิศเดียวกัน pretravel หักล้าง)
-#   (ค) แตะผนังซ้ายเพิ่ม 2 จุด ที่ y = ±yaw_dy → มุมหมุนรอบ Z
-#   ผล → self.align (core/evaluation_engine.py v14 แปลงจุดวัดเข้าพิกัดชิ้นงานก่อนประเมิน)
-#   (ก) ทำเฉพาะเมื่อหัวโพรบทริกแนว Z ได้ (Probe Stylus → z_trigger) — ไม่งั้นข้าม ระนาบ = ไม่เอียง
-#   ทุกตำแหน่ง XY ใช้ G53 (พิกัดเครื่อง) รอบศูนย์ที่วัดได้ — ใช้ได้ทุก Work zero
-#   top_touch_points(): เลือกจุดผิวบนที่ห่างจุดตรวจรู/ขอบชิ้นงาน
-# CHANGE LOG (v11 -> v12):
-#   เตือนเมื่อ $1 (step idle delay) ≠ 255 — มอเตอร์ดับหลังหยุดทุกครั้ง ก้านโพรบที่งอดันแกนไปได้
-#   แล้วแกนดีดไป 4 full steps (~0.4 มม.) ตอนจ่ายไฟกลับ (ทดสอบ 2026-11-03: $1=25 เสีย 0.40 มม./ครั้ง)
-# CHANGE LOG (v10 -> v11):
-#   หน่วง rep_dwell (s) ก่อนแตะช้าแต่ละครั้ง และตำแหน่งผนัง = มัธยฐานของการแตะช้า (เดิมค่าเฉลี่ย)
-# CHANGE LOG (v09 -> v10):
-#   ถอยออกหลังแตะแต่ละผนัง (ก่อนยก Z) ตั้งได้: CentreSettings.backoff (เดิมค่าคงที่ _BACKOFF = 2.0)
-# CHANGE LOG (v08 -> v09):
-#   repeatability: ผนังที่ขยับไปทางเดียวกับที่โพรบดันทุกครั้ง (drift > _REP_TOL) = ชิ้นงานเลื่อนเมื่อถูกดัน
-#   (ไม่ได้ยึด / ฐานไม่เรียบ) แจ้งแยกจาก 'ไม่ซ้ำ' ทั่วไป — เก็บที่ rep[wall]['drift'] / ['slides']
-# CHANGE LOG (v07 -> v08):
-#   zero_mode: ขั้นสุดท้ายตั้ง X0 Y0 ที่จุด Work zero ที่เลือก (กึ่งกลาง หรือมุมของชิ้นงาน) — มุมคิดจาก
-#   กึ่งกลางที่วัดได้ ± ครึ่งขนาด (ขนาดเวอร์เนียร์ถ้ากรอก ไม่งั้นขนาดที่วัดได้)
-#   keep_zero: รันซ้ำโดยใช้ Z0 เดิม (ลูกบอลค้างอยู่เหนือกึ่งกลางที่ Z+lift จากรอบก่อน) — ตั้ง X0 Y0
-#   ชั่วคราวที่ตำแหน่งปัจจุบันอย่างเดียว ไม่ต้อง jog ลงแตะผิวใหม่ (ใช้ยืนยัน Effective Tip ที่เพิ่งเปลี่ยน)
-# CHANGE LOG (v06 -> v07):
-#   Repeatability ในปุ่มเดียวกัน: ต่อผนัง หลังแตะหาครั้งแรก (feed ค้นหา) ถอย rep_back แล้วแตะซ้ำ
-#   repeats ครั้งที่ rep_feed (feed ที่ใช้วัดจริง = แตะช้าของ double touch) → ต่อผนัง: ช่วง, SD,
-#   ผลต่างแตะเร็ว−แตะช้า, ผ่าน/ไม่ผ่าน (_REP_TOL) — กึ่งกลางและ Effective Tip ⌀ ใช้ค่าเฉลี่ยแตะซ้ำ
-#   บันทึกทุกจุดเป็น Find_centre_<เวลา>.csv ในโฟลเดอร์ log (ใช้ในบท 4.6 ได้)
-# CHANGE LOG (v05 -> v06):
-#   ขนาดจริงจากเวอร์เนียร์ (ไม่บังคับ) → คำนวณ Effective Tip ⌀ แยกแกนจากการแตะขอบนอก:
-#   D_eff = span − W_จริง (span = ระยะระหว่างศูนย์กลางลูกบอลสองฝั่ง) เก็บที่ self.deff
-#   (ถือว่า steps/mm ถูกแล้ว — สเกลแกนคลาด 0.1% บนชิ้น 200 มม. = D_eff คลาด 0.2 มม.)
-# CHANGE LOG (v04 -> v05):
-#   ลำดับใหม่ตามที่ผู้ใช้กำหนด: (1) แตะผนัง 4 ด้าน แล้วประเมินขนาด X/Y เทียบแบบ (2) กลับจุดเริ่ม
-#   โดย Z ยังยกอยู่ (3) ไปกึ่งกลางที่วัดได้จริง (G53 — พิกัดเครื่อง) (4) ตั้ง X0 Y0 ตรงนั้น (Z0 คง
-#   เป็นผิวบนจากขั้นแรก) (5) สรุปขนาด, ผลต่างจากแบบ และค่า steps/mm ที่แนะนำถ้าคลาดเกิน
-#   0.2 มม./0.1% ($$ อ่านในขั้นแรก) — ไม่ลด Z ลงแตะผิวตอนจบแล้ว (ตัด lower_at_end)
-# CHANGE LOG (v03 -> v04):
-#   FIX (บนเครื่องจริง): เดิมตัดสินว่าขั้นจบเมื่อเห็น runStatus = Idle — แต่ OpenBuilds รอให้เครื่อง
-#   Idle ก่อนส่ง G38.2 จึงเห็น Idle ก่อนเริ่มแตะ → ขึ้น "no wall" แล้วสั่ง Stop ขณะ G38.2 เพิ่งเริ่ม
-#   (ALARM:3) ตอนนี้ต่อท้ายทุกขั้นด้วย "G4 P0" แล้วรอ ok ของบรรทัดนั้น (GRBL ตอบหลังการเคลื่อนที่
-#   ก่อนหน้าเสร็จจริง) ค่อยตรวจจำนวนจุดแตะและไปขั้นต่อไป
-# CHANGE LOG (v02 -> v03):
-#   เปลี่ยนวิธีเป็น "เริ่มจากกลางชิ้นงาน" (แบบที่ทดสอบกับ plate_with_holes บนเครื่องจริง):
-#   ผู้ใช้ jog ลูกบอลไปกลางชิ้นงาน (ประมาณ) ให้ก้นลูกบอลแตะผิวบนพอดี แล้วกด Find centre
-#     1. ตั้ง X0 Y0 Z0 ชั่วคราวที่จุดนั้น (Z0 = ผิวบน — ก้นลูกบอลแตะผิว) แล้วยก Z ก่อนเสมอ
-#     2. แกน X: ไปนอกผนังซ้าย (ครึ่งความกว้าง + gap) → ลง → แตะเข้าหาชิ้นงาน → ยก →
-#        ไปนอกผนังขวา → ลง → แตะ → ยก → ตั้ง X0 = กึ่งกลางสองจุดที่แตะ (G10 L2) → ไป X0
-#     3. แกน Y: แบบเดียวกัน (ผนังหน้า/หลัง) → ตั้ง Y0
-#     4. ไปที่ X0 Y0 (ความสูงยก) แล้วลดลงช้า ๆ ให้ก้นลูกบอลแตะผิว (Z0) — เลือกปิดได้
-#   ขนาดลูกบอลและระยะโก่งก่อนทริกหักล้างกันเองที่กึ่งกลาง จึงไม่ต้อง calibrate ก่อน
-#   ทุกการลด Z เกิดนอกขอบชิ้นงาน gap มม. (ค่าเริ่มต้น 30) — กันกรณีวางไม่ตรงกลาง /
-#   ขนาดชิ้นงานหรือ steps/mm คลาด (หัวโพรบส่วนใหญ่ไม่ทริกแนว Z: ลงบนผิว = ชน)
-# CHANGE LOG (v01 -> v02): far-side gap (แบบเริ่มจากนอกผนัง — แทนที่แล้วใน v03)
+# สรุปหน้าที่:
+#   ขั้นตอน Set up / Find centre: แตะผนังนอก 4 ด้านหา X0 Y0, หา Z0 จากขอบบน,
+#   วัด Effective Tip แยก X/Y, ความซ้ำ และการเอียง/หมุนของชิ้นงาน —
+#   ทำงานเป็นลำดับขั้นผ่าน event ของ OpenBuilds
 #
-# ความปลอดภัย: ทุกขั้นรอเครื่อง Idle ก่อนส่งขั้นต่อไป, ALARM / แตะไม่โดน / หมดเวลา →
-# ส่ง Stop และหยุด (zero ที่ตั้งไปแล้วในขั้นก่อนหน้ายังอยู่ — แจ้งผู้ใช้), งานนี้ไม่ถูก
-# บันทึกเป็นไฟล์ log งานวัด (OpenBuildsLogger.suppress_logs)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (CentreRun, CentreSettings, top_touch_points)
+#   ไลบรารีภายนอก: csv, datetime, math, os, re, time
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _TIMEOUT_S   = เวลาสูงสุดทั้งงาน (วินาที)
-#   _SEARCH_PAD  = ระยะค้นหา = gap + ค่านี้ (เผื่อวางไม่ตรงกลาง/ขนาดคลาด)
-#   _BACKOFF     = ค่าเริ่มต้นของการถอยออกหลังแตะ (มม.) — ตั้งได้ที่ Hardware Setting → Work Zero
+# รายละเอียด:
+#   หา X0 Y0 = กึ่งกลางชิ้นงาน (+ Z0 = ผิวบน) ด้วยการแตะผนังด้านนอก 4 ด้าน
+#
+#   ความปลอดภัย: ทุกขั้นรอเครื่อง Idle ก่อนส่งขั้นต่อไป, ALARM / แตะไม่โดน / หมดเวลา →
+#   ส่ง Stop และหยุด (zero ที่ตั้งไปแล้วในขั้นก่อนหน้ายังอยู่ — แจ้งผู้ใช้), งานนี้ไม่ถูก
+#   บันทึกเป็นไฟล์ log งานวัด (OpenBuildsLogger.suppress_logs)
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _TIMEOUT_S   = เวลาสูงสุดทั้งงาน (วินาที)
+#     _SEARCH_PAD  = ระยะค้นหา = gap + ค่านี้ (เผื่อวางไม่ตรงกลาง/ขนาดคลาด)
+#     _BACKOFF     = ค่าเริ่มต้นของการถอยออกหลังแตะ (มม.) — ตั้งได้ที่ Hardware Setting → Work Zero
 # ==============================================================================
+
 import re
 import time
 
@@ -80,14 +31,14 @@ _PRB = re.compile(r"\[PRB:\s*([-+\d.]+)\s*,\s*([-+\d.]+)\s*,\s*([-+\d.]+)\s*:\s*
 _TIMEOUT_S = 600.0
 _SEARCH_PAD = 20.0
 _BACKOFF = 2.0
-# v04: ต่อท้ายทุกขั้น — GRBL ตอบ ok ของ dwell หลังการเคลื่อนที่ก่อนหน้าเสร็จทั้งหมด (planner sync)
+# ต่อท้ายทุกขั้น — GRBL ตอบ ok ของ dwell หลังการเคลื่อนที่ก่อนหน้าเสร็จทั้งหมด (planner sync)
 _END_MARK = "G4 P0"
 _SETTING = re.compile(r"\$(\d+)=([-\d.]+)")
 # ขนาดที่วัดได้คลาดจากแบบเกินนี้ → แนะนำให้ตรวจ steps/mm (มม. หรือสัดส่วน ใช้ค่าที่มากกว่า)
 _SIZE_TOL_MM, _SIZE_TOL_FRAC = 0.2, 0.001
-_REP_TOL = 0.02   # v07: ช่วง (สูงสุด − ต่ำสุด) ของการแตะซ้ำต่อผนังที่ถือว่าผ่าน (มม.) — ปรับได้
+_REP_TOL = 0.02   # ช่วง (สูงสุด − ต่ำสุด) ของการแตะซ้ำต่อผนังที่ถือว่าผ่าน (มม.) — ปรับได้
 _WALLS = (("X", -1, "left"), ("X", +1, "right"), ("Y", -1, "front"), ("Y", +1, "back"))
-# v08: ตำแหน่งจุด zero เทียบกึ่งกลางชิ้นงาน เป็นสัดส่วนของ (กว้าง X, ยาว Y) — บน = Y+ เหมือนบนจอ
+# ตำแหน่งจุด zero เทียบกึ่งกลางชิ้นงาน เป็นสัดส่วนของ (กว้าง X, ยาว Y) — บน = Y+ เหมือนบนจอ
 _ZERO_FROM_CENTRE = {"center": (0.0, 0.0), "upper_left": (-0.5, 0.5), "upper_right": (0.5, 0.5),
                      "lower_left": (-0.5, -0.5), "lower_right": (0.5, -0.5)}
 _ZERO_TEXT = {"center": "the measured centre", "upper_left": "the upper-left corner",
@@ -106,30 +57,30 @@ class CentreSettings:
                  edge_hi: float = 1.20, edge_step: float = 0.15):
         # tip_d = ⌀ ลูกบอลที่ใช้หักออกจากระยะที่วัด (Effective Tip ⌀ ถ้า calibrate แล้ว)
         self.width, self.length, self.tip_d = float(width), float(length), float(tip_d)
-        # v06: ขนาดจริงที่วัดด้วยเวอร์เนียร์ (None = ไม่ calibrate) — ใช้หา Effective Tip ⌀
+        # ขนาดจริงที่วัดด้วยเวอร์เนียร์ (None = ไม่ calibrate) — ใช้หา Effective Tip ⌀
         self.true = {"X": None if true_x is None else float(true_x),
                      "Y": None if true_y is None else float(true_y)}
         self.gap, self.lift, self.depth, self.feed = float(gap), float(lift), float(depth), float(feed)
-        # v07: แตะซ้ำต่อผนัง (0 = ไม่ตรวจ repeatability) ที่ feed / ระยะถอย ของการแตะช้า
+        # แตะซ้ำต่อผนัง (0 = ไม่ตรวจ repeatability) ที่ feed / ระยะถอย ของการแตะช้า
         self.repeats, self.rep_feed, self.rep_back = max(0, int(repeats)), float(rep_feed), float(rep_back)
-        # v08: จุดที่จะตั้ง X0 Y0 ตอนจบ (core/work_zero.py) และรันซ้ำโดยใช้ Z0 เดิม
+        # จุดที่จะตั้ง X0 Y0 ตอนจบ (core/work_zero.py) และรันซ้ำโดยใช้ Z0 เดิม
         self.zero_mode = zero_mode if zero_mode in _ZERO_FROM_CENTRE else "center"
         self.keep_zero = bool(keep_zero)
-        self.backoff = float(backoff)   # v10: ถอยออกหลังแตะผนัง ก่อนยก Z
-        self.rep_dwell = max(0.0, float(rep_dwell))   # v11: หน่วงก่อนแตะช้า
-        # v13: Feature 1 — จุดผิวบน (dx, dy จากศูนย์), ความลึกที่ 2, ระยะ ±y ของ 2 จุดหาการหมุน
+        self.backoff = float(backoff)   # ถอยออกหลังแตะผนัง ก่อนยก Z
+        self.rep_dwell = max(0.0, float(rep_dwell))   # หน่วงก่อนแตะช้า
+        # Feature 1 — จุดผิวบน (dx, dy จากศูนย์), ความลึกที่ 2, ระยะ ±y ของ 2 จุดหาการหมุน
         self.align = bool(align)
         self.top_pts = [(float(x), float(y)) for x, y in top_pts]
         self.depth2 = float(depth2) if depth2 else self.depth + 6.0
         self.yaw_dy = float(yaw_dy) if yaw_dy else 0.3 * self.length
-        # v14: หา Z0 จากขอบบน — ความสูงก้นลูกบอล (Z งาน) ที่แตะด้านข้าง, รัศมีลูกบอลจริง
+        # หา Z0 จากขอบบน — ความสูงก้นลูกบอล (Z งาน) ที่แตะด้านข้าง, รัศมีลูกบอลจริง
         self.edge_z, self.ball_r = bool(edge_z), float(ball_r)
         n = max(2, int(round((float(edge_hi) - float(edge_lo)) / float(edge_step))) + 1)
         self.edge_heights = [round(float(edge_lo) + k * float(edge_step), 4) for k in range(n)]
 
     @property
     def per_wall(self) -> int:
-        """v07: จำนวนจุดแตะต่อผนัง (ค้นหา 1 + แตะซ้ำ)"""
+        """จำนวนจุดแตะต่อผนัง (ค้นหา 1 + แตะซ้ำ)"""
         return 1 + self.repeats
 
     @property
@@ -151,21 +102,21 @@ class CentreSettings:
             return "Back-off ต้องมากกว่า 0 และไม่เกิน Gap"
         if self.repeats and (self.rep_feed <= 0 or self.rep_back <= 0):
             return "Repeat feed / back-off ต้องมากกว่า 0"
-        if self.align and ((self.top_pts and len(self.top_pts) < 3) or self.depth2 <= self.depth):   # v13
+        if self.align and ((self.top_pts and len(self.top_pts) < 3) or self.depth2 <= self.depth):
             return "วัดเอียง: ต้องมีจุดผิวบนอย่างน้อย 3 จุด และความลึกที่ 2 ต้องลึกกว่า Probe depth"
         return ""
 
 
-_Z_START = 3.0    # v13: G0 ลงถึงเหนือ Z0 เท่านี้ แล้วค่อย G38.2 ช้า ๆ (เดิม 1.0 — G0 ลงใกล้ผิวเกินไป ผู้ใช้กด Stop)
-_Z_OVER = 2.0     # v13: G38.2 Z ลงต่ำกว่า Z0 ได้สูงสุดเท่านี้ (ไม่ทริก = ALARM หยุดเอง)
-_EDGE_FACE_Z = -2.0   # v14: แตะหน้าผนังอ้างอิงที่ Z นี้ (ก้นลูกบอล, ต่ำกว่าผิวบนพอ)
-_EDGE_BACK = 1.2      # v14: ถอยจากจุดทริกหน้าผนังก่อนแตะแต่ละความสูง (ผิวลูกบอลห่างผนัง ~0.6)
-_EDGE_PAST = 1.0      # v14: G38.3 เดินเลยจุดทริกหน้าผนังได้สูงสุด (มม.) — ไม่ทริก = ลอยเหนือผิวบน/หยุด
-_EDGE_DMIN, _EDGE_DMAX = 0.08, 0.50   # v14: Δ ที่ใช้คำนวณ (เล็กไป = ไวต่อ noise, ใหญ่ไป = แรงชี้ขึ้น ทริกช้า)
+_Z_START = 3.0    # G0 ลงถึงเหนือ Z0 เท่านี้ แล้วค่อย G38.2 ช้า ๆ (เดิม 1.0 — G0 ลงใกล้ผิวเกินไป ผู้ใช้กด Stop)
+_Z_OVER = 2.0     # G38.2 Z ลงต่ำกว่า Z0 ได้สูงสุดเท่านี้ (ไม่ทริก = ALARM หยุดเอง)
+_EDGE_FACE_Z = -2.0   # แตะหน้าผนังอ้างอิงที่ Z นี้ (ก้นลูกบอล, ต่ำกว่าผิวบนพอ)
+_EDGE_BACK = 1.2      # ถอยจากจุดทริกหน้าผนังก่อนแตะแต่ละความสูง (ผิวลูกบอลห่างผนัง ~0.6)
+_EDGE_PAST = 1.0      # G38.3 เดินเลยจุดทริกหน้าผนังได้สูงสุด (มม.) — ไม่ทริก = ลอยเหนือผิวบน/หยุด
+_EDGE_DMIN, _EDGE_DMAX = 0.08, 0.50   # Δ ที่ใช้คำนวณ (เล็กไป = ไวต่อ noise, ใหญ่ไป = แรงชี้ขึ้น ทริกช้า)
 
 
 def top_touch_points(width: float, length: float, avoid=(), ball_r: float = 1.0):
-    """v13: 4 จุดบนผิวบน (dx, dy จากศูนย์) ห่างขอบชิ้นงาน ball_r + 1.5 และห่างจุดตรวจรูทุกจุด (avoid = xy
+    """4 จุดบนผิวบน (dx, dy จากศูนย์) ห่างขอบชิ้นงาน ball_r + 1.5 และห่างจุดตรวจรูทุกจุด (avoid = xy
     พิกัดงานเทียบศูนย์) ball_r + 2.5 — ลองจากไกลศูนย์ก่อน; [] ถ้าหาไม่ได้"""
     edge = ball_r + 1.5
     clear = ball_r + 2.5
@@ -184,7 +135,7 @@ def _xy53(x: float, y: float) -> str:
 
 
 def _touch_lines(a: str, sign: int, s) -> list:
-    """v13: แตะผนังจากนอกครั้งเดียว + แตะช้า 1 ครั้ง (เริ่มที่ความลึกแล้ว, จบที่ความลึกเดิม)"""
+    """แตะผนังจากนอกครั้งเดียว + แตะช้า 1 ครั้ง (เริ่มที่ความลึกแล้ว, จบที่ความลึกเดิม)"""
     return ["G91", f"G38.2 {a}{-sign * s.search:.3f} F{s.feed:.0f}",
             f"G0 {a}{sign * s.rep_back:.3f}",
             *([f"G4 P{s.rep_dwell:.2f}"] if s.rep_dwell > 0 else []),
@@ -193,7 +144,7 @@ def _touch_lines(a: str, sign: int, s) -> list:
 
 
 def _solve3(m, b):
-    """v13: แก้ระบบ 3×3 (Cramer)"""
+    """แก้ระบบ 3×3 (Cramer)"""
     def det(a):
         return (a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
                 + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]))
@@ -216,9 +167,9 @@ def side_gcode(axis: str, sign: int, s: CentreSettings) -> str:
         f"G0 {a}{sign * s.outside(a):.3f}",            # ไปนอกผนัง (ที่ความสูงยก)
         f"G0 Z{-s.depth:.3f}",                          # ลดลงข้างผนัง
         f"G91 G38.2 {a}{-sign * s.search:.3f} F{s.feed:.0f}",   # แตะเข้าหาชิ้นงาน
-        *[ln for _ in range(s.repeats) for ln in (                # v07: แตะซ้ำที่ feed วัดจริง
+        *[ln for _ in range(s.repeats) for ln in (                # แตะซ้ำที่ feed วัดจริง
             f"G0 {a}{sign * s.rep_back:.3f}",
-            *([f"G4 P{s.rep_dwell:.2f}"] if s.rep_dwell > 0 else []),   # v11
+            *([f"G4 P{s.rep_dwell:.2f}"] if s.rep_dwell > 0 else []),
             f"G38.2 {a}{-sign * (s.rep_back + 2.0):.3f} F{s.rep_feed:.0f}")],
         f"G0 {a}{sign * s.backoff:.3f}",
         "G90",
@@ -242,8 +193,8 @@ class CentreRun:
         self._need = 0
         self._sent_at = 0.0
         self._deadline = 0.0
-        self.align, self._extra = None, []   # v13
-        self.edge, self._edge_now, self._edge_rec, self._edge_face_idx = None, None, [], {}   # v14
+        self.align, self._extra = None, []
+        self.edge, self._edge_now, self._edge_rec, self._edge_face_idx = None, None, [], {}
         self._edge_face_at = 0
 
     # ------------------------------------------------------------------
@@ -254,7 +205,7 @@ class CentreRun:
             # 1) zero ชั่วคราวที่จุดเริ่ม (Z0 = ผิวบน) + อ่าน steps/mm ปัจจุบัน แล้วยกก่อนเสมอ
             ("Read $$, set zero at the start point, lift",
              lambda: f"$$\nG10 L20 P{p()} X0 Y0 Z0\nG90\nG0 Z{s.lift:.3f}", 0) if not s.keep_zero else
-            # v08: รันซ้ำ — Z0 เดิม, X0 Y0 ชั่วคราวที่ตำแหน่งปัจจุบัน (เหนือกึ่งกลางจากรอบก่อน)
+            # รันซ้ำ — Z0 เดิม, X0 Y0 ชั่วคราวที่ตำแหน่งปัจจุบัน (เหนือกึ่งกลางจากรอบก่อน)
             ("Read $$, keep Z0, temporary X0 Y0 here, lift",
              lambda: f"$$\nG10 L20 P{p()} X0 Y0\nG90\nG0 Z{s.lift:.3f}", 0),
             ("X: left wall", lambda: side_gcode("X", -1, s), s.per_wall),
@@ -269,14 +220,14 @@ class CentreRun:
              lambda: f"G53 G0 X{self._mid('X'):.3f} Y{self._mid('Y'):.3f}\nG4 P1", 0),
             ("Set X0 Y0 at the work zero", lambda: "G10 L20 P{} X{:.4f} Y{:.4f}".format(p(), *self._zero_xy()), 0),
         ]
-        if s.align:   # v13: Feature 1 — หลังตั้ง X0 Y0 แล้ว (ตำแหน่งทั้งหมดเทียบศูนย์ที่วัดได้ ใช้ G53)
+        if s.align:   # Feature 1 — หลังตั้ง X0 Y0 แล้ว (ตำแหน่งทั้งหมดเทียบศูนย์ที่วัดได้ ใช้ G53)
             # แตะผิวบนเฉพาะเมื่อมี top_pts (หัวโพรบทริกแนว Z ได้ — ไม่งั้นลูกบอลจะกดผิวลงไปเฉย ๆ)
             self._steps += [("Tilt: touch the top surface (Z)", self._top_gcode, 2 * len(s.top_pts))] if s.top_pts else []
             self._steps += [
                 (f"Lean: walls again at Z−{s.depth2:g}", self._deep_gcode, 8),
                 ("Rotation: 2 more touches on the left wall", self._yaw_gcode, 4),
             ]
-        if s.edge_z:   # v14: Z0 จากขอบบน — หลังวัดเอียง (จุดแตะต่อท้าย self.prb ไม่กระทบลำดับของขั้นก่อนหน้า)
+        if s.edge_z:   # Z0 จากขอบบน — หลังวัดเอียง (จุดแตะต่อท้าย self.prb ไม่กระทบลำดับของขั้นก่อนหน้า)
             for j, (axis, sign, name) in enumerate(_WALLS):
                 self._steps += [
                     (f"Z0 edge: {name} wall face at Z{_EDGE_FACE_Z:g}", lambda j=j: self._edge_face_gcode(j), 2),
@@ -287,14 +238,14 @@ class CentreRun:
             self._steps += [("Back above the centre", lambda: f"G90\nG0 Z{s.lift:.3f}\n"
                                                               + _xy53(self.result['X'][2], self.result['Y'][2]), 0)]
         self.active, self.prb, self.result, self._i = True, [], {}, -1
-        self.edge, self._edge_now, self._edge_rec, self._edge_face_idx = None, None, [], {}   # v14
-        self.deff = {}   # v06
+        self.edge, self._edge_now, self._edge_rec, self._edge_face_idx = None, None, [], {}
+        self.deff = {}
         self.steps_mm = {}
-        self.rep = {}    # v07
+        self.rep = {}
         timeout = (_TIMEOUT_S + 60.0 * s.repeats + (420.0 if s.align else 0.0)   # แตะซ้ำ / วัดเอียงใช้เวลาเพิ่ม
-                   + (4 * (40.0 + 12.0 * len(s.edge_heights)) if s.edge_z else 0.0))   # v14
-        self.align = None   # v13
-        self._extra = []    # v13: (ป้าย, จุดแตะ) ของขั้นวัดเอียง — ลง CSV
+                   + (4 * (40.0 + 12.0 * len(s.edge_heights)) if s.edge_z else 0.0))
+        self.align = None
+        self._extra = []    # (ป้าย, จุดแตะ) ของขั้นวัดเอียง — ลง CSV
         self._deadline = time.monotonic() + timeout
         self.logger.on_event.append(self._on_event)
         self.logger.suppress_logs(timeout + 30)
@@ -310,12 +261,12 @@ class CentreRun:
 
     # ------------------------------------------------------------------
     def _wall_touches(self, w: int) -> list:
-        """v07: จุดแตะทั้งหมดของผนังลำดับ w (0..3 ตาม _WALLS) — [0] = แตะค้นหา, ที่เหลือ = แตะซ้ำ"""
+        """จุดแตะทั้งหมดของผนังลำดับ w (0..3 ตาม _WALLS) — [0] = แตะค้นหา, ที่เหลือ = แตะซ้ำ"""
         k = self.s.per_wall
         return self.prb[w * k:(w + 1) * k]
 
     def _wall_value(self, w: int, i: int) -> float:
-        """v07: ตำแหน่งผนัง (แกน i, พิกัดเครื่อง) = มัธยฐานของแตะซ้ำ (v11) ถ้ามี ไม่งั้นแตะค้นหา"""
+        """ตำแหน่งผนัง (แกน i, พิกัดเครื่อง) = มัธยฐานของแตะซ้ำ ถ้ามี ไม่งั้นแตะค้นหา"""
         pts = self._wall_touches(w)
         v = sorted(p[i] for p in (pts[1:] or pts[:1]))
         return v[len(v) // 2] if len(v) % 2 else 0.5 * (v[len(v) // 2 - 1] + v[len(v) // 2])
@@ -328,18 +279,18 @@ class CentreRun:
         return (lo + hi) / 2.0
 
     def _sizes(self):
-        """v08: ขนาดชิ้นงานที่ใช้ตั้งมุม — เวอร์เนียร์ถ้ากรอก ไม่งั้น span − ⌀ลูกบอล"""
+        """ขนาดชิ้นงานที่ใช้ตั้งมุม — เวอร์เนียร์ถ้ากรอก ไม่งั้น span − ⌀ลูกบอล"""
         return {a: (self.s.true.get(a) or (self.result[a][3] - self.s.tip_d)) for a in ("X", "Y")}
 
     def _zero_xy(self):
-        """v08: พิกัดงานของกึ่งกลางชิ้นงาน (ตำแหน่งปัจจุบัน) เมื่อ X0 Y0 อยู่ที่จุด zero ที่เลือก"""
+        """พิกัดงานของกึ่งกลางชิ้นงาน (ตำแหน่งปัจจุบัน) เมื่อ X0 Y0 อยู่ที่จุด zero ที่เลือก"""
         size = self._sizes()
         fx, fy = _ZERO_FROM_CENTRE[self.s.zero_mode]
         self.zero_set = (self.s.zero_mode, -fx * size["X"], -fy * size["Y"])
         return -fx * size["X"], -fy * size["Y"]
 
     # ------------------------------------------------------------------
-    # v13: Feature 1 — G-code ของขั้นวัดเอียง (ศูนย์ = self.result[...][2] พิกัดเครื่อง)
+    # Feature 1 — G-code ของขั้นวัดเอียง (ศูนย์ = self.result[...][2] พิกัดเครื่อง)
     # ------------------------------------------------------------------
     def _centre_m(self):
         return self.result['X'][2], self.result['Y'][2]
@@ -372,7 +323,7 @@ class CentreRun:
         return "\n".join(out + [f"G0 Z{s.lift:.3f}"])
 
     # ------------------------------------------------------------------
-    # v14: Z0 จากขอบบน (แตะด้านข้าง — ไม่ต้องทริกแนว Z)
+    # Z0 จากขอบบน (แตะด้านข้าง — ไม่ต้องทริกแนว Z)
     # ------------------------------------------------------------------
     def _edge_xy(self, j: int):
         s, (mx, my) = self.s, self._centre_m()
@@ -450,7 +401,7 @@ class CentreRun:
         ]
 
     def _compute_align(self) -> list:
-        """v13: ระนาบผิวบน, ศูนย์เลื่อนต่อความลึก, มุมหมุน → self.align + ข้อความสรุป"""
+        """ระนาบผิวบน, ศูนย์เลื่อนต่อความลึก, มุมหมุน → self.align + ข้อความสรุป"""
         import math
         s = self.s
         n0 = 4 * s.per_wall
@@ -525,7 +476,7 @@ class CentreRun:
             return
         label, make, need = self._steps[self._i]
         try:
-            code = make() + "\n" + _END_MARK   # v04: ok ของบรรทัดนี้ = ขั้นนี้เคลื่อนที่เสร็จจริง
+            code = make() + "\n" + _END_MARK   # ok ของบรรทัดนี้ = ขั้นนี้เคลื่อนที่เสร็จจริง
             self._need = len(self.prb) + need
             self.logger.send_gcode(code)
         except Exception as e:
@@ -554,7 +505,7 @@ class CentreRun:
             comms = payload.get("comms") or {}
             if comms.get("alarm"):
                 self._fail(f"ALARM {comms.get('alarm')}")
-            # v04: ไม่ใช้ runStatus = Idle ตัดสินว่าขั้นจบ — OpenBuilds รอให้เครื่อง Idle ก่อนส่ง
+            # ไม่ใช้ runStatus = Idle ตัดสินว่าขั้นจบ — OpenBuilds รอให้เครื่อง Idle ก่อนส่ง
             # G38.2 เสมอ ช่วงนั้นเครื่อง Idle ทั้งที่ยังเหลือคำสั่งในคิว (เคยทำให้สั่ง Stop ผิดจังหวะ)
         elif name == "data" and isinstance(payload, dict):
             resp = str(payload.get("response") or "")
@@ -576,7 +527,7 @@ class CentreRun:
             m = _PRB.search(resp)
             if m:
                 p = tuple(float(m.group(k)) for k in (1, 2, 3))
-                if self._edge_now is not None:   # v14: แตะด้านข้างขอบบน (G38.3) — ไม่ทริกได้
+                if self._edge_now is not None:   # แตะด้านข้างขอบบน (G38.3) — ไม่ทริกได้
                     j, f, hs = self._edge_now
                     k = sum(1 for r in self._edge_rec if r[0] == j)
                     if k < len(hs):
@@ -604,9 +555,9 @@ class CentreRun:
 
     def _finish(self):
         s = self.s
-        align_lines = self._compute_align() if s.align else []   # v13 (ก่อน CSV — เพิ่มจุดแตะลง _extra)
+        align_lines = self._compute_align() if s.align else []   # (ก่อน CSV — เพิ่มจุดแตะลง _extra)
         self._edge_now = None
-        if s.edge_z:   # v14: ก่อน CSV เช่นกัน
+        if s.edge_z:   # ก่อน CSV เช่นกัน
             face = [(f"edge {a}{'+' if g > 0 else '-'} face", self.prb[self._edge_face_idx[j] + k],
                      self.s.feed if k == 0 else self.s.rep_feed)
                     for j, (a, g, _n) in enumerate(_WALLS) if j in self._edge_face_idx for k in (0, 1)]
@@ -634,13 +585,13 @@ class CentreRun:
                 else:
                     lines.append(f"   ⚠ differs from CAD — check ${key} (steps/mm) with a 200 mm jog")
         lines.append(f"(sizes use ball ⌀ {s.tip_d:g} mm)")
-        idle = self.steps_mm.get(1)     # v12: $1 step idle delay
+        idle = self.steps_mm.get(1)     # $1 step idle delay
         if idle is not None and idle != 255:
             lines.append(f"⚠ $1={idle:g}: motors switch off after every stop — the bent stylus can push "
                          f"the axis and it snaps 4 full steps (~0.4 mm). Set $1=255.")
-        lines += self._repeat_lines()   # v07
-        lines += align_lines            # v13
-        # v06: Effective Tip ⌀ จากขอบนอก — span ยาวกว่าชิ้นงานจริงเท่า ⌀ ลูกบอลที่ใช้งานจริง
+        lines += self._repeat_lines()
+        lines += align_lines
+        # Effective Tip ⌀ จากขอบนอก — span ยาวกว่าชิ้นงานจริงเท่า ⌀ ลูกบอลที่ใช้งานจริง
         self.deff = {}
         for a in ("X", "Y"):
             w = s.true.get(a)
@@ -659,7 +610,7 @@ class CentreRun:
         self._end("\n".join(lines), ok=True)
 
     def _repeat_lines(self) -> list:
-        """v07: สรุป repeatability ต่อผนัง + เขียน CSV ทุกจุดแตะ"""
+        """สรุป repeatability ต่อผนัง + เขียน CSV ทุกจุดแตะ"""
         s = self.s
         if not s.repeats:
             return []
@@ -676,7 +627,7 @@ class CentreRun:
             sd = (sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5 if len(vals) > 1 else 0.0
             rng = max(vals) - min(vals)
             fast = (pts[0][i] - mean) * -sign   # แตะเร็วเลยแตะช้าไปตามทิศที่โพรบเดินเท่าไหร่ (+ = เลยไป)
-            # v09: ผนังถอยไปตามทิศที่ดันทุกครั้ง = ชิ้นงานเลื่อน (ไม่ใช่หัวโพรบ)
+            # ผนังถอยไปตามทิศที่ดันทุกครั้ง = ชิ้นงานเลื่อน (ไม่ใช่หัวโพรบ)
             steps = [(b - a) * -sign for a, b in zip(vals, vals[1:])]
             drift = (vals[-1] - vals[0]) * -sign
             slides = drift > _REP_TOL and sum(1 for d in steps if d > -0.005) >= len(steps) - 1
@@ -699,7 +650,7 @@ class CentreRun:
         return out
 
     def _write_csv(self):
-        """v07: ทุกจุดแตะของรอบนี้ (พิกัดเครื่อง) → Find_centre_<เวลา>.csv ในโฟลเดอร์ log"""
+        """ทุกจุดแตะของรอบนี้ (พิกัดเครื่อง) → Find_centre_<เวลา>.csv ในโฟลเดอร์ log"""
         import csv
         import datetime
         import os
@@ -714,7 +665,7 @@ class CentreRun:
                     for j, p in enumerate(self._wall_touches(w)):
                         wr.writerow([f"{axis}{'+' if sign > 0 else '-'} ({name})", j,
                                      self.s.feed if j == 0 else self.s.rep_feed] + [f"{c:.3f}" for c in p])
-                for j, item in enumerate(self._extra):   # v13: ขั้นวัดเอียง / v14: ขอบบน (label, p, feed)
+                for j, item in enumerate(self._extra):   # ขั้นวัดเอียง / ขอบบน (label, p, feed)
                     label, p = item[0], item[1]
                     feed = item[2] if len(item) > 2 else (
                         self.s.rep_feed if label.startswith("top") or j % 2 else self.s.feed)

@@ -1,99 +1,30 @@
-# core/gcode_generator.py
-# VERSION: 18
-# CHANGE LOG (v17 -> v18):
-#   แตะช้า retouch_count ครั้งต่อจุด (ครั้งแรกหลัง RETOUCH_MARK, ครั้งถัดไปหลัง REPEAT_MARK → log parser
-#   ใช้มัธยฐาน) และ G4 P<retouch_dwell> ก่อนแตะช้าแต่ละครั้ง
-# CHANGE LOG (v16 -> v17):
-#   FEATURE (จุดแตะจาก B-Rep ตรง ๆ): build_point_map(probe_r=...) — ทุกจุดคิดจากไฟล์ STEP ด้วย
-#   core/surface_oracle.py: x/y/z = จุดที่เส้นทางโพรบทะลุผิว CAD จริง และ 'trig' = ตาราง
-#   [r, s, mx, my, mz] (ลูกบอลรัศมี r แตะที่ระยะเดิน s จาก start ด้วยทิศตั้งฉากผิว m) + sx/sy/sz
-#   (จุดเริ่มเดิน) — แทนการเดาจากรัศมีที่ระดับชั้น + ความชันจากผลต่างจำกัด (ทรงกลม/มุมโค้ง
-#   ลูกบอลแตะต่ำกว่าระดับชั้น แบบเดิมคลาดถึง 0.12 มม. ที่ชั้นลึกของหลุม R10 ด้วยลูก ⌀2)
-#   G38.2 ปลายทาง = จุดแตะจริงของลูกบอลจริง (ตาราง r = R) + R + overtravel (ระยะเผื่อเท่าเดิม)
-#   FEATURE (คาลิเบรตหัวโพรบด้านนอก): calib=dict(lo, hi) → ก่อนเข้ารูแตะผนังนอก 4 ด้าน (X−, X+,
-#   Y−, Y+) ที่ลึก CALIB_DEPTH จากผิวบน — หน้า Evaluation หา Effective Tip ⌀ ของรอบนั้นจาก
-#   span − ขนาดจริง (core/evaluation_engine.py v12) จุดเหล่านี้ shape='calib' อยู่ต้น point map
-# CHANGE LOG (v15 -> v16):
-#   ตัดระบบ Padding Height ออก (suggest_padding_height, GCodeSettings.padding_height และบรรทัด
-#   NOTE ในหัวไฟล์) — Z0 ตั้งที่ผิวบนชิ้นงานเสมอ ความสูงแผ่นรองไม่มีผลกับพิกัดใด ๆ
-# CHANGE LOG (v14 -> v15):
-#   layer_depths(): ความลึกแต่ละชั้นใต้ปากรู — แท็บ Evaluation เตือนชั้นที่ลึกเกินจุดที่ก้านแตะขอบ
-# CHANGE LOG (v13 -> v14):
-#   จบโปรแกรม: ยก Z ไป Safe Z ก่อน แล้วกลับ X0 Y0 (ค้างที่ Safe Z) จึงค่อย M30
-# CHANGE LOG (v12 -> v13):
-#   FEATURE (แตะสองครั้ง): probe_profile.double_touch → ทุกจุด (ผนัง/พื้น) แตะเร็วตาม probe feed
-#   แล้วถอย retouch_distance คั่นด้วย RETOUCH_MARK (G4 P0.01) แล้วแตะช้า (retouch_feed)
-#   core/log_parser.py v03 ทิ้งจุดแตะเร็วเมื่อเจอ marker — ลำดับจุดยังตรงกับ build_point_map()
-#   FEATURE (ผนังเอียง): รูกลมที่รัศมีเปลี่ยนตามความลึก (กรวย/ทรงกลม/มุมโค้ง) — layer มี 'slope'
-#   (dr/ds) build_point_map() เพิ่ม mx/my/mz = ทิศตั้งฉากผิวจริง ให้ evaluation คิดจุดที่ลูกบอล
-#   แตะจริง และ G38.2 ลดระยะปลายทางตามจุดแตะที่มาก่อน (ไม่ต้องเผื่อ overtravel เพิ่ม)
-# CHANGE LOG (v11 -> v12):
-#   FEATURE (ระยะเผื่อพื้น): ตำแหน่งชั้นวัดมาจาก core/models.py::layer_fractions() —
-#   ชั้นที่ลึกสุดสูงกว่าพื้น/ขั้นใต้ลูกบอลอย่างน้อย รัศมีหัวโพรบ + floor clearance
-#   (ถ้าพอแล้ว G-code ไม่เปลี่ยน) probe_safety_report() เตือนรูที่เว้นระยะไม่ได้
-#   FEATURE (วัดพื้นก้นรู แนว Z): HoleFeature.measure_floor + probe_profile.z_trigger →
-#   หลังวัดผนังครบ แตะพื้นกลางรูด้วย G38.2 ตามแกนรู; build_point_map(z_trigger=...)
-#   เพิ่มจุด shape='floor' (layer_idx = -1) ลำดับตรงกับ G-code เสมอ
-# CHANGE LOG (v10 -> v11):
-#   build_point_map() เพิ่ม nx/ny/nz (ทิศที่โพรบเดินเข้าหาผนัง) และ shape ต่อจุด —
-#   core/evaluation_engine.py ใช้ชดเชยรัศมีหัวโพรบและ fit วงกลมรายชั้น (G-code ไม่เปลี่ยน)
-# CHANGE LOG (v09 -> v10):
-#   FEATURE: รูกลมที่ผนังมีช่วงเปิด (blocked_dirs: ปากร่อง, รูซ้อนกัน, รอยบาก — วัดจริง
-#   ใน core/step_extractor.py::_wall_gaps) — circle_layer_angles() หมุนชุดจุดทั้ง layer
-#   ไปมุมที่ห่างช่องเปิดที่สุด ถ้ายังไม่พ้นจึงเลื่อนทีละจุด และจุดที่ไม่มีผนังให้แตะจริง ๆ
-#   จะถูกตัดออก (G-code, Schema, preview ตรงกันเพราะใช้ _layer_contacts() ตัวเดียว)
-#   contact_plan_report() สรุปผลให้แผง Properties และหน้า Export แจ้งผู้ใช้
-# CHANGE LOG (v08 -> v09):
-#   FEATURE: Work zero ที่เลือกได้ (core/work_zero.py) — generate_gcode() /
-#   build_point_map() / transform_hole_feature_for_machining() รับ `origin`
-#   (ตำแหน่งจุด zero ในพิกัดเครื่อง) แล้วลบออกจากทุก "ตำแหน่ง" (ไม่ใช่ทิศทาง)
-#   suggest_safe_z() รับ zero_z; generate_gcode() รับ zero_note สำหรับหัวไฟล์
-#   ค่าเริ่มต้น origin=None / zero_note=None = ผลลัพธ์เหมือน v08 ทุกตัวอักษร
-# CHANGE LOG (v07 -> v08):
-#   FIX: พิกัด X/Y ของ G-code และ expected points (Evaluation) ไม่ตามปุ่ม
-#   Rotate บนจอ และมุมมอง Left/Right หมุนต่างจากจอ 90° — apply_view_transform()
-#   ใช้เมทริกซ์เดียวกับจอแล้ว (core/projector.py::view_rotation_matrix) และ
-#   build_point_map()/generate_gcode() รับ screen_rot เพิ่ม (ค่าเริ่มต้น 0 —
-#   Top/Bottom/Front/Back ที่ไม่หมุนจอให้ผลเหมือน v07 ทุกตัวอักษร)
-# CHANGE LOG (v06 -> v07):
-#   FEATURE: ช่องสี่เหลี่ยม (StepPocket, shape == 'rect') — จุดสัมผัสผนังของ
-#   แต่ละ layer ถูกคำนวณผ่าน _layer_contacts() ที่เดียว ใช้ร่วมกันทั้ง
-#   build_point_map() และ generate_gcode() (ลำดับจุดตรงกันเป๊ะเหมือนเดิม)
-#     - รูกลม: เหมือน v06 ทุกประการ (เริ่มที่จุดศูนย์กลาง เดินออกตามรัศมี) —
-#       ข้อความ G-code ของรูกลมไม่เปลี่ยนแม้แต่บรรทัดเดียว
-#     - ช่องสี่เหลี่ยม: จุดกระจายบนผนังตรงทั้ง 4 ด้าน (core/models.py::
-#       rect_wall_contacts()) — เดินไปจุดเริ่มบนเส้นกึ่งกลางช่องก่อน
-#       ("; approach") แล้ว G38.2 ตั้งฉากเข้าหาผนัง; zigzag = เลื่อน
-#       ตำแหน่งจุดตามแนวผนัง (degree/360 ของระยะห่างระหว่างจุดต่อ layer)
-#   transform_hole_feature_for_machining() แปลง u_dir ของช่องด้วย
-# CHANGE LOG (v05 -> v06):
-#   FEATURE (PLAN_machine-z-height-and-padding-calculation.md, Step 4):
-#   new function suggest_padding_height(machine_profile, probe_profile) —
-#   computes a suggested riser/padding height (mm) to place under the
-#   workpiece so the probe tip can physically reach it within the
-#   machine's downward Z travel range. Formula (see PLAN doc for full
-#   derivation from the machine's physical layout):
-#     tip_clearance_at_top   = z_height - stylus_holder_height - stylus_length
-#     tip_position_at_bottom = tip_clearance_at_top - z_travel
-#     suggested_padding      = max(0.0, tip_position_at_bottom)
-#   Reads core/machine_profile.py v02's new `z_height` field together with
-#   core/probe_profile.py v02's new `stylus_holder_height` field (both
-#   added earlier in the same plan) and the existing `stylus_length` /
-#   `z_travel`. Pure function, no side effects — mirrors suggest_safe_z()
-#   in shape/spirit (a "propose a good default from known geometry"
-#   helper), but reads machine/probe PROFILES instead of mesh geometry.
-#   No fail-safe / bounds validation here by explicit instruction (e.g.
-#   no warning if the result would exceed z_height) — deferred to a
-#   future phase.
+# ==============================================================================
+# core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง)
+# ==============================================================================
+# สรุปหน้าที่:
+#   สร้างโปรแกรม G-code (GRBL) ของการตรวจรู: แปลงพิกัดตามมุมมอง/zero,
+#   จัดลำดับรู, คำนวณจุดแตะทุกชั้น (build_point_map) และเขียนคำสั่ง G38.2
+#   แตะเร็ว-แตะช้า-ถอย พร้อม marker ใน log
 #
-#   FEATURE: GCodeSettings gained a new `padding_height: float = 0.0`
-#   field (optional — defaults to "no padding assumed" so existing
-#   callers/tests that don't pass it are unaffected). generate_gcode()'s
-#   header comment block now always reports the padding value assumed
-#   for that export, e.g.:
-#     "; NOTE: assumes workpiece is raised by 12.50 mm padding (riser plate)"
-#   This is comment-only — no change to any coordinate math, G38.2
-#   targets, or point_map output. build_point_map() is untouched.
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/hole_ordering.py — จัดลำดับรู nearest-neighbor (order_holes_nearest_neighbor, split_step_ready)
+#     - core/log_parser.py — อ่าน .log ของ OpenBuilds เป็นจุดวัด (REPEAT_MARK, RETOUCH_MARK)
+#     - core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ (FLOOR_SAFETY, hole_floor_depth, layer_fractions, rect_wall_contacts, surface_below)
+#     - core/projector.py — ฉายโมเดล 3D เป็นภาพ 2D ตามมุมมอง (view_rotation_matrix)
+#     - core/surface_oracle.py — คำนวณจุดแตะลูกบอลจากผิว B-Rep (ตาราง s(ρ)) (available, centroid, last_reason, py, touch_table)
+#   ถูกใช้งานโดย:
+#     - core/expected_points_io.py — อ่าน/เขียนไฟล์ _schema.json (build_point_map)
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (GCodeSettings, contact_plan_report, exact_touch_report, gcode_extents, generate_gcode, probe_safety_report, …)
+#     - core/path_planner.py — ชั้นและจุดวัดสำหรับแสดงผล (_layer_contacts, _orthonormal_basis, channel_layer_fields)
+#     - core/step_extractor.py — หารูจาก B-Rep ของไฟล์ STEP (_orthonormal_basis)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (build_point_map, layer_depths)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (layer_depths)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (contact_plan_report)
+#     - ui/tabs/customization_tab.py — แท็บ Customization (ภาพ 3D เส้นทางโพรบ) (build_point_map, layer_depths)
+#   ไลบรารีภายนอก: copy, numpy, re
+# ==============================================================================
+
 import re
 import numpy as np
 import copy  # ต้อง import copy เพื่อใช้ในการจำลองพิกัด
@@ -103,16 +34,16 @@ from core.hole_ordering import order_holes_nearest_neighbor, split_step_ready
 from core.models import (FLOOR_SAFETY, hole_floor_depth, layer_fractions, rect_wall_contacts,
                          surface_below)
 
-EDGE_DEG = 30.0        # v17: ทิศแตะของลูกบอลจริงต่างจากทิศที่ผนังเกินนี้ = แตะขอบ/ขั้นก่อนผนัง (เตือน)
-CALIB_DEPTH = 3.0      # v17: ความลึกศูนย์กลางลูกบอลใต้ผิวบน ตอนแตะผนังนอก — ปรับได้
-CALIB_GAP = 5.0        # v17: ระยะผิวลูกบอลถึงผนังนอกตอนลด Z ข้างชิ้นงาน — ปรับได้
-FLOOR_APPROACH = 2.0   # v12: เริ่มแตะพื้นจากระยะลูกบอล-พื้น (ตาม CAD) เท่านี้ — ปรับได้
-_SLOPE_DT = 0.02       # v13: ช่วง t ที่ใช้หาความชันผนัง (สัดส่วนความยาวรู)
-_SLOPE_MIN = 0.01      # v13: ชันน้อยกว่านี้ (≈0.6°) ถือว่าผนังตั้งตรง
+EDGE_DEG = 30.0        # ทิศแตะของลูกบอลจริงต่างจากทิศที่ผนังเกินนี้ = แตะขอบ/ขั้นก่อนผนัง (เตือน)
+CALIB_DEPTH = 3.0      # ความลึกศูนย์กลางลูกบอลใต้ผิวบน ตอนแตะผนังนอก — ปรับได้
+CALIB_GAP = 5.0        # ระยะผิวลูกบอลถึงผนังนอกตอนลด Z ข้างชิ้นงาน — ปรับได้
+FLOOR_APPROACH = 2.0   # เริ่มแตะพื้นจากระยะลูกบอล-พื้น (ตาม CAD) เท่านี้ — ปรับได้
+_SLOPE_DT = 0.02       # ช่วง t ที่ใช้หาความชันผนัง (สัดส่วนความยาวรู)
+_SLOPE_MIN = 0.01      # ชันน้อยกว่านี้ (≈0.6°) ถือว่าผนังตั้งตรง
 
 
 def _wall_slope(radius_at, t: float, length: float) -> float:
-    """v13: dr/ds ของผนังรูกลมที่ความลึก t (s = ระยะตามแกนรู) — บวก = รูกว้างขึ้นตามความลึก"""
+    """dr/ds ของผนังรูกลมที่ความลึก t (s = ระยะตามแกนรู) — บวก = รูกว้างขึ้นตามความลึก"""
     t0, t1 = max(0.0, t - _SLOPE_DT), min(1.0, t + _SLOPE_DT)
     if length <= 1e-9 or t1 - t0 <= 1e-9:
         return 0.0
@@ -121,18 +52,18 @@ def _wall_slope(radius_at, t: float, length: float) -> float:
 
 
 def surface_normal(normal, axis, slope: float):
-    """v13: ทิศตั้งฉากผิวผนัง (ชี้เข้าเนื้องาน) ที่จุดแตะ — ผนังตรงคือทิศเดียวกับที่โพรบเดิน"""
+    """ทิศตั้งฉากผิวผนัง (ชี้เข้าเนื้องาน) ที่จุดแตะ — ผนังตรงคือทิศเดียวกับที่โพรบเดิน"""
     m = np.asarray(normal, dtype=float) - slope * np.asarray(axis, dtype=float)
     return m / np.linalg.norm(m)
 
 
 def contact_shift(tip_radius: float, slope: float) -> float:
-    """v13: ผนังเอียง ลูกบอลแตะเร็วกว่าผนังตรงเท่านี้ (mm ตามทิศที่เดิน) = r(√(1+k²) − 1)"""
+    """ผนังเอียง ลูกบอลแตะเร็วกว่าผนังตรงเท่านี้ (mm ตามทิศที่เดิน) = r(√(1+k²) − 1)"""
     return float(tip_radius) * (float(np.sqrt(1.0 + slope * slope)) - 1.0)
 
 
 def _touch_lines(target, normal, settings, probe_profile, label: str, what: str) -> list:
-    """v13: G38.2 หนึ่งจุด + ถอยออก — double_touch: แตะเร็ว → ถอย → marker → แตะช้า (ใช้ค่านี้)"""
+    """G38.2 หนึ่งจุด + ถอยออก — double_touch: แตะเร็ว → ถอย → marker → แตะช้า (ใช้ค่านี้)"""
     lines = [f"G38.2 X{target[0]:.3f} Y{target[1]:.3f} Z{target[2]:.3f} "
              f"F{settings.probe_feedrate:.0f} ; {label} — touch"]
     lines.append("G91")
@@ -143,9 +74,9 @@ def _touch_lines(target, normal, settings, probe_profile, label: str, what: str)
         dwell = float(getattr(probe_profile, 'retouch_dwell', 0.0) or 0.0)
         if 0 < round(dwell, 2) <= 0.02:   # G4 P0.01 / P0.02 คือ marker ของ log parser — ห้ามชน
             dwell = 0.03
-        for k in range(max(1, int(getattr(probe_profile, 'retouch_count', 1) or 1))):   # v18
+        for k in range(max(1, int(getattr(probe_profile, 'retouch_count', 1) or 1))):
             lines.append(f"G0 X{rb[0]:.3f} Y{rb[1]:.3f} Z{rb[2]:.3f} ; back off for the slow re-touch")
-            if dwell > 0:   # v18: ให้เครื่อง/ก้านนิ่งก่อนแตะช้า (ไม่ใช่ marker — P ต่างจาก 0.01/0.02)
+            if dwell > 0:   # ให้เครื่อง/ก้านนิ่งก่อนแตะช้า (ไม่ใช่ marker — P ต่างจาก 0.01/0.02)
                 lines.append(f"G4 P{dwell:.2f} ; settle")
             lines.append(f"{RETOUCH_MARK if k == 0 else REPEAT_MARK} ; "
                          + ("re-touch marker — the log parser drops the fast touch" if k == 0
@@ -190,7 +121,7 @@ def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top",
     # หาค่า Z ที่สูงที่สุดจากด้านที่ถูกหงายขึ้นมา
     max_z = max(c[2] for c in transformed_corners)
     
-    # v09: zero_z = ความสูงของจุด Work zero ในพิกัดเครื่อง (0 = mesh centroid เดิม)
+    # zero_z = ความสูงของจุด Work zero ในพิกัดเครื่อง (0 = mesh centroid เดิม)
     return float(max_z) - float(zero_z) + margin
 
 # ---------------------------------------------------------------------
@@ -198,7 +129,7 @@ def suggest_safe_z(mesh, margin: float = 10.0, view_name: str = "Top",
 # ---------------------------------------------------------------------
 def apply_view_transform(pt, view_name, screen_rot: int = 0):
     """แปลงพิกัด 3D เพื่อตั้งชิ้นงานให้ด้านที่ต้องการหงายขึ้นด้านบน (เข้าหาโพรบ Z+)
-    v08: ใช้เมทริกซ์เดียวกับจอ (core/projector.py::view_rotation_matrix) และรวม
+    ใช้เมทริกซ์เดียวกับจอ (core/projector.py::view_rotation_matrix) และรวม
     การหมุนจอ (screen_rot) — X/Y ของ G-code จึงตรงกับที่เห็นบนจอเสมอ (เดิม
     Left/Right หมุนต่างจากจอ 90° และไม่สนใจปุ่ม Rotate เลย)"""
     from core.projector import view_rotation_matrix
@@ -206,7 +137,7 @@ def apply_view_transform(pt, view_name, screen_rot: int = 0):
 
 def transform_hole_feature_for_machining(hf_orig, view_name, screen_rot: int = 0, origin=None):
     """Deep copy รูและแปลงพิกัดทั้งหมดตามมุมมอง (+ การหมุนจอ) ก่อนส่งไปเขียน G-code
-    v09: origin = ตำแหน่งจุด Work zero ในพิกัดเครื่อง (core/work_zero.py) — ลบออก
+    origin = ตำแหน่งจุด Work zero ในพิกัดเครื่อง (core/work_zero.py) — ลบออก
     จาก "ตำแหน่ง" ทุกจุด (open/deep) แต่ไม่ลบจาก "ทิศทาง" (axis, u_dir)"""
     hf = copy.deepcopy(hf_orig)
     if hf._step_hole:
@@ -244,7 +175,7 @@ def _orthonormal_basis(axis_vec):
     return axis, u, v
 
 def floor_probe_plan(hole_feature, z_trigger: bool):
-    """v12: จุดพื้นก้นรูที่จะแตะแนวแกนรู — (จุดบนพื้นกลางรู, แกนรูชี้เข้าก้น) หรือ None
+    """จุดพื้นก้นรูที่จะแตะแนวแกนรู — (จุดบนพื้นกลางรู, แกนรูชี้เข้าก้น) หรือ None
     ใช้ร่วมกันทั้ง build_point_map() และ generate_gcode() ให้ลำดับจุดตรงกันเสมอ
     None เมื่อ: หัวโพรบทริกแนว Z ไม่ได้, รูไม่ได้ติ๊ก "Measure floor depth", รูทะลุ,
     หรือ segment ที่ลึกที่สุดถูกเลือกออก (หัวโพรบลงไม่ถึง)"""
@@ -278,7 +209,7 @@ def _raw_layers_for_hole(hole_feature):
             o = np.array(seg.open_3d)
             d = np.array(seg.deep_3d)
             length = float(np.linalg.norm(d - o))
-            below  = surface_below(sh, seg_idx)                  # v12: ระยะเผื่อพื้น/ขั้น
+            below  = surface_below(sh, seg_idx)                  # ระยะเผื่อพื้น/ขั้น
             t_vals = layer_fractions(cfg.layers, length, below)
             for local_idx, t in enumerate(t_vals):
                 center = o + t * (d - o)
@@ -287,7 +218,7 @@ def _raw_layers_for_hole(hole_feature):
                          if cfg.zigzag_inspection else 0.0)
                 layers.append(dict(
                     seg_idx=seg_idx, center=center, radius=r,
-                    slope=_wall_slope(seg.radius_at, t, length),   # v13
+                    slope=_wall_slope(seg.radius_at, t, length),
                     axis=axis, u=u, v=v, angle_offset=offset,
                     points_n=cfg.points_per_layer,
                     blocked=getattr(sh, 'blocked_dirs', None),
@@ -295,7 +226,7 @@ def _raw_layers_for_hole(hole_feature):
     else:
         axis, u, v = _orthonormal_basis(np.array(sh.deep_3d) - np.array(sh.open_3d))
         if getattr(sh, 'shape', 'circle') in ('rect', 'channel'):
-            # v07: ฐาน u/v ของช่องสี่เหลี่ยม/ร่องต้องตรงกับแนวผนังจริง
+            # ฐาน u/v ของช่องสี่เหลี่ยม/ร่องต้องตรงกับแนวผนังจริง
             u = np.array(sh.u_dir, dtype=float)
             u = u - float(np.dot(u, axis)) * axis
             u /= np.linalg.norm(u)
@@ -306,7 +237,7 @@ def _raw_layers_for_hole(hole_feature):
         use_zz   = getattr(hole_feature, 'zigzag_inspection', False)
         deg      = getattr(hole_feature, 'zigzag_degree', 45.0)
         length   = float(np.linalg.norm(d - o))
-        below    = surface_below(sh)                             # v12: ระยะเผื่อพื้น
+        below    = surface_below(sh)                             # ระยะเผื่อพื้น
         t_vals   = layer_fractions(n_layers, length, below)
         for idx, t in enumerate(t_vals):
             center = o + t * (d - o)
@@ -324,7 +255,7 @@ def _raw_layers_for_hole(hole_feature):
             elif getattr(sh, 'shape', 'circle') == 'channel':
                 lyr.update(channel_layer_fields(sh, t))
             else:
-                lyr['slope'] = _wall_slope(sh.radius_at, t, length)   # v13
+                lyr['slope'] = _wall_slope(sh.radius_at, t, length)
             layers.append(lyr)
 
     # จัดเรียงลำดับชั้นจาก "บนลงล่าง" (Top to Bottom) เสมอ
@@ -337,7 +268,7 @@ def _raw_layers_for_hole(hole_feature):
     return layers
 
 def layer_depths(hole_feature) -> dict:
-    """v15: {layer_idx: ความลึกของจุดศูนย์กลางลูกบอลใต้ปากรู (mm)} ตามการตั้งค่าชั้นปัจจุบัน
+    """{layer_idx: ความลึกของจุดศูนย์กลางลูกบอลใต้ปากรู (mm)} ตามการตั้งค่าชั้นปัจจุบัน
     (ไม่ขึ้นกับมุมมอง) — ใช้เทียบกับ ProbeProfile.shaft_contact_depth()"""
     sh = getattr(hole_feature, '_step_hole', None)
     if sh is None:
@@ -466,10 +397,10 @@ def contact_plan_report(hole_feature, view_name: str = "Top", screen_rot: int = 
 
 
 def _layer_contacts(lyr) -> list:
-    """v07: จุดสัมผัสผนังของ layer เดียว เรียงตามลำดับที่จะถูกโพรบ —
+    """จุดสัมผัสผนังของ layer เดียว เรียงตามลำดับที่จะถูกโพรบ —
     list ของ (start, normal, wall_dist): โพรบเริ่มที่ start แล้วเดินตาม
     normal (เวกเตอร์หน่วย) ระยะ wall_dist จึงถึงผนังจริง
-    รูกลม: start = จุดศูนย์กลาง layer, normal = แนวรัศมี (เหมือน v06)"""
+    รูกลม: start = จุดศูนย์กลาง layer, normal = แนวรัศมี (เหมือน)"""
     c, u, v = lyr['center'], lyr['u'], lyr['v']
     offset, n = lyr['angle_offset'], lyr['points_n']
 
@@ -482,17 +413,17 @@ def _layer_contacts(lyr) -> list:
     if lyr.get('shape') == 'channel':
         return _channel_contacts(lyr)
 
-    # v10: รูที่ผนังมีช่วงเปิด — หมุน/เลื่อนจุดให้อยู่บนผนัง จุดที่ไม่มีผนังให้แตะถูกตัดออก
+    # รูที่ผนังมีช่วงเปิด — หมุน/เลื่อนจุดให้อยู่บนผนัง จุดที่ไม่มีผนังให้แตะถูกตัดออก
     angles, _rot, bad = circle_layer_angles(lyr)
     return [(c, np.cos(a) * u + np.sin(a) * v, lyr['radius'])
             for a, skip in zip(angles, bad) if not skip]
 
 
 # ---------------------------------------------------------------------
-# v10: ตรวจความปลอดภัยก่อน export (ใช้ค่าจาก Hardware Setting จริง)
+# ตรวจความปลอดภัยก่อน export (ใช้ค่าจาก Hardware Setting จริง)
 # ---------------------------------------------------------------------
 def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
-    # v12: + พื้นใต้ชั้นวัดที่ลึกสุด (ระยะเผื่อพื้น) และความยาวก้นสำหรับการแตะพื้นก้นรู
+    # + พื้นใต้ชั้นวัดที่ลึกสุด (ระยะเผื่อพื้น) และความยาวก้นสำหรับการแตะพื้นก้นรู
     """รูที่โปรแกรมนี้จะโพรบได้ไม่ปลอดภัยด้วยหัวโพรบปัจจุบัน — [(hole, [เหตุผล...]), ...]
 
     คิดจาก layer ที่จะถูกโพรบจริง (_raw_layers_for_hole — segment ที่ไม่ได้เลือกไม่นับ):
@@ -535,11 +466,11 @@ def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
             reasons.append(f"back-off {backoff:.2f} mm is longer than the {2.0 * room:.2f} mm the tip can "
                            f"move across the hole \u2014 it would hit the opposite wall")
         gaps = [l['floor_gap'] - tip_r for l in layers if l.get('floor_gap') is not None]
-        if gaps and min(gaps) < floor_c - 1e-6:   # v12: ชั้นลึกสุดใกล้พื้น/ขั้นเกินไป (ยกขึ้นไม่ได้)
+        if gaps and min(gaps) < floor_c - 1e-6:   # ชั้นลึกสุดใกล้พื้น/ขั้นเกินไป (ยกขึ้นไม่ได้)
             reasons.append(f"deepest layer leaves only {max(min(gaps), 0.0):.2f} mm between the tip and "
                            f"the floor/step below (needs {floor_c:.2f} mm)")
         plan = floor_probe_plan(h, z_trig)
-        if plan is not None:   # v12: แตะพื้นก้นรู — ก้นต้องยาวถึงพื้น
+        if plan is not None:   # แตะพื้นก้นรู — ก้นต้องยาวถึงพื้น
             fdepth = float(np.linalg.norm(plan[0] - mouth))
             if fdepth > stylus:
                 reasons.append(f"floor is {fdepth:.1f} mm deep, stylus is only {stylus:.1f} mm "
@@ -550,7 +481,7 @@ def probe_safety_report(holes, probe_profile, backoff: float = 0.0) -> list:
 
 
 def exact_touch_report(point_map) -> dict:
-    """v17: สรุปจุดที่ตาราง B-Rep เตือน {hole_id: {'edge': n, 'start': n, 'none': n}} —
+    """สรุปจุดที่ตาราง B-Rep เตือน {hole_id: {'edge': n, 'start': n, 'none': n}} —
     'edge'  ลูกบอลจริงแตะขอบ/ขั้น/พื้นก่อนถึงผนัง (ค่าที่วัดได้ไม่ใช่ผนัง),
     'start' ลูกบอลแตะผิว CAD ตั้งแต่จุดเริ่ม (ชั้นลึกเกิน/ชิดพื้น — ลงไปก็ชน),
     'none'  เส้นทางไม่ชนผิวภายในระยะเดิน (ใช้สูตรเดิมแทน)"""
@@ -592,7 +523,7 @@ def gcode_extents(gcode_text: str) -> dict:
 
 # ---------------------------------------------------------------------
 def _step_frame(view_name, screen_rot, origin):
-    """v17: (to_step(p), dir_to_step(v), dir_from_step(v)) — พิกัดเครื่อง (หลังลบ origin) ↔ พิกัด STEP"""
+    """(to_step(p), dir_to_step(v), dir_from_step(v)) — พิกัดเครื่อง (หลังลบ origin) ↔ พิกัด STEP"""
     from core import surface_oracle
     from core.projector import view_rotation_matrix
     rot = view_rotation_matrix(view_name, screen_rot)
@@ -604,7 +535,7 @@ def _step_frame(view_name, screen_rot, origin):
 
 
 def _touch_record(start, normal, dist, probe_r, frame):
-    """v17: ข้อมูลจุดแตะจาก B-Rep — {'x','y','z' (จุดทะลุผิว), 'sx'.. (จุดเริ่ม), 'trig'} หรือ None"""
+    """ข้อมูลจุดแตะจาก B-Rep — {'x','y','z' (จุดทะลุผิว), 'sx'.. (จุดเริ่ม), 'trig'} หรือ None"""
     from core import surface_oracle
     if not probe_r or frame is None or not surface_oracle.available():
         return None
@@ -629,7 +560,7 @@ def _touch_record(start, normal, dist, probe_r, frame):
 
 
 def calib_contacts(calib, probe_r: float) -> list:
-    """v17: จุดแตะผนังนอก 4 ด้าน [(axis, side, start, normal, dist), ...] — calib = {'lo', 'hi'}
+    """จุดแตะผนังนอก 4 ด้าน [(axis, side, start, normal, dist), ...] — calib = {'lo', 'hi'}
     กรอบชิ้นงานในพิกัดเครื่อง (ลบ origin แล้ว) side −1 = ผนังด้านลบ (โพรบเดินทาง +แกน)"""
     if not calib:
         return []
@@ -656,7 +587,7 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None,
     ออกมาเป๊ะ ๆ (จุดคาลิเบรตผนังนอก → รู nearest-neighbor -> segment -> layer
     -> มุมจุดในชั้น -> พื้นก้นรู)
 
-    v17: probe_r = รัศมีลูกบอลจริง (Hardware Setting) — ถ้ามีไฟล์ STEP อยู่ (core/surface_oracle.py)
+    probe_r = รัศมีลูกบอลจริง (Hardware Setting) — ถ้ามีไฟล์ STEP อยู่ (core/surface_oracle.py)
     ทุกจุดได้ x/y/z = จุดที่เส้นทางโพรบทะลุผิว CAD + 'trig' (ตารางจุดแตะตามขนาดลูกบอล 0 … probe_r)
     + sx/sy/sz (จุดเริ่มเดิน) — ไม่มี STEP/probe_r ใช้สูตรเดิม (จุดศูนย์กลางชั้น + รัศมีที่ระดับชั้น)
     calib = {'lo', 'hi'} กรอบชิ้นงาน (พิกัดเครื่อง ลบ origin แล้ว) → จุดแตะผนังนอก 4 จุดต้นรายการ
@@ -699,19 +630,19 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None,
                     'layer_idx': int(lyr['layer_idx']),
                     'point_idx': int(pt_i),
                     'x': float(pt[0]), 'y': float(pt[1]), 'z': float(pt[2]),
-                    # v11: ทิศที่โพรบเดินเข้าหาผนัง (เวกเตอร์หน่วย, พิกัดเครื่อง) — ใช้ชดเชย
+                    # ทิศที่โพรบเดินเข้าหาผนัง (เวกเตอร์หน่วย, พิกัดเครื่อง) — ใช้ชดเชย
                     # รัศมีหัวโพรบตอนประเมินผล และชนิดรูปทรง (ใช้เลือก layer ที่จะ fit วงกลม)
                     'nx': float(normal[0]), 'ny': float(normal[1]), 'nz': float(normal[2]),
                     'shape': lyr.get('shape', 'circle'),
                 }
-                exact = _touch_record(start, normal, dist, probe_r, frame)   # v17
+                exact = _touch_record(start, normal, dist, probe_r, frame)
                 if exact:
                     rec.update(exact)
-                if not (exact or {}).get('trig') and slope:   # v13: ผนังเอียง — ทิศตั้งฉากผิว (evaluation คิดจุดที่ลูกบอลแตะจริง)
+                if not (exact or {}).get('trig') and slope:   # ผนังเอียง — ทิศตั้งฉากผิว (evaluation คิดจุดที่ลูกบอลแตะจริง)
                     m = surface_normal(normal, lyr['axis'], slope)
                     rec.update(mx=float(m[0]), my=float(m[1]), mz=float(m[2]))
                 point_map.append(rec)
-        plan = floor_probe_plan(hole, z_trigger)   # v12: พื้นก้นรู — หลังผนังครบทุกชั้น
+        plan = floor_probe_plan(hole, z_trigger)   # พื้นก้นรู — หลังผนังครบทุกชั้น
         if plan is not None:
             fp, ax = plan
             rec = {
@@ -723,13 +654,13 @@ def build_point_map(holes, view_name: str, screen_rot: int = 0, origin=None,
             }
             r_ = float(probe_r or 0.0)
             rec.update(_touch_record(fp - (r_ + FLOOR_APPROACH) * ax, ax, r_ + FLOOR_APPROACH,
-                                     probe_r, frame) or {})   # v17
+                                     probe_r, frame) or {})
             point_map.append(rec)
     return point_map
 
 
 def _probe_target(rec, start, normal, dist, early, tip_r, overtravel, floor=False):
-    """v17: ปลายทาง G38.2 — จากตารางจุดแตะ B-Rep (แถวสุดท้าย = ลูกบอลจริง) ถ้ามี ไม่งั้นสูตรเดิม
+    """ปลายทาง G38.2 — จากตารางจุดแตะ B-Rep (แถวสุดท้าย = ลูกบอลจริง) ถ้ามี ไม่งั้นสูตรเดิม
     ผนัง: เลยจุดแตะของศูนย์กลางลูกบอลไป R + overtravel (เท่ากับเดิม: ถึงผิว CAD + overtravel)
     พื้น: เลยจุดแตะไป overtravel"""
     trig = (rec or {}).get('trig')
@@ -758,17 +689,17 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     valid, skipped = split_step_ready(transformed_holes)
     ordered = order_holes_nearest_neighbor(valid)
 
-    # v05: point_map is now produced by build_point_map() — called on the
+    # point_map is now produced by build_point_map() — called on the
     # same ORIGINAL (pre-transform) `holes` + `view_name` used above, so it
     # is guaranteed to walk holes/segments/layers/points in the exact same
     # order as the G-code emission loop below (see build_point_map()'s
     # docstring for why that's safe). The .gcode TEXT emitted below is
-    # completely unchanged from v04.
-    z_trigger = bool(getattr(probe_profile, 'z_trigger', False))   # v12
+    # completely unchanged from.
+    z_trigger = bool(getattr(probe_profile, 'z_trigger', False))
     tip_r = float(probe_profile.tip_radius)
     point_map = build_point_map(holes, view_name, screen_rot, origin, z_trigger=z_trigger,
-                                probe_r=tip_r, calib=calib)   # v17
-    recs = iter(point_map)   # v17: ลำดับเดียวกับการเขียน G38.2 ด้านล่างทุกจุด
+                                probe_r=tip_r, calib=calib)
+    recs = iter(point_map)   # ลำดับเดียวกับการเขียน G38.2 ด้านล่างทุกจุด
 
     lines = []
 
@@ -776,12 +707,12 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     lines.append(f"; 3D ProbeCode - GRBL Probe Program (View: {view_name})")
     lines.append(f"; Holes: {len(ordered)}  Safe Z: {settings.safe_z:.2f} mm  "
                  f"Probe Feed: {settings.probe_feedrate:.0f} mm/min")
-    if getattr(probe_profile, 'double_touch', False):   # v13
+    if getattr(probe_profile, 'double_touch', False):
         lines.append(f"; DOUBLE TOUCH: back off {float(probe_profile.retouch_distance):.2f} mm, "
                      f"{max(1, int(getattr(probe_profile, 'retouch_count', 1) or 1))} slow re-touch(es) at "
                      f"F{float(probe_profile.retouch_feed):.0f} after {float(getattr(probe_profile, 'retouch_dwell', 0) or 0):g} s"
                      f" — the median of the slow touches is the measured value")
-    if zero_note:   # v09: Work zero ที่ผู้ใช้เลือก (core/work_zero.py)
+    if zero_note:   # Work zero ที่ผู้ใช้เลือก (core/work_zero.py)
         lines.append(f"; WORK ZERO: X0 Y0 Z0 = {zero_note}")
         lines.append("; BEFORE RUNNING: touch off that point and Set Zero X/Y/Z there.")
     else:
@@ -800,7 +731,7 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
     lines.append(f"G0 Z{settings.safe_z:.3f}")
     lines.append("")
 
-    cal = calib_contacts(calib, tip_r)   # v17: คาลิเบรตหัวโพรบที่ผนังนอกก่อนเข้ารู
+    cal = calib_contacts(calib, tip_r)   # คาลิเบรตหัวโพรบที่ผนังนอกก่อนเข้ารู
     if cal:
         lines.append(f"; --- Tip calibration: outer walls X-, X+, Y-, Y+ at {CALIB_DEPTH:g} mm below the top "
                      f"(Effective Tip for this run) ---")
@@ -844,22 +775,22 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
 
             contacts = _layer_contacts(lyr)
             n        = len(contacts)
-            early    = contact_shift(tip_r, lyr.get('slope', 0.0))   # v13 (ใช้เมื่อไม่มีตาราง B-Rep)
+            early    = contact_shift(tip_r, lyr.get('slope', 0.0))   # (ใช้เมื่อไม่มีตาราง B-Rep)
             for pt_i, (start, normal, dist) in enumerate(contacts):
                 target = _probe_target(next(recs), start, normal, dist, early, tip_r,
-                                       settings.overtravel)   # v17
+                                       settings.overtravel)
 
-                # v07: ช่องสี่เหลี่ยม — ไปจุดเริ่มบนเส้นกึ่งกลางช่องก่อน (ช่องนูน
+                # ช่องสี่เหลี่ยม — ไปจุดเริ่มบนเส้นกึ่งกลางช่องก่อน (ช่องนูน
                 # จึงเดินตรงจากจุดศูนย์กลางได้โดยไม่ชนผนัง)
                 if not np.allclose(start, c):
                     lines.append(f"G0 X{start[0]:.3f} Y{start[1]:.3f} Z{start[2]:.3f} "
                                  f"; point {pt_i + 1}/{n} — approach")
 
                 lines.extend(_touch_lines(target, normal, settings, probe_profile,
-                                          f"point {pt_i + 1}/{n}", "wall"))   # v13
+                                          f"point {pt_i + 1}/{n}", "wall"))
                 lines.append(f"G0 X{c[0]:.3f} Y{c[1]:.3f} Z{c[2]:.3f} ; return to center")
 
-        plan = floor_probe_plan(hole, z_trigger)   # v12: แตะพื้นก้นรูแนวแกนรู (Z trigger)
+        plan = floor_probe_plan(hole, z_trigger)   # แตะพื้นก้นรูแนวแกนรู (Z trigger)
         if plan is not None:
             fp, ax = plan
             start  = fp - (tip_r + FLOOR_APPROACH) * ax              # ลูกบอลลอยเหนือพื้น FLOOR_APPROACH
@@ -867,12 +798,12 @@ def generate_gcode(holes, probe_profile, settings: GCodeSettings, view_name: str
                                    settings.overtravel, floor=True)  # เลยจุดแตะพื้นได้ไม่เกิน overtravel
             lines.append(f"G0 X{start[0]:.3f} Y{start[1]:.3f} Z{start[2]:.3f} ; floor — approach")
             lines.extend(_touch_lines(target, ax, settings, probe_profile,
-                                      "floor (Z trigger)", "floor"))   # v13
+                                      "floor (Z trigger)", "floor"))
             lines.append(f"G0 X{start[0]:.3f} Y{start[1]:.3f} Z{start[2]:.3f} ; floor — retract")
         lines.append("")
 
-    lines.append(f"G0 Z{settings.safe_z:.3f} ; v14: lift to safe Z first")
-    lines.append("G0 X0 Y0 ; v14: back to work zero X0 Y0 (stays at safe Z)")
+    lines.append(f"G0 Z{settings.safe_z:.3f} ; lift to safe Z first")
+    lines.append("G0 X0 Y0 ; back to work zero X0 Y0 (stays at safe Z)")
     lines.append("M30 ; program end")
 
     return "\n".join(lines), skipped, point_map

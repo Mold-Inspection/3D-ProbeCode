@@ -1,20 +1,38 @@
 # ==============================================================================
-# core/user_settings.py — จำค่าตั้งของผู้ใช้ข้ามการเปิดโปรแกรม
+# core/user_settings.py — จำค่าตั้งใน settings.json
 # ==============================================================================
-# VERSION: 01
-# หน้าที่: เก็บค่าที่ผู้ใช้ตั้งไว้ (แบบเดียวกับ "cookie" ของเว็บ แต่เป็นไฟล์ในเครื่อง)
-# ไว้ที่ %APPDATA%\3D ProbeCode\settings.json แล้วโหลดกลับตอนเปิดโปรแกรมครั้งถัดไป
+# สรุปหน้าที่:
+#   จำค่าตั้งของผู้ใช้ข้ามการเปิดโปรแกรม ใน %APPDATA%\3D
+#   ProbeCode\settings.json
 #
-# หมวดที่เก็บ (key บนสุดของไฟล์ JSON):
-#   work_zero   — จุด X0 Y0 Z0 ที่เลือก (core/work_zero.py)
-#   appearance  — "Light" / "Dark"
-#   probe       — Hardware Setting → Probe Stylus
-#   machine     — Hardware Setting → Machine Working Area
-#   export      — G-code Export → Export Settings (ยกเว้น Safe Z ซึ่งขึ้นกับชิ้นงาน)
-#   axis_test   — G-code Export → Axis Test (ยกเว้นขนาดชิ้นงาน ซึ่งขึ้นกับชิ้นงาน)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (get, py, save_section)
+#     - ui/centre_check_dialog.py — ถามว่า Set up แล้วหรือยังก่อน Run inspection (get, save_section)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (save_section)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (get, save_section)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (get, save_section)
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (apply_numbers, get, load, py, save_section)
+#     - ui/openbuilds_logger.py — ตัวบันทึก log เบื้องหลังและส่ง G-code (get, py, save_section)
+#   ไลบรารีภายนอก: json, os
 #
-# อ่าน/เขียนไม่สำเร็จ (ไฟล์เสีย, ไม่มีสิทธิ์เขียน) จะไม่ทำให้โปรแกรมล้ม — ใช้ค่าเริ่มต้นแทน
+# รายละเอียด:
+#   จำค่าตั้งของผู้ใช้ข้ามการเปิดโปรแกรม
+#
+#   หน้าที่: เก็บค่าที่ผู้ใช้ตั้งไว้ (แบบเดียวกับ "cookie" ของเว็บ แต่เป็นไฟล์ในเครื่อง)
+#   ไว้ที่ %APPDATA%\3D ProbeCode\settings.json แล้วโหลดกลับตอนเปิดโปรแกรมครั้งถัดไป
+#
+#   หมวดที่เก็บ (key บนสุดของไฟล์ JSON):
+#     work_zero   — จุด X0 Y0 Z0 ที่เลือก (core/work_zero.py)
+#     appearance  — "Light" / "Dark"
+#     probe       — Hardware Setting → Probe Stylus
+#     machine     — Hardware Setting → Machine Working Area
+#     export      — G-code Export → Export Settings (ยกเว้น Safe Z ซึ่งขึ้นกับชิ้นงาน)
+#     axis_test   — G-code Export → Axis Test (ยกเว้นขนาดชิ้นงาน ซึ่งขึ้นกับชิ้นงาน)
+#
+#   อ่าน/เขียนไม่สำเร็จ (ไฟล์เสีย, ไม่มีสิทธิ์เขียน) จะไม่ทำให้โปรแกรมล้ม — ใช้ค่าเริ่มต้นแทน
 # ==============================================================================
+
 import json
 import os
 

@@ -1,74 +1,55 @@
 # ==============================================================================
-# ui/main_window.py — หน้าต่างหลักของโปรแกรม (UIManager)
+# ui/main_window.py — หน้าต่างหลัก UIManager
 # ==============================================================================
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   root.geometry(...)      = ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล)
-#   sidebar_left width       = ความกว้าง Sidebar ซ้าย (แถบควบคุม)
-#   sidebar_right width      = ความกว้าง Sidebar ขวา (รายการรู)
-#   colors (cmap)            = สีไล่ระดับความลึกบนกราฟ 2D (ขาว→เหลือง→ส้ม→แดง)
-#   self.fig = Figure(figsize=...) = ขนาดพื้นที่วาดกราฟ
-#   Z-Layers options          = ตัวเลือกจำนวนชั้นตรวจสอบที่ผู้ใช้เลือกได้ใน dropdown
-#   Points/Layer options      = ตัวเลือกจำนวนจุดตรวจสอบต่อชั้นที่ผู้ใช้เลือกได้
-#   zigzag degree min/max      = ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า (ค่าเริ่มต้น 1–180°)
-#   self.probe_profile        = ค่าเริ่มต้นหัวโพรบ กำหนดจริงใน core/probe_profile.py
-#   self.machine_profile      = ค่าเริ่มต้นพื้นที่ทำงานเครื่อง กำหนดจริงใน core/machine_profile.py
-#   _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
-#                                — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
+# สรุปหน้าที่:
+#   หน้าต่างหลัก (UIManager): ประกอบทุกส่วน จัดการสถานะของแอป (ไฟล์ มุมมอง
+#   รูที่เลือก ค่าตั้งต่อรู) การสลับแท็บ รายการรูด้านซ้าย
+#   และการ์ดตั้งค่าของแต่ละรู
+#
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (GCodeExportPanel)
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (contact_plan_report)
+#     - core/machine_profile.py — ระยะเดินของเครื่อง (MachineProfile)
+#     - core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ (HoleFeature, HoleSegmentSetting, MAX_LAYERS, MIN_LAYERS, clamp_layers, hole_floor_depth, …)
+#     - core/probe_profile.py — ข้อมูลหัววัดและ Effective Tip (ProbeProfile)
+#     - core/projector.py — ฉายโมเดล 3D เป็นภาพ 2D ตามมุมมอง (view_rotation_matrix)
+#     - core/ui_notify.py — popup แจ้งเตือน (UINotify)
+#     - core/user_settings.py — จำค่าตั้งใน settings.json (apply_numbers, get, load, py, save_section)
+#     - core/work_zero.py — ตำแหน่ง Work Zero ของ G-code (DEFAULT_WORK_ZERO, DEFAULT_Z0_REF, WORK_ZERO_CHOICES, Z0_REF_CHOICES)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (EvaluationLeftPanel)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (EvaluationSidebarPanel)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (HardwareSettingDialog)
+#     - ui/openbuilds_logger.py — ตัวบันทึก log เบื้องหลังและส่ง G-code (OpenBuildsLogger)
+#     - ui/tab_strip.py — แถบปุ่มสลับแท็บ (TabStrip)
+#     - ui/tabs/customization_tab.py — แท็บ Customization (ภาพ 3D เส้นทางโพรบ) (CustomizationTab)
+#     - ui/tabs/evaluation_tab.py — แท็บ Evaluation (กราฟผล) (EvaluationTab)
+#     - ui/tabs/path_mapper_tab.py — แท็บ Path Mapper (ลำดับการเดิน) (PathMapperTab)
+#     - ui/tabs/selection_tab.py — แท็บ Selection (ภาพ 2D ความลึก) (SelectionTab)
+#     - ui/theme.py — สีและธีม (ACCENT, ACCENT_HOVER, ACCENT_TEXT, BG_CANVAS, BG_CARD, BG_CARD_HOVER, …)
+#     - ui/tool_bar.py — แถบเครื่องมือด้านบน (ToolBar)
+#   ถูกใช้งานโดย:
+#     - main.py — จุดเริ่มโปรแกรม (UIManager)
+#   ไลบรารีภายนอก: cadquery, contextlib, customtkinter, matplotlib, numpy, os, threading, tkinter, trimesh
+#
+# รายละเอียด:
+#   หน้าต่างหลักของโปรแกรม (UIManager)
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     root.geometry(...)      = ขนาดหน้าต่างเริ่มต้น (กว้าง x สูง, พิกเซล)
+#     sidebar_left width       = ความกว้าง Sidebar ซ้าย (แถบควบคุม)
+#     sidebar_right width      = ความกว้าง Sidebar ขวา (รายการรู)
+#     colors (cmap)            = สีไล่ระดับความลึกบนกราฟ 2D (ขาว→เหลือง→ส้ม→แดง)
+#     self.fig = Figure(figsize=...) = ขนาดพื้นที่วาดกราฟ
+#     Z-Layers options          = ตัวเลือกจำนวนชั้นตรวจสอบที่ผู้ใช้เลือกได้ใน dropdown
+#     Points/Layer options      = ตัวเลือกจำนวนจุดตรวจสอบต่อชั้นที่ผู้ใช้เลือกได้
+#     zigzag degree min/max      = ช่วงองศาต่อชั้นที่ยอมให้ตั้งค่า (ค่าเริ่มต้น 1–180°)
+#     self.probe_profile        = ค่าเริ่มต้นหัวโพรบ กำหนดจริงใน core/probe_profile.py
+#     self.machine_profile      = ค่าเริ่มต้นพื้นที่ทำงานเครื่อง กำหนดจริงใน core/machine_profile.py
+#     _hole_tab_default_color() = สีพื้นหลังการ์ดรู (resting state) ตามระดับ warning
+#                                  — แดง/เหลือง/ฟ้า ปรับ hex สีได้ในฟังก์ชันนี้
 # ==============================================================================
-# VERSION: 32
-# CHANGE LOG (v31 -> v32): โหลด effective_tip_xy_date (วันที่ตั้ง Effective Tip แยกแกน)
-# CHANGE LOG (v30 -> v31): ค่าเริ่มต้น evaluation_tip_xy = True (Effective Tip แยก X/Y) — sphere 4/11 และ
-#   taper 5/11 (หลังแก้ $1=255) ผนัง X/Y ตรงกัน, roundness 0.3 → 0.05, จุด fail ลดลง
-# CHANGE LOG (v29 -> v30): ค่าเริ่มต้น evaluation_pretravel_travel = True (แบบจำลอง travel บนผนังเอียง)
-# CHANGE LOG (v28 -> v29): part_alignment (Feature 1 — จาก Set up) + evaluation_align (ค่าเริ่มต้นเปิด)
-# CHANGE LOG (v27 -> v28):
-#   โหลด effective_tip_dx / effective_tip_dy (Effective Tip แยกแกน) และ evaluation_tip_xy (ค่าเริ่มต้นปิด)
-# CHANGE LOG (v26 -> v27):
-#   โหลด retouch_count / retouch_dwell (Probe Stylus) จาก settings
-# CHANGE LOG (v25 -> v26):
-#   evaluation_compensate (Tip compensation ในแท็บ Evaluation, จำค่า) + calib_true_size
-# CHANGE LOG (v24 -> v25):
-#   โหลด evaluation_best_fit (Best-fit centre ในแท็บ Evaluation) จาก settings
-# CHANGE LOG (v23 -> v24):
-#   job_gcode (G-code ตรวจรูที่รันจากแท็บ Evaluation — ล้างเมื่อโหลด STEP ใหม่) และ centre_done
-# CHANGE LOG (v22 -> v23):
-#   โหลด probe_profile.double_touch / retouch_distance / retouch_feed จาก settings
-# CHANGE LOG (v21 -> v22):
-#   โหลด self.z0_ref (วิธีตั้ง Z0: ก้นลูกบอล/จุดศูนย์กลางลูกบอล — core/work_zero.py)
-# CHANGE LOG (v20 -> v21):
-#   โหลด probe_profile.floor_clearance / z_trigger จาก settings แล้วตั้ง core.models.
-#   set_floor_safety() (ระยะเผื่อพื้นของชั้นวัด) + checkbox "Measure floor depth (Z)"
-#   ในการ์ด Properties ของแต่ละรู (ใช้ได้เมื่อเปิด Z trigger และรูมีพื้น) —
-#   refresh_floor_options() อัปเดตการ์ดเมื่อเปลี่ยนค่าใน Hardware Setting
-# CHANGE LOG (v19 -> v20):
-#   FEATURE: self.openbuilds_logger (ui/openbuilds_logger.py) — บันทึก log ของทุก
-#   job ใน OpenBuilds Control อัตโนมัติ เริ่มทำงานทันทีที่เปิดหน้าต่างหลัก
-#   (ปิดได้ที่ checkbox ในแท็บ Evaluation — จำค่าไว้)
-# CHANGE LOG (v18 -> v19):
-#   FIX: ขนาดชิ้นงาน (Width X / Length Y / Thickness Z) ตามการหมุนจอแล้ว —
-#   หมุน 90°/270° ค่ากว้าง/ยาวสลับกัน และบอกว่าตรงกับแกนไหนของโมเดล
-# CHANGE LOG (v17 -> v18):
-#   FEATURE: ช่องสี่เหลี่ยม (core/models.py::StepPocket) — Hole schedule
-#   คอลัมน์ "Dia" เปลี่ยนเป็น "Size" (รูกลม = เส้นผ่านศูนย์กลาง, ช่อง =
-#   ยาว×กว้าง) และการ์ด Properties แสดงชนิด/ขนาด/รัศมีมุมของช่อง
-# CHANGE LOG (v16 -> v17):
-#   FEATURE (user request — merge-into-one-click + rename to "Schema"):
-#   renamed the v16 state field to match ui/evaluation_left_panel.py v07 /
-#   core/expected_points_io.py v03's "Schema" terminology:
-#     self.loaded_export_record -> self.loaded_schema   # full dict from
-#                                   # core/expected_points_io.py::
-#                                   # load_schema_json() (points +
-#                                   # settings_snapshot + metadata, all
-#                                   # from one export — same shape as
-#                                   # before, just renamed field/file)
-#   No other change — v07 of evaluation_left_panel.py now applies a
-#   loaded schema's settings_snapshot to app.current_holes immediately on
-#   load (via core/evaluation_engine.py v04's apply_settings_snapshot()),
-#   reusing the existing _refresh_after_inspection_toggle() below
-#   unmodified for renumbering/treeview/tab-redraw — no changes needed to
-#   that method or anywhere else in this file. See v16's changelog (and
-#   v14's before it) for older history.
-# ==============================================================================
+
 import os
 import contextlib
 import threading
@@ -140,7 +121,7 @@ def _build_segment_settings(sh) -> list:
         HoleSegmentSetting(idx, seg.radius_open, seg.radius_deep, seg.depth)
         for idx, seg in enumerate(segs)
     ]
-    validate_segment_reachability(result)   # v06: auto-flag unreachable segments
+    validate_segment_reachability(result)   # auto-flag unreachable segments
     return result
 
 
@@ -165,7 +146,7 @@ class UIManager:
         self._visible_hole_map  = {}
 
         self.probe_profile   = ProbeProfile()
-        self.machine_profile = MachineProfile()   # v14: previously unused — now consumed by hardware_setting_dialog.py
+        self.machine_profile = MachineProfile()   # previously unused — now consumed by hardware_setting_dialog.py
 
         # ค่าที่ผู้ใช้ตั้งไว้ครั้งก่อน (%APPDATA%\3D ProbeCode\settings.json — core/user_settings.py)
         _saved = user_settings.load()
@@ -178,13 +159,13 @@ class UIManager:
                                     allow_zero=('wall_clearance', 'effective_tip_diameter', 'floor_clearance',
                                                 'effective_tip_dx', 'effective_tip_dy',
                                                 'stylus_tilt_deg', 'retouch_dwell'))
-        self.probe_profile.retouch_count = max(1, int(self.probe_profile.retouch_count))   # v27
+        self.probe_profile.retouch_count = max(1, int(self.probe_profile.retouch_count))
         self.probe_profile.effective_tip_xy_date = str((_saved.get('probe') or {}).get(
-            'effective_tip_xy_date', '') or '')                                                  # v32
-        self.probe_profile.z_trigger = bool((_saved.get('probe') or {}).get('z_trigger', False))   # v21
+            'effective_tip_xy_date', '') or '')
+        self.probe_profile.z_trigger = bool((_saved.get('probe') or {}).get('z_trigger', False))
         self.probe_profile.double_touch = bool((_saved.get('probe') or {}).get(
-            'double_touch', self.probe_profile.DEFAULT_DOUBLE_TOUCH))                                # v23
-        set_floor_safety(self.probe_profile.tip_radius, self.probe_profile.floor_clearance)      # v21
+            'double_touch', self.probe_profile.DEFAULT_DOUBLE_TOUCH))
+        set_floor_safety(self.probe_profile.tip_radius, self.probe_profile.floor_clearance)
         user_settings.apply_numbers(self.machine_profile, _saved.get('machine'),
                                     ('x_travel', 'y_travel', 'z_travel'))
         self.appearance_mode = (_saved.get('appearance')
@@ -192,37 +173,37 @@ class UIManager:
         _zero = _saved.get('work_zero')
         self.inspection_selected_holes = []
 
-        # v12: Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
+        # Evaluation tab state — see PLAN_evaluation-tab-openbuilds-log-comparison_v02.md
         self.loaded_step_filepath  = None   # เต็ม path ของไฟล์ STEP ที่โหลดล่าสุด (None ถ้ายังไม่โหลด)
-        self.evaluation_best_fit = bool(user_settings.get('evaluation_best_fit', False))   # v25
-        self.evaluation_compensate = bool(user_settings.get('evaluation_compensate', True))   # v26
-        # v30: ค่าเริ่มต้น travel — หัวโพรบทริกแนว Z ไม่ได้ (ลูกบอลคงความสูง เครื่องเดินต่อตามทิศที่โพรบ) ทดสอบ
+        self.evaluation_best_fit = bool(user_settings.get('evaluation_best_fit', False))
+        self.evaluation_compensate = bool(user_settings.get('evaluation_compensate', True))
+        # ค่าเริ่มต้น travel — หัวโพรบทริกแนว Z ไม่ได้ (ลูกบอลคงความสูง เครื่องเดินต่อตามทิศที่โพรบ) ทดสอบ
         #      2026-11-04 รู sphere: |dev| 0.198 → 0.113 และผิดพลาดไม่โตตามความลึก
-        self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', True))   # v26 / v30
-        self.evaluation_tip_xy = bool(user_settings.get('evaluation_tip_xy', True))   # v28: Effective Tip แยก X/Y
-        self.evaluation_align = bool(user_settings.get('evaluation_align', True))      # v29: Feature 1
-        self.part_alignment = None   # v29: ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up ล่าสุด
-        self.job_gcode   = None   # v24: G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
-        self.centre_done = None   # v24: {'model': path STEP, 'time': datetime} — Find centre สำเร็จล่าสุด
+        self.evaluation_pretravel_travel = bool(user_settings.get('evaluation_pretravel_travel', True))   # /
+        self.evaluation_tip_xy = bool(user_settings.get('evaluation_tip_xy', True))   # Effective Tip แยก X/Y
+        self.evaluation_align = bool(user_settings.get('evaluation_align', True))      # Feature 1
+        self.part_alignment = None   # ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up ล่าสุด
+        self.job_gcode   = None   # G-code ตรวจรูที่จะรันจากแท็บ Evaluation (evaluation_left_panel.make_job)
+        self.centre_done = None   # {'model': path STEP, 'time': datetime} — Find centre สำเร็จล่าสุด
         self.loaded_step_filename  = None   # basename อย่างเดียว — ใช้แสดงผลใน Evaluation left panel
         self.evaluation_result     = None   # dict ผลตรวจล่าสุด (ดู contract ใน ui/tabs/evaluation_tab.py)
         self.evaluation_tolerance_mm = 0.5  # ค่า tolerance เริ่มต้น (mm) — ปรับได้จาก Evaluation right sidebar
         self.last_export_snapshot  = None   # snapshot ตอน export G-code ล่าสุด (live path) — เขียนโดย core/gcode_export_panel.py
         # จุด X0 Y0 Z0 ของ G-code (core/work_zero.py) — เลือกได้ใน G-code Export, จำข้ามการเปิดโปรแกรม
         self.work_zero = _zero if _zero in dict(WORK_ZERO_CHOICES) else DEFAULT_WORK_ZERO
-        # v22: Z0 ตั้งด้วยก้นลูกบอล ('tip', ค่าเริ่มต้น) หรือจุดศูนย์กลางลูกบอล ('center')
+        # Z0 ตั้งด้วยก้นลูกบอล ('tip', ค่าเริ่มต้น) หรือจุดศูนย์กลางลูกบอล ('center')
         self.z0_ref = _saved.get('z0_ref') if _saved.get('z0_ref') in dict(Z0_REF_CHOICES) else DEFAULT_Z0_REF
 
-        # v15: Expected Points (.json) import state
+        # Expected Points (.json) import state
         self.loaded_expected_points        = None   # list ของ point dicts ที่โหลดมา (None = ยังไม่ได้โหลด, ใช้ live recompute จาก app.current_holes แทน)
         self.loaded_expected_points_source = None   # basename ของไฟล์ที่โหลดล่าสุด — แสดงผลใน Evaluation left panel
         self.loaded_expected_points_view   = None   # view_name จาก metadata ของไฟล์ที่โหลด (informational เท่านั้น)
 
-        # v17: Schema (.json) state (renamed from v16's "Export Record")
+        # Schema (.json) state (renamed from's "Export Record")
         self.loaded_schema = None   # dict เต็มจาก core/expected_points_io.py::load_schema_json()
                                      # (points + settings_snapshot + metadata จาก export ครั้งเดียวกันเสมอ)
                                      # None = ยังไม่ได้โหลด schema ใด ๆ — loaded_expected_points ด้านบนจะว่างตามไปด้วย
-                                     # v07 ของ ui/evaluation_left_panel.py จะเรียก apply_settings_snapshot()
+                                     # ของ ui/evaluation_left_panel.py จะเรียก apply_settings_snapshot()
                                      # ทันทีตอนโหลดสำเร็จ (แทนที่ค่าปัจจุบันทั้งหมด) ไม่ใช่แค่เก็บไว้เฉย ๆ
 
         self.selection_tab     = SelectionTab(self)
@@ -300,17 +281,17 @@ class UIManager:
         self._setup_right_sidebar()
         self.selection_tab.setup_events()
 
-        # v14: floating dialogs opened from the toolbar (replaces the old
+        # floating dialogs opened from the toolbar (replaces the old
         # inline sidebar panels for Probe Stylus / G-code Export).
         self.hardware_setting_dialog = HardwareSettingDialog(self)
         self.gcode_export_panel      = GCodeExportPanel(self)
-        self.notify = UINotify(self)   # v15: non-blocking toast — see core/ui_notify.py
-        # v12: Evaluation tab's own sidebars — built as siblings of the
+        self.notify = UINotify(self)   # non-blocking toast — see core/ui_notify.py
+        # Evaluation tab's own sidebars — built as siblings of the
         # normal sidebar content (self._left_scroll / self.normal_right_frame)
         # so on_nav_change() can pack_forget() one pair and pack() the other.
         # Not packed here — _show_normal_sidebars() (called at startup below)
         # leaves the normal sidebars visible by default.
-        self.openbuilds_logger        = OpenBuildsLogger(self)   # v20: ต้องมีก่อน Evaluation panel
+        self.openbuilds_logger        = OpenBuildsLogger(self)   # ต้องมีก่อน Evaluation panel
         self.evaluation_left_panel    = EvaluationLeftPanel(self)
         self.evaluation_sidebar_panel = EvaluationSidebarPanel(self)
 
@@ -439,12 +420,12 @@ class UIManager:
         self._view_locked = is_locked
         self._update_rotate_button()
         for btn in self.view_buttons.values(): btn.configure(state=rotate_state)
-        self.tool_bar.btn_reset.configure(state="normal")        # v14: was self.btn_reset
+        self.tool_bar.btn_reset.configure(state="normal")        # was self.btn_reset
         self.btn_detect.configure(state="disabled" if is_locked else "normal")
         self.btn_clear.configure(state="normal" if is_locked else "disabled")
 
     # ------------------------------------------------------------------
-    # v12: sidebar swap for the Evaluation tab
+    # sidebar swap for the Evaluation tab
     # ------------------------------------------------------------------
     def _show_normal_sidebars(self):
         """คืน sidebar ซ้าย/ขวาปกติ (Upload/Dimensions/View ซ้าย, Detected
@@ -491,7 +472,7 @@ class UIManager:
         self.sidebar_right.pack(side="right", fill="y", before=self.center_frame)
 
         if selected_tab in ("Customization", "Evaluation"):
-            self.tool_bar.btn_reset.configure(state="disabled")   # v14: was self.btn_reset
+            self.tool_bar.btn_reset.configure(state="disabled")   # was self.btn_reset
         else:
             self.tool_bar.btn_reset.configure(state="normal" if self.geo.mesh is not None else "disabled")
 
@@ -536,7 +517,7 @@ class UIManager:
         # 1400x800 เอง — จึงต้องสั่ง maximize หลัง mainloop เริ่มทำงานแล้ว
         self.root.after(0, self._maximize)
         self.root.after(300, self._warm_up_heavy_imports)
-        self.root.after(500, self.openbuilds_logger.start_if_enabled)   # v20
+        self.root.after(500, self.openbuilds_logger.start_if_enabled)
         self.root.mainloop()
 
     def _warm_up_heavy_imports(self):
@@ -590,7 +571,7 @@ class UIManager:
             return
 
         self.loaded_step_filepath = filepath
-        self.job_gcode = None   # v24: G-code ของไฟล์ก่อนหน้าใช้กับชิ้นนี้ไม่ได้
+        self.job_gcode = None   # G-code ของไฟล์ก่อนหน้าใช้กับชิ้นนี้ไม่ได้
         self.loaded_step_filename = os.path.basename(filepath)
         self.lbl_file.configure(text=self.loaded_step_filename, text_color=theme.TEXT)
 
@@ -616,7 +597,7 @@ class UIManager:
         if self.geo.mesh is None:
             return
 
-        # v19: ขนาดตามแกนบนจอ/บนเครื่อง (X ขวา, Y ขึ้นบนจอ, Z หนา) รวมการหมุน
+        # ขนาดตามแกนบนจอ/บนเครื่อง (X ขวา, Y ขึ้นบนจอ, Z หนา) รวมการหมุน
         # จอด้วย — เดิมไม่สนใจปุ่ม Rotate ค่ากว้าง/ยาวจึงไม่สลับกันตอนหมุน 90°
         # วงเล็บท้ายบอกว่าตรงกับแกนไหนของโมเดล
         from core.projector import view_rotation_matrix
@@ -658,7 +639,7 @@ class UIManager:
                     'layers':     getattr(h, 'layers',                  3),
                     'points':     getattr(h, 'points_per_layer',        4),
                     'segments':   getattr(h, 'segments', []),
-                    'floor':      getattr(h, 'measure_floor',           False),   # v21
+                    'floor':      getattr(h, 'measure_floor',           False),
                 }
 
             has_step = (hasattr(self.geo, 'step_data') and self.geo.step_data is not None)
@@ -694,7 +675,7 @@ class UIManager:
                     h.zigzag_degree           = state.get('zigzag_deg', 45.0)
                     h.layers                  = clamp_layers(state.get('layers', MIN_LAYERS))
                     h.points_per_layer        = state.get('points', 4)
-                    h.measure_floor           = state.get('floor', False)          # v21
+                    h.measure_floor           = state.get('floor', False)
                     old_segments = state.get('segments') or []
                     if old_segments and len(old_segments) == len(getattr(h, 'segments', [])):
                         h.segments = old_segments
@@ -785,7 +766,7 @@ class UIManager:
         self.selection_tab._restore_pins(saved_pins)
 
     # ------------------------------------------------------------------
-    # v08: Warning-driven tab (card) color
+    # Warning-driven tab (card) color
     # ------------------------------------------------------------------
     def _hole_tab_default_color(self, hole) -> str:
         """สีพื้นหลัง (resting state, ตอนไม่ได้เลือกอยู่) ของการ์ดรู
@@ -1051,10 +1032,10 @@ class UIManager:
             if hole.zigzag_inspection:
                 df.pack(fill="x", padx=15, pady=(0, 8))
 
-        self._build_floor_option(setting_frame, idx, hole)   # v21
+        self._build_floor_option(setting_frame, idx, hole)
 
     # ------------------------------------------------------------------
-    # v21: วัดความลึกพื้นก้นรู (แนว Z) — ต่อรู
+    # วัดความลึกพื้นก้นรู (แนว Z) — ต่อรู
     # ------------------------------------------------------------------
     def _floor_option_state(self, hole):
         """(ใช้ได้ไหม, ข้อความอธิบาย) ของ checkbox Measure floor depth"""
@@ -1144,7 +1125,7 @@ class UIManager:
 
     @staticmethod
     def _hole_size_lines(hole) -> str:
-        """บรรทัดขนาดในการ์ด Properties (v18: แยกรูกลม / ช่องสี่เหลี่ยม)"""
+        """บรรทัดขนาดในการ์ด Properties (แยกรูกลม / ช่องสี่เหลี่ยม)"""
         sh = getattr(hole, '_step_hole', None)
         if getattr(sh, 'shape', 'circle') == 'channel':
             ends = {0: "both ends open", 1: "one closed end"}.get(len(sh.closed_ends), "both ends closed")

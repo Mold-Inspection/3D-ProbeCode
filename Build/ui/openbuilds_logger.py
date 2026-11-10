@@ -1,41 +1,38 @@
 # ==============================================================================
-# ui/openbuilds_logger.py — ตัวบันทึก log ของ OpenBuilds Control ที่ทำงานเบื้องหลัง
-# ตั้งแต่เปิดหน้าต่างหลัก (ไม่ต้องเปิด start_openbuilds_logger.bat แยก)
+# ui/openbuilds_logger.py — ตัวบันทึก log เบื้องหลังและส่ง G-code
 # ==============================================================================
-# VERSION: 07
-# CHANGE LOG (v06 -> v07): discard_job() — ทิ้ง job ที่ยังอัดค้าง (Find centre ที่เพิ่งจบ) ก่อนเริ่ม Run inspection
-#   (Find centre v13 มีจุดแตะในขั้นท้าย ๆ — job นั้นจบหลัง Idle ไม่กี่วินาที จึงถูกบันทึก/ประเมินแทนงานตรวจรู)
-# CHANGE LOG (v05 -> v06): ensure_idle_delay() ตั้ง $1=255 ให้เองก่อน Find centre / Run inspection (ไม่ถามแล้ว)
-# CHANGE LOG (v04 -> v05):
-#   เก็บค่า GRBL ($N=ค่า) จากทุกคำตอบ (self.grbl) — อ่าน $$ เองครั้งเดียวเมื่อเครื่อง Idle หลังเชื่อมต่อ
-#   check_idle_delay(): (v06 → ensure_idle_delay) ถามก่อนงานที่เครื่องขยับ (Find centre / Run inspection) ถ้า $1 ≠ 255
-#   ($1 = step idle delay — มอเตอร์ดับหลังหยุด ก้านโพรบที่งอดันแกนไปได้ แล้วแกนดีดไป 4 full steps
-#   ~0.4 มม. ตอนจ่ายไฟกลับ — ทดสอบ 2026-11-03: $1=25 เสีย 0.40 มม./ครั้ง, $1=255 เหลือ 0.003)
-# CHANGE LOG (v03 -> v04): เก็บ last_status (status ล่าสุดจาก OpenBuilds) ให้ Find centre ตรวจตำแหน่ง Z
-# CHANGE LOG (v02 -> v03):
-#   on_event (ทุก event ใน main thread), send_gcode()/stop_machine() ส่งคำสั่งผ่าน
-#   OpenBuilds และ suppress_logs() — งานแตะผนังตั้ง zero (ui/wall_zero.py) ไม่ถูกบันทึก
-#   เป็นไฟล์ log งานวัด
-# CHANGE LOG (v01 -> v02):
-#   ตั้งค่าได้ที่ Hardware Setting → Auto Log: โฟลเดอร์ + รูปแบบชื่อไฟล์ (log_name)
-#   ชื่อ job = ชื่อไฟล์ G-code ที่ export จากโปรแกรมนี้ล่าสุด (app.last_gcode_name)
-#   เพราะ OpenBuilds ไม่ส่งชื่อไฟล์ที่กำลังรันมาให้ — ไม่มีก็ใช้ชื่อไฟล์ STEP
-#   on_settings: callback เมื่อค่าตั้งเปลี่ยน (ให้ checkbox ในแต่ละหน้าตรงกัน)
-# หน้าที่: ถือการเชื่อมต่อ OpenBuilds Control ตัวเดียวของทั้งแอป (core/openbuilds_link.py)
-# ทุก job ที่มีจุดโพรบ → เขียน <log_dir>/<ชื่อตาม log_name>.log แล้วแจ้งผู้ฟัง
-# (ปุ่ม Record ในแท็บ Evaluation ฟังจากที่นี่เพื่อประเมินผล job ถัดไป)
+# สรุปหน้าที่:
+#   ตัวบันทึก log เบื้องหลังของหน้าต่างหลัก: ใช้ OpenBuildsLink + JobRecorder
+#   ส่ง G-code อ่านค่า $$ ตั้ง $1=255 และแจ้งเมื่อมี log ใหม่
 #
-# event จาก thread ของ OpenBuildsLink ถูกส่งผ่าน queue แล้วประมวลผลใน main thread
-# ด้วย root.after() — callback ทุกตัว (on_saved / on_status) จึงแตะ widget ได้ตรง ๆ
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/openbuilds_link.py — เชื่อม socket.io ของ OpenBuilds และบันทึก job เป็น .log (JobRecorder, OpenBuildsLink, default_log_dir, write_job_log)
+#     - core/user_settings.py — จำค่าตั้งใน settings.json (get, py, save_section)
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (OpenBuildsLogger)
+#   ไลบรารีภายนอก: os, queue, re, time
 #
-# ค่าที่จำไว้ (core/user_settings.py, section "openbuilds"):
-#   auto_log = True/False — เริ่มบันทึกอัตโนมัติตอนเปิดโปรแกรม (ค่าเริ่มต้น True)
-#   log_dir  = โฟลเดอร์เก็บไฟล์ (ค่าเริ่มต้น Documents\3D ProbeCode\Logs)
-#   log_name = "both" (ชื่อ job + เวลา) / "time" / "job" — core/openbuilds_link.LOG_NAME_CHOICES
+# รายละเอียด:
+#   ตัวบันทึก log ของ OpenBuilds Control ที่ทำงานเบื้องหลัง
+#   ตั้งแต่เปิดหน้าต่างหลัก (ไม่ต้องเปิด start_openbuilds_logger.bat แยก)
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   _POLL_MS = ความถี่ที่ดึง event จาก queue เข้ามาประมวลผล (ms)
+#   หน้าที่: ถือการเชื่อมต่อ OpenBuilds Control ตัวเดียวของทั้งแอป (core/openbuilds_link.py)
+#   ทุก job ที่มีจุดโพรบ → เขียน <log_dir>/<ชื่อตาม log_name>.log แล้วแจ้งผู้ฟัง
+#   (ปุ่ม Record ในแท็บ Evaluation ฟังจากที่นี่เพื่อประเมินผล job ถัดไป)
+#
+#   event จาก thread ของ OpenBuildsLink ถูกส่งผ่าน queue แล้วประมวลผลใน main thread
+#   ด้วย root.after() — callback ทุกตัว (on_saved / on_status) จึงแตะ widget ได้ตรง ๆ
+#
+#   ค่าที่จำไว้ (core/user_settings.py, section "openbuilds"):
+#     auto_log = True/False — เริ่มบันทึกอัตโนมัติตอนเปิดโปรแกรม (ค่าเริ่มต้น True)
+#     log_dir  = โฟลเดอร์เก็บไฟล์ (ค่าเริ่มต้น Documents\3D ProbeCode\Logs)
+#     log_name = "both" (ชื่อ job + เวลา) / "time" / "job" — core/openbuilds_link.LOG_NAME_CHOICES
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     _POLL_MS = ความถี่ที่ดึง event จาก queue เข้ามาประมวลผล (ms)
 # ==============================================================================
+
 import os
 import queue
 import re
@@ -60,10 +57,10 @@ class OpenBuildsLogger:
         self.on_saved = []      # callback(job, path) หลังบันทึกไฟล์แต่ละ job
         self.on_status = []     # callback(text) เมื่อสถานะเปลี่ยน
         self.on_settings = []   # callback() เมื่อค่าตั้ง (auto_log / log_dir / log_name) เปลี่ยน
-        self.on_event = []      # v03: callback(name, payload) ทุก event จาก OpenBuilds (main thread)
-        self._quiet_until = 0.0 # v03: งานที่จบก่อนเวลานี้ไม่บันทึก log (งานแตะผนังตั้ง zero)
-        self.last_status = None # v04: status ล่าสุดจาก OpenBuilds (ใช้ตรวจตำแหน่งก่อน Find centre)
-        self.grbl = {}          # v05: ค่า GRBL ล่าสุด {เลข $: float} จากคำตอบของ $$
+        self.on_event = []      # callback(name, payload) ทุก event จาก OpenBuilds (main thread)
+        self._quiet_until = 0.0 # งานที่จบก่อนเวลานี้ไม่บันทึก log (งานแตะผนังตั้ง zero)
+        self.last_status = None # status ล่าสุดจาก OpenBuilds (ใช้ตรวจตำแหน่งก่อน Find centre)
+        self.grbl = {}          # ค่า GRBL ล่าสุด {เลข $: float} จากคำตอบของ $$
         self._asked_settings = False
 
     # ------------------------------------------------------------------
@@ -170,14 +167,14 @@ class OpenBuildsLogger:
                     self.connected = bool(a)
                     self._set_status(self._ready_text() if a else f"⚠ {b}")
                     continue
-                if a == "status" and isinstance(b, dict):   # v04: สถานะล่าสุด (ตำแหน่ง, alarm)
+                if a == "status" and isinstance(b, dict):   # สถานะล่าสุด (ตำแหน่ง, alarm)
                     self.last_status = b
                     self._read_settings_once(b)
-                elif a == "data" and isinstance(b, dict):    # v05: $N=ค่า จาก $$ (ของใครก็ได้)
+                elif a == "data" and isinstance(b, dict):    # $N=ค่า จาก $$ (ของใครก็ได้)
                     m = _SETTING.match(str(b.get("response") or "").strip())
                     if m:
                         self.grbl[int(m.group(1))] = float(m.group(2))
-                for cb in list(self.on_event):   # v03
+                for cb in list(self.on_event):
                     try:
                         cb(a, b)
                     except Exception as e:
@@ -194,7 +191,7 @@ class OpenBuildsLogger:
         self.app.root.after(_POLL_MS, self._poll)
 
     # ------------------------------------------------------------------
-    # v03: ส่งคำสั่งให้เครื่อง (ผ่าน OpenBuilds Control)
+    # ส่งคำสั่งให้เครื่อง (ผ่าน OpenBuilds Control)
     # ------------------------------------------------------------------
     def send_gcode(self, text: str):
         """เข้าคิวของ OpenBuilds เหมือนพิมพ์ใน console (หลายบรรทัดได้) — ต้องเชื่อมต่ออยู่"""
@@ -203,7 +200,7 @@ class OpenBuildsLogger:
         self.link.send("runCommand", text)
 
     def _read_settings_once(self, status: dict):
-        """v05: อ่าน $$ ครั้งเดียวหลังเชื่อมต่อ — เฉพาะตอน Idle และไม่มีคิว (ไม่ทำให้เครื่องขยับ)"""
+        """อ่าน $$ ครั้งเดียวหลังเชื่อมต่อ — เฉพาะตอน Idle และไม่มีคิว (ไม่ทำให้เครื่องขยับ)"""
         comms = status.get("comms") or {}
         if self._asked_settings or self.grbl or not self.connected:
             return
@@ -214,7 +211,7 @@ class OpenBuildsLogger:
         self.send_gcode("$$")
 
     def ensure_idle_delay(self):
-        """v06: ก่อนงานที่เครื่องขยับ — $1 ≠ 255 (หรือยังไม่รู้ค่า) ตั้ง $1=255 ให้เลย ไม่ถาม
+        """ก่อนงานที่เครื่องขยับ — $1 ≠ 255 (หรือยังไม่รู้ค่า) ตั้ง $1=255 ให้เลย ไม่ถาม
         (เครื่องต้อง Idle อยู่ — ผู้เรียกตรวจแล้ว; คำสั่งเข้าคิวก่อน G-code ของงานนั้น)"""
         if self.grbl.get(1) == 255:
             return
@@ -224,7 +221,7 @@ class OpenBuildsLogger:
         print("[openbuilds_logger] $1 set to 255 (motors stay powered between moves)")
 
     def discard_job(self):
-        """v07: ทิ้ง job ที่ยังอัดค้างอยู่ (ไม่บันทึก) — เรียกก่อนส่ง G-code งานใหม่ตอนเครื่อง Idle"""
+        """ทิ้ง job ที่ยังอัดค้างอยู่ (ไม่บันทึก) — เรียกก่อนส่ง G-code งานใหม่ตอนเครื่อง Idle"""
         if self.recorder is not None and self.recorder.recording:
             print(f"[openbuilds_logger] discarded an unfinished job ({self.recorder.job.probe_count} point(s))")
             self.recorder.job = None
@@ -239,7 +236,7 @@ class OpenBuildsLogger:
         self._quiet_until = time.monotonic() + float(seconds)
 
     def _on_job(self, job):
-        if time.monotonic() < self._quiet_until:   # v03: งานแตะผนังตั้ง zero — ไม่บันทึก
+        if time.monotonic() < self._quiet_until:   # งานแตะผนังตั้ง zero — ไม่บันทึก
             self._set_status(self._ready_text())
             return
         if job.probe_count == 0:

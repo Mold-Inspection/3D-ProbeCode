@@ -1,16 +1,30 @@
 # ==============================================================================
-# ui/centre_check_dialog.py — ถามก่อนรันตรวจรูจากแท็บ Evaluation ว่าตั้ง X0 Y0 Z0
-# (Find centre) ให้ชิ้นงานนี้แล้วหรือยัง
+# ui/centre_check_dialog.py — ถามว่า Set up แล้วหรือยังก่อน Run inspection
 # ==============================================================================
-# VERSION: 02
-# CHANGE LOG (v01 -> v02):
-#   ยังไม่ได้ Set up กับ CAD นี้ → ขึ้นเสมอ (ไม่สน "ไม่ต้องแสดงอีก") ปุ่มหลัก = Set up now
-# ขึ้นทุกครั้งที่กด Run จนกว่าผู้ใช้จะติ๊ก "ไม่ต้องแสดงหน้านี้อีก" (จำใน settings.json
-# section "prompts" → skip_centre_check) — ข้อความบอกด้วยว่าไฟล์ CAD นี้เพิ่งโหลดเข้ามา
-# และยังไม่ได้รัน Find centre (app.centre_done ไม่ตรงกับไฟล์ที่โหลดอยู่) หรือรันไปแล้วเมื่อไหร่
+# สรุปหน้าที่:
+#   ถามก่อน Run inspection ว่าได้ Set up (Find centre)
+#   กับชิ้นงานนี้แล้วหรือยัง
 #
-# ask_centre_ready(app) คืน "run" / "find_centre" / None (ยกเลิก)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/user_settings.py — จำค่าตั้งใน settings.json (get, save_section)
+#     - ui/theme.py — สีและธีม (ACCENT, ACCENT_HOVER, BTN_SECONDARY, BTN_SECONDARY_HOVER, TEXT, WARN_TEXT)
+#   ถูกใช้งานโดย:
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (ask_centre_ready)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (centre_done_for_current)
+#   ไลบรารีภายนอก: customtkinter
+#
+# รายละเอียด:
+#   ถามก่อนรันตรวจรูจากแท็บ Evaluation ว่าตั้ง X0 Y0 Z0
+#   (Find centre) ให้ชิ้นงานนี้แล้วหรือยัง
+#
+#   ขึ้นทุกครั้งที่กด Run จนกว่าผู้ใช้จะติ๊ก "ไม่ต้องแสดงหน้านี้อีก" (จำใน settings.json
+#   section "prompts" → skip_centre_check) — ข้อความบอกด้วยว่าไฟล์ CAD นี้เพิ่งโหลดเข้ามา
+#   และยังไม่ได้รัน Find centre (app.centre_done ไม่ตรงกับไฟล์ที่โหลดอยู่) หรือรันไปแล้วเมื่อไหร่
+#
+#   ask_centre_ready(app) คืน "run" / "find_centre" / None (ยกเลิก)
 # ==============================================================================
+
 import customtkinter as ctk
 
 from core import user_settings

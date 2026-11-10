@@ -1,18 +1,35 @@
 # ==============================================================================
-# ui/evaluation_report.py — รายงานผลตรวจเป็น PDF (Feature 2 ข้อ 5)
+# ui/evaluation_report.py — สร้างรายงาน PDF
 # ==============================================================================
-# VERSION: 02
-# CHANGE LOG (v01 -> v02): หน้า 1 แสดงการแก้ค่าที่ใช้จริง + คำเตือน (corrections_status ของหน้า Evaluation)
-# หน้าที่: สรุป app.evaluation_result เป็นไฟล์ PDF (A4 แนวตั้ง, matplotlib — ไม่ต้องติดตั้งเพิ่ม)
-#   หน้า 1  : ข้อมูลการตรวจ (STEP / log / tolerance / การชดเชย) + ผลรวม PASS/FAIL + ตารางสรุปทุกรู
-#   ต่อรู   : ตารางทุกจุด (แถวเขียว/แดง, dev มีเครื่องหมาย) + ภาพตัดมองจากบน 1 ภาพต่อ 1 ชั้นที่ตรวจ:
-#             หน้าตัด CAD ที่ความลึกของชั้น (ตัด mesh), วงผนัง CAD, จุดที่วัด (ระยะเบี่ยง × k) พร้อมลูกศร
-# สร้างใน thread แยก — ข้อมูลถูกคัดลอกจากแอปก่อนเริ่ม (หน้าจอใช้งานต่อได้ระหว่างสร้าง)
+# สรุปหน้าที่:
+#   สร้างรายงานผลตรวจเป็น PDF (A4) ด้วย Matplotlib PdfPages
 #
-# ตัวแปรที่ปรับได้:
-#   ROWS_PER_PAGE   = แถวตารางจุดต่อหน้า
-#   SECTIONS_PER_PAGE = ภาพตัดต่อหน้า (2 คอลัมน์)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/evaluation_engine.py — ประเมินจุดวัดเทียบจุดคาดหวัง (ระยะเบี่ยง ⌀ ความกลม PASS/FAIL) (hole_metrics)
+#     - core/projector.py — ฉายโมเดล 3D เป็นภาพ 2D ตามมุมมอง (view_rotation_matrix)
+#     - core/work_zero.py — ตำแหน่ง Work Zero ของ G-code (machining_origin)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (corrections_status)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (EvaluationSidebarPanel, _dir_label)
+#     - ui/tabs/evaluation_tab.py — แท็บ Evaluation (กราฟผล) (EvaluationTab)
+#   ถูกใช้งานโดย:
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (export_pdf_dialog)
+#   ไลบรารีภายนอก: copy, customtkinter, datetime, matplotlib, numpy, os, threading, tkinter, traceback
+#
+# รายละเอียด:
+#   รายงานผลตรวจเป็น PDF (Feature 2 ข้อ 5)
+#
+#   หน้าที่: สรุป app.evaluation_result เป็นไฟล์ PDF (A4 แนวตั้ง, matplotlib — ไม่ต้องติดตั้งเพิ่ม)
+#     หน้า 1  : ข้อมูลการตรวจ (STEP / log / tolerance / การชดเชย) + ผลรวม PASS/FAIL + ตารางสรุปทุกรู
+#     ต่อรู   : ตารางทุกจุด (แถวเขียว/แดง, dev มีเครื่องหมาย) + ภาพตัดมองจากบน 1 ภาพต่อ 1 ชั้นที่ตรวจ:
+#               หน้าตัด CAD ที่ความลึกของชั้น (ตัด mesh), วงผนัง CAD, จุดที่วัด (ระยะเบี่ยง × k) พร้อมลูกศร
+#   สร้างใน thread แยก — ข้อมูลถูกคัดลอกจากแอปก่อนเริ่ม (หน้าจอใช้งานต่อได้ระหว่างสร้าง)
+#
+#   ตัวแปรที่ปรับได้:
+#     ROWS_PER_PAGE   = แถวตารางจุดต่อหน้า
+#     SECTIONS_PER_PAGE = ภาพตัดต่อหน้า (2 คอลัมน์)
 # ==============================================================================
+
 import datetime
 import os
 import threading
@@ -30,7 +47,7 @@ SECTIONS_PER_PAGE = 4
 A4 = (8.27, 11.69)
 OK, BAD, CAD, INK, MUTED = "#1a7f4b", "#c62828", "#7a8794", "#111111", "#555555"
 OK_BG, BAD_BG = "#e3f4ea", "#fbe3e1"
-WARN = "#b26a00"   # v02: คำเตือนการแก้ค่า
+WARN = "#b26a00"   # คำเตือนการแก้ค่า
 
 
 def _dir_label(d):
@@ -61,7 +78,7 @@ def _snapshot(app):
         holes.append(dict(gi=gi, name=str(h.display_id), info=info, metrics=hole_metrics(info, tol, floor)))
     pp = app.probe_profile
     from ui.evaluation_left_panel import corrections_status
-    corr = corrections_status(app, res)   # v02
+    corr = corrections_status(app, res)
     return dict(res=res, v=v, f=f, tol=tol, holes=holes, corrections=corr, step=getattr(app, 'loaded_step_filename', None) or "—",
                 view=app.current_view, tip=pp.effective_tip_diameter, when=datetime.datetime.now())
 
@@ -212,7 +229,7 @@ def build_pdf(snap, path):
             fig.text(0.06, 0.86 - i * 0.022, a, fontsize=8.5, color=MUTED, va="top")
             fig.text(0.32, 0.86 - i * 0.022, b, fontsize=8.5, color=INK, va="top")
         yw = 0.86 - len(meta) * 0.022 - 0.008
-        for i, w in enumerate(warns):   # v02: การแก้ที่ไม่ได้ใช้ / Best-fit centre
+        for i, w in enumerate(warns):   # การแก้ที่ไม่ได้ใช้ / Best-fit centre
             fig.text(0.06, yw - i * 0.02, "⚠ " + w, fontsize=8.5, color=WARN, weight="bold", va="top")
         y0 = yw - len(warns) * 0.02 - 0.025
         ax = fig.add_axes([0.06, 0.08, 0.88, y0 - 0.08])

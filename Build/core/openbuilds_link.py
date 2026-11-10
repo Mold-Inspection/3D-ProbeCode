@@ -1,43 +1,51 @@
 # ==============================================================================
-# core/openbuilds_link.py — ฟังข้อมูลจาก OpenBuilds Control แบบ real-time แล้ว
-# บันทึกเป็นไฟล์ .log ของแต่ละ job อัตโนมัติ (ไม่ต้อง copy console เอง)
+# core/openbuilds_link.py — เชื่อม socket.io ของ OpenBuilds และบันทึก job เป็น .log
 # ==============================================================================
-# VERSION: 03
-# CHANGE LOG (v02 -> v03):
-#   OpenBuildsLink.send(event, payload) — ส่ง event ให้ OpenBuilds Control (เช่น
-#   'runCommand' = G-code หลายบรรทัดเข้าคิว, 'stop' = หยุด) ใช้โดยการตั้ง X/Y zero
-#   ด้วยการแตะผนัง (ui/wall_zero.py) — ส่วนอื่นยังฟังอย่างเดียวเหมือนเดิม
-# CHANGE LOG (v01 -> v02):
-#   write_job_log(): เลือกรูปแบบชื่อไฟล์ได้ (LOG_NAME_CHOICES: ชื่อ job + เวลา / เวลา /
-#   ชื่อ job) ชื่อซ้ำต่อท้าย _2, _3 ไม่เขียนทับ + บันทึกชื่อ job ในหัวไฟล์
-# หน้าที่:
-#   OpenBuildsLink  — ต่อ socket.io (v4, transport=polling) ของ OpenBuilds Control
-#                     ที่ http://localhost:3000 ซึ่งเป็นช่องทางเดียวกับที่หน้าจอของ
-#                     OpenBuilds เองใช้ แล้วส่งทุก event เข้า callback (thread แยก)
-#                     ต่อใหม่เองถ้า OpenBuilds ปิด/เปิดใหม่ — ใช้ standard library ล้วน
-#   JobRecorder     — รับ event แล้วแบ่งเป็น "job": เริ่มเมื่อมีคิว G-code (queue > 0
-#                     หรือ runStatus = Run) จบเมื่อได้ jobComplete (หรือคิวว่าง + Idle
-#                     นานเกิน _IDLE_END_S) เก็บทุกบรรทัดตอบกลับของ GRBL ใน job นั้น
-#   write_job_log() — เขียน job เป็นไฟล์ .log ที่ core/log_parser.py อ่านได้
+# สรุปหน้าที่:
+#   ต่อ socket.io ของ OpenBuilds Control (localhost:3000) ด้วย standard
+#   library ล้วน ฟัง event แบบ real-time ส่งคำสั่ง (runCommand/stop) แบ่ง
+#   event เป็น job และเขียนไฟล์ .log
 #
-# สำคัญ — พิกัดใน [PRB:x,y,z:s] ของ GRBL เป็น "พิกัดเครื่อง" (MPos) เสมอ ไม่ใช่พิกัด
-# เทียบจุด Set Zero ที่ Schema ใช้ — จึงบันทึก work offset (WCO / G54) จาก status ของ
-# OpenBuilds ไว้เป็นบรรทัด "; WCO: x,y,z" ก่อนจุดแรกและทุกครั้งที่ offset เปลี่ยน
-# log_parser.py v02 ลบ WCO ออกให้เอง: พิกัดงาน = PRB - WCO
+# ไฟล์ที่เกี่ยวข้อง:
+#   ถูกใช้งานโดย:
+#     - openbuilds_job_logger.py — โปรแกรมเสริมบันทึก .log ทุก job (รันแยก) (DEFAULT_HOST, DEFAULT_PORT, JobRecorder, OpenBuildsLink, default_log_dir, write_job_log)
+#     - ui/hardware_setting_dialog.py — หน้าต่าง Hardware Setting และ Set up (LOG_NAME_CHOICES, log_file_name)
+#     - ui/openbuilds_logger.py — ตัวบันทึก log เบื้องหลังและส่ง G-code (JobRecorder, OpenBuildsLink, default_log_dir, write_job_log)
+#   ไลบรารีภายนอก: datetime, json, os, re, threading, time, urllib
 #
-# event ของ OpenBuilds Control ที่ใช้ (ตรวจกับ v1.0.390 / GRBL 1.1h):
-#   data        {"command": "G38.2 ...", "response": "[PRB:...:1]", "type": ...}
-#   status      {"comms": {"runStatus", "queue", "alarm", ...},
-#                "machine": {"position": {"work": {...}, "offset": {x, y, z}}, ...}}
-#   queueCount  [จำนวนบรรทัดที่ยังรอส่ง, ...]
-#   jobComplete {"completed", "failed", "jobStartTime", "jobEndTime"}
-#               (ตอนต่อครั้งแรกจะได้ jobComplete เก่ามา 1 ครั้ง — ไม่สนใจถ้าไม่ได้อัดอยู่)
+# รายละเอียด:
+#   ฟังข้อมูลจาก OpenBuilds Control แบบ real-time แล้ว
+#   บันทึกเป็นไฟล์ .log ของแต่ละ job อัตโนมัติ (ไม่ต้อง copy console เอง)
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   DEFAULT_HOST / DEFAULT_PORT = ที่อยู่ของ OpenBuilds Control
-#   _RETRY_S    = รอกี่วินาทีก่อนต่อใหม่เมื่อหลุด
-#   _IDLE_END_S = คิวว่าง + Idle นานเท่านี้ ถือว่า job จบ (กันกรณีไม่ได้ jobComplete)
+#   หน้าที่:
+#     OpenBuildsLink  — ต่อ socket.io (v4, transport=polling) ของ OpenBuilds Control
+#                       ที่ http://localhost:3000 ซึ่งเป็นช่องทางเดียวกับที่หน้าจอของ
+#                       OpenBuilds เองใช้ แล้วส่งทุก event เข้า callback (thread แยก)
+#                       ต่อใหม่เองถ้า OpenBuilds ปิด/เปิดใหม่ — ใช้ standard library ล้วน
+#     JobRecorder     — รับ event แล้วแบ่งเป็น "job": เริ่มเมื่อมีคิว G-code (queue > 0
+#                       หรือ runStatus = Run) จบเมื่อได้ jobComplete (หรือคิวว่าง + Idle
+#                       นานเกิน _IDLE_END_S) เก็บทุกบรรทัดตอบกลับของ GRBL ใน job นั้น
+#     write_job_log() — เขียน job เป็นไฟล์ .log ที่ core/log_parser.py อ่านได้
+#
+#   สำคัญ — พิกัดใน [PRB:x,y,z:s] ของ GRBL เป็น "พิกัดเครื่อง" (MPos) เสมอ ไม่ใช่พิกัด
+#   เทียบจุด Set Zero ที่ Schema ใช้ — จึงบันทึก work offset (WCO / G54) จาก status ของ
+#   OpenBuilds ไว้เป็นบรรทัด "; WCO: x,y,z" ก่อนจุดแรกและทุกครั้งที่ offset เปลี่ยน
+#   log_parser.py ลบ WCO ออกให้เอง: พิกัดงาน = PRB - WCO
+#
+#   event ของ OpenBuilds Control ที่ใช้ (ตรวจกับ v1.0.390 / GRBL 1.1h):
+#     data        {"command": "G38.2 ...", "response": "[PRB:...:1]", "type": ...}
+#     status      {"comms": {"runStatus", "queue", "alarm", ...},
+#                  "machine": {"position": {"work": {...}, "offset": {x, y, z}}, ...}}
+#     queueCount  [จำนวนบรรทัดที่ยังรอส่ง, ...]
+#     jobComplete {"completed", "failed", "jobStartTime", "jobEndTime"}
+#                 (ตอนต่อครั้งแรกจะได้ jobComplete เก่ามา 1 ครั้ง — ไม่สนใจถ้าไม่ได้อัดอยู่)
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     DEFAULT_HOST / DEFAULT_PORT = ที่อยู่ของ OpenBuilds Control
+#     _RETRY_S    = รอกี่วินาทีก่อนต่อใหม่เมื่อหลุด
+#     _IDLE_END_S = คิวว่าง + Idle นานเท่านี้ ถือว่า job จบ (กันกรณีไม่ได้ jobComplete)
 # ==============================================================================
+
 import datetime
 import json
 import os
@@ -73,7 +81,7 @@ class OpenBuildsLink:
         self.on_state = on_state or (lambda connected, message: None)
         self.base = f"http://{host}:{port}/socket.io/?EIO=4&transport=polling"
         self.connected = False
-        self._url = None            # v03: URL ของ session ปัจจุบัน (ใช้ส่ง event)
+        self._url = None            # URL ของ session ปัจจุบัน (ใช้ส่ง event)
         self._stop = threading.Event()
         self._thread = None
 
@@ -132,7 +140,7 @@ class OpenBuildsLink:
                     raise ValueError("server closed the session")
 
     def send(self, event: str, payload) -> None:
-        """v03: ส่ง socket.io event ไปที่ OpenBuilds Control (โยน error ถ้ายังไม่ได้เชื่อมต่อ)"""
+        """ส่ง socket.io event ไปที่ OpenBuilds Control (โยน error ถ้ายังไม่ได้เชื่อมต่อ)"""
         if not self.connected or not self._url:
             raise ConnectionError("not connected to OpenBuilds Control")
         self._post(self._url, "42" + json.dumps([event, payload]))

@@ -1,68 +1,35 @@
 # ==============================================================================
-# ui/tabs/customization_tab.py — แท็บ "Customization" (มุมมอง 3D ของรูที่เลือก)
+# ui/tabs/customization_tab.py — แท็บ Customization (ภาพ 3D เส้นทางโพรบ)
 # ==============================================================================
-# หน้าที่หลัก: วาดกราฟ 3D แบบ wireframe ของชิ้นงาน + เส้นทางโพรบ (Tool Path)
-# สำหรับรูที่เลือกไว้ พร้อมจุดสัมผัสผนังรู (wall contact points) แต่ละ layer
-# และคำเตือนหาก Probe Profile (core/probe_profile.py) เข้าไปวัดรูนั้นไม่ได้
+# สรุปหน้าที่:
+#   แท็บ Customization: ภาพ 3D ของรูที่เลือก เส้นทางโพรบ จุดแตะทุกชั้น
+#   ดาวก้นรู และตาราง ⌀ คาดหวังรายชั้น
 #
-# ตัวแปรสำคัญที่ปรับจูนได้:
-#   ZIGZAG_LAYER_COLORS = ชุดสีของแต่ละ layer เมื่อเปิดโหมด Zigzag (วนซ้ำถ้า layer เกิน 24)
-#   MAX_TRIS             = จำนวนสามเหลี่ยม mesh สูงสุดที่วาด (ลดเพื่อเพิ่มความไว, เพิ่มเพื่อความละเอียด)
-#   NEAR_CENTER_RATIO     = สัดส่วนรัศมีที่ถือว่า "ใกล้ศูนย์กลางรู" (ใช้หาก้นรูจาก mesh)
-#   elev / azim (view_init)= มุมกล้อง 3D เริ่มต้นของกราฟ (องศา)
-#   half_zoom factor      = สัดส่วนการซูมเข้าเมื่อแสดงรูที่เลือก (มากขึ้น = ซูมออกกว้างขึ้น)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/circle_fit.py — fit วงกลม least squares (fit_circle_3d)
+#     - core/gcode_generator.py — สร้าง G-code และ point map (จุดคาดหวัง) (build_point_map, layer_depths)
+#     - core/work_zero.py — ตำแหน่ง Work Zero ของ G-code (machining_origin, zero_in_view)
+#     - ui/theme.py — สีและธีม (PLOT_AX, TEXT, VIEW3D_BG, VIEW3D_MUTED, VIEW3D_TEXT, c)
+#   ถูกใช้งานโดย:
+#     - ui/main_window.py — หน้าต่างหลัก UIManager (CustomizationTab)
+#   ไลบรารีภายนอก: mpl_toolkits, numpy, trimesh
+#
+# รายละเอียด:
+#   แท็บ "Customization" (มุมมอง 3D ของรูที่เลือก)
+#
+#   หน้าที่หลัก: วาดกราฟ 3D แบบ wireframe ของชิ้นงาน + เส้นทางโพรบ (Tool Path)
+#   สำหรับรูที่เลือกไว้ พร้อมจุดสัมผัสผนังรู (wall contact points) แต่ละ layer
+#   และคำเตือนหาก Probe Profile (core/probe_profile.py) เข้าไปวัดรูนั้นไม่ได้
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้:
+#     ZIGZAG_LAYER_COLORS = ชุดสีของแต่ละ layer เมื่อเปิดโหมด Zigzag (วนซ้ำถ้า layer เกิน 24)
+#     MAX_TRIS             = จำนวนสามเหลี่ยม mesh สูงสุดที่วาด (ลดเพื่อเพิ่มความไว, เพิ่มเพื่อความละเอียด)
+#     NEAR_CENTER_RATIO     = สัดส่วนรัศมีที่ถือว่า "ใกล้ศูนย์กลางรู" (ใช้หาก้นรูจาก mesh)
+#     elev / azim (view_init)= มุมกล้อง 3D เริ่มต้นของกราฟ (องศา)
+#     half_zoom factor      = สัดส่วนการซูมเข้าเมื่อแสดงรูที่เลือก (มากขึ้น = ซูมออกกว้างขึ้น)
 # ==============================================================================
-# VERSION: 06
-# CHANGE LOG (v05 -> v06):
-#   FIX: mesh ของรูที่เลือก ("Selected Hole Mesh") มีเส้นยาวพาดทั้งชิ้นงาน —
-#   เดิมเลือกสามเหลี่ยมจาก "จุดกึ่งกลาง" อย่างเดียว สามเหลี่ยมยาวของผิวเรียบ
-#   (ผิวบน/ล่างของแผ่นที่ลากจากปากรูไปถึงขอบชิ้นงานหรือรูอื่น) ที่จุดกึ่งกลาง
-#   บังเอิญอยู่ใกล้รูจึงถูกวาดด้วย ตอนนี้ต้องอยู่ในพื้นที่รูครบทั้ง 3 มุม
-#   (_hole_vertex_mask()) และช่องสี่เหลี่ยม/slot ใช้กรอบจริงของช่องแทนวงกลม
-#   ครอบมุม
-# CHANGE LOG (v04 -> v05):
-#   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — จุดสัมผัสผนังมาจาก
-#   lyr['contacts_display'] (core/path_planner.py v03 — คำนวณด้วยฟังก์ชัน
-#   เดียวกับ G-code) แทนการวางจุดบนวงกลม; Tool Path แสดงการเดินไปจุดเริ่ม
-#   บนเส้นกึ่งกลางช่องก่อนโพรบเข้าผนัง; ขอบเขตซูม/ไฮไลต์ mesh ใช้รัศมีที่
-#   ครอบมุมช่อง; หัวกราฟแสดงขนาด ยาว×กว้าง แทน R=
-# CHANGE LOG (v03 -> v04):
-#   FIX: show_bottom_star while isolating a segment used to always be
-#   True — meant expanding/isolating ANY segment card (even a shallow
-#   one that isn't the hole's deepest reachable point) showed its own
-#   star, so a single hole could effectively show a star at more than
-#   one Z position depending on which segment card the user had open.
-#   Now isolate mode only shows the star if the isolated segment IS
-#   deepest_seg_idx (the deepest SELECTED segment, same one the
-#   non-isolated multi-segment view already stars) — so a hole has
-#   exactly one possible star position regardless of which segment
-#   card is currently expanded. Isolating a non-deepest segment now
-#   shows no star at all (correct: that segment isn't the hole's
-#   bottom depth point).
-#
-# CHANGE LOG (v02 -> v03):
-#   FIX: deepest_seg_idx now only considers segments where the matching
-#   HoleSegmentSetting.selected_for_inspection is True — an unselected
-#   (unreachable/manually-unchecked) segment can no longer "win" the
-#   bottom-star position. Combined with core/path_planner.py's v02
-#   skip, this means: 2-segment hole, lower segment smaller -> both
-#   selected, star sits at the lower (deeper) segment. 2-segment hole,
-#   lower segment BIGGER -> lower auto-deselected (core/models.py
-#   validate_segment_reachability()), star sits at the upper segment
-#   instead. Matches requested behavior exactly.
-#   FIX: star_z/star_x/star_y for the non-isolated multi-segment case
-#   used to always be sh.depth_bot (the WHOLE hole's deepest point),
-#   ignoring segment selection entirely — now computed from the actual
-#   deepest SELECTED raw segment.
-#   FIX: star depth label used to always print hole.depth (the whole
-#   assembled hole's geometric depth) even when isolating a single
-#   segment or when a deeper segment got excluded — now prints the
-#   actual reachable depth (isolate: that segment's own .depth; multi:
-#   sum of selected segments' .depth up to the deepest selected one).
-#   FIX: show_bottom_star while isolating a segment is now always True
-#   (previously only true if that segment happened to also be the
-#   overall deepest one — meant isolating a shallower segment silently
-#   hid its own star, which was confusing during manual inspection).
+
 import numpy as np
 
 
@@ -125,8 +92,36 @@ def _hole_max_radius(h) -> float:
     return max(candidates) if candidates else h.radius
 
 
+def _expected_layer_diameters(app, hole) -> list:
+    """⌀ ของวงจุดคาดหวังแต่ละชั้น — คำนวณด้วยฟังก์ชันชุดเดียวกับ G-code / Schema / Evaluation
+    (build_point_map → จุดที่แนวเดินทะลุผิว CAD จาก B-Rep, fit_circle_3d → ⌀ = ค่า "CAD" ในหน้า Evaluation)
+    ความลึก = ระยะจากปากรูถึงระนาบชั้นตามแกนรู (layer_depths) ใช้สร้างระนาบใน SolidWorks เทียบได้ตรง ๆ
+    คืน [{'layer', 'seg', 'depth', 'dia', 'exact'}, ...] เรียงบนลงล่าง — [] ถ้าไม่ใช่รูกลม/คำนวณไม่ได้"""
+    from core.gcode_generator import build_point_map, layer_depths
+    from core.circle_fit import fit_circle_3d
+    from core.work_zero import machining_origin
+    view, rot = app.current_view, getattr(app, 'screen_rotation', 0)
+    pts = build_point_map([hole], view, rot, machining_origin(app, view, rot),
+                          probe_r=app.probe_profile.tip_radius)
+    by_layer = {}
+    for p in pts:
+        if p.get('shape') == 'circle' and int(p.get('layer_idx', -1)) >= 0:
+            by_layer.setdefault(int(p['layer_idx']), []).append(p)
+    depths = layer_depths(hole)
+    out = []
+    for lidx in sorted(by_layer):
+        lp = by_layer[lidx]
+        fit = fit_circle_3d([(p['x'], p['y'], p['z']) for p in lp])
+        if fit is None:
+            continue
+        out.append({'layer': lidx, 'seg': int(lp[0].get('seg_idx', 0)),
+                    'depth': depths.get(lidx), 'dia': float(fit['diameter']),
+                    'exact': all(p.get('trig') for p in lp)})
+    return out
+
+
 def _hole_vertex_mask(app, h, x3, y3, radius, scale, isolate_seg, screen_rot):
-    """v06: vertex ไหนอยู่ในพื้นที่ของรู h (พิกัดจอ) — รูกลม: วงกลมรัศมี
+    """vertex ไหนอยู่ในพื้นที่ของรู h (พิกัดจอ) — รูกลม: วงกลมรัศมี
     radius*scale; ช่องสี่เหลี่ยม/slot: กรอบสี่เหลี่ยมจริงของช่อง + ระยะขอบ
     (ไม่ใช้วงกลมครอบมุม ซึ่งจะกินพื้นที่รูข้างเคียงด้วย)"""
     sh = getattr(h, '_step_hole', None)
@@ -155,6 +150,26 @@ class CustomizationTab:
     def __init__(self, app):
         self.app = app
         self._text_objects = {}
+        self._dia_cache = (None, [])   # (key, ผล _expected_layer_diameters) — คำนวณใหม่เมื่อค่าที่มีผลเปลี่ยน
+
+    def _layer_diameters(self, hole) -> list:
+        """_expected_layer_diameters() พร้อม cache — การวาดใหม่ (หมุน/ซูม/สลับแท็บ) ไม่คำนวณซ้ำ"""
+        app = self.app
+        segs = tuple((c.layers, c.points_per_layer, c.zigzag_inspection, c.zigzag_degree,
+                      getattr(c, 'selected_for_inspection', True))
+                     for c in (getattr(hole, 'segments', None) or []))
+        key = (id(hole._step_hole), hole.layers, hole.points_per_layer,
+               getattr(hole, 'zigzag_inspection', False), getattr(hole, 'zigzag_degree', 0.0), segs,
+               round(float(app.probe_profile.tip_radius), 6), app.current_view,
+               getattr(app, 'screen_rotation', 0), id(getattr(app.geo, 'step_data', None)))
+        if self._dia_cache[0] != key:
+            try:
+                rows = _expected_layer_diameters(app, hole)
+            except Exception as e:
+                print(f"[customization_tab] expected layer diameters failed: {e!r}")
+                rows = []
+            self._dia_cache = (key, rows)
+        return self._dia_cache[1]
 
     def draw_cross_section(self):
         app = self.app
@@ -281,7 +296,7 @@ class CustomizationTab:
                 z_hi_h   = max(h.bottom_z, r_z) + 0.5
                 radius_h = _hole_max_radius(h)
 
-            # v06: สามเหลี่ยมต้องอยู่ในพื้นที่รู "ครบทั้ง 3 มุม" (เดิมดูแค่จุดกึ่งกลาง
+            # สามเหลี่ยมต้องอยู่ในพื้นที่รู "ครบทั้ง 3 มุม" (เดิมดูแค่จุดกึ่งกลาง
             # สามเหลี่ยม — สามเหลี่ยมยาวของผิวเรียบด้านบน/ล่างที่ลากจากรูไปถึงขอบ
             # ชิ้นงาน/รูอื่น จึงถูกวาดเป็นเส้นยาวพาดทั้งชิ้นงาน)
             # สัดส่วนระยะขอบที่ใช้ตัดเลือกสามเหลี่ยมผนังรู (wall) และขอบปากรู (rim) — ปรับได้
@@ -322,7 +337,7 @@ class CustomizationTab:
             isolate_cfg    = hole.segments[app.selected_segment_idx] if isolate_active else None
             multi_seg_display = is_multi_seg and not isolate_active
 
-            # v04 FIX: a hole may only ever show ONE star, sitting at the
+            # FIX: a hole may only ever show ONE star, sitting at the
             # deepest SELECTED segment (deepest_seg_idx). Isolating a
             # segment card no longer forces its own star into view —
             # only the isolated segment that also happens to BE
@@ -414,7 +429,7 @@ class CustomizationTab:
                 px_list, py_list, pz_list = [hole.x], [hole.y], [z_start]
                 wall_pts     = []
                 layer_centers = {}
-                spoke_ends    = {}   # v05: ปลายเส้นบอกมุมเริ่ม (zigzag) ของช่องสี่เหลี่ยม
+                spoke_ends    = {}   # ปลายเส้นบอกมุมเริ่ม (zigzag) ของช่องสี่เหลี่ยม
 
                 for lyr in step_layers:
                     z_disp     = lyr['z_display']
@@ -429,7 +444,7 @@ class CustomizationTab:
                     px_list.append(cx_lyr); py_list.append(cy_lyr); pz_list.append(z_disp)
 
                     if 'contacts_display' in lyr:
-                        # v05: ช่องสี่เหลี่ยม — เดินไปจุดเริ่มก่อน แล้วโพรบตั้งฉากเข้าผนัง
+                        # ช่องสี่เหลี่ยม — เดินไปจุดเริ่มก่อน แล้วโพรบตั้งฉากเข้าผนัง
                         for start, wall in lyr['contacts_display']:
                             s_arr, w_arr = np.array(start), np.array(wall)
                             ppx, ppy, ppz = s_arr + 0.92 * (w_arr - s_arr)   # หดเข้าเล็กน้อยเหมือนรูกลม
@@ -536,6 +551,29 @@ class CustomizationTab:
                     wall_label = (f'Wall Contact ({len(layer_centers)}L)' if multi_seg_display
                                   else f'Wall Contact ({layers}L×{points}P)')
                     ax3d.scatter(wx_a, wy_a, wz_a, color='red', s=22, depthshade=False, label=wall_label)
+
+            # ⌀ คาดหวังรายชั้น (ชุดเดียวกับ G-code) — ป้ายข้างวงแต่ละชั้น + ตารางมุมซ้ายบน
+            if has_step_hole and getattr(hole._step_hole, 'shape', 'circle') == 'circle':
+                dia_rows = self._layer_diameters(hole)
+                if dia_rows:
+                    same_idx = not isolate_active and len(dia_rows) == len(layer_centers)
+                    for row in dia_rows:
+                        if same_idx and row['layer'] in layer_centers:
+                            cx_l, cy_l, z_l, _a, r_l = layer_centers[row['layer']]
+                            ax3d.text(cx_l + r_l, cy_l, z_l, f"  L{row['layer'] + 1}  ⌀{row['dia']:.4f}",
+                                      color='#7fdbff', fontsize=7, zorder=13)
+                    exact = all(r['exact'] for r in dia_rows)
+                    head = ("Expected ⌀ per layer  (STEP B-Rep, same as G-code)" if exact
+                            else "Expected ⌀ per layer  (≈ layer radius — no B-Rep touch table)")
+                    lines = [head, "Layer   Depth from rim     ⌀ (mm)"]
+                    for row in dia_rows:
+                        seg = f"S{row['seg'] + 1}/" if multi_seg_display or isolate_active else ""
+                        dep = f"{row['depth']:9.4f}" if row['depth'] is not None else "      -  "
+                        lines.append(f"{seg}L{row['layer'] + 1:<5} {dep}       {row['dia']:.4f}")
+                    ax3d.text2D(0.01, 0.99, "\n".join(lines), transform=ax3d.transAxes,
+                                fontsize=8, family='monospace', color='#7fdbff', va='top', ha='left',
+                                bbox=dict(boxstyle='round,pad=0.4', facecolor='#0b1a22', edgecolor='#7fdbff', alpha=0.9),
+                                zorder=20)
 
             if show_bottom_star:
                 ax3d.scatter([star_x], [star_y], [star_z], color='#ffea00', s=110, marker='*', depthshade=False, label='Bottom Depth Point', zorder=10)

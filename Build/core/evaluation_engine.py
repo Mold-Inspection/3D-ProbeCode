@@ -1,132 +1,40 @@
 # ==============================================================================
-# core/evaluation_engine.py — เปรียบเทียบจุดที่คาดหวัง (จาก STEP หรือจากไฟล์
-# Schema .json ที่โหลดไว้) กับจุดที่ถูกโพรบจริง (จาก .log ของ OpenBuilds
-# Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
-# snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
+# core/evaluation_engine.py — ประเมินจุดวัดเทียบจุดคาดหวัง (ระยะเบี่ยง ⌀ ความกลม PASS/FAIL)
 # ==============================================================================
-# VERSION: 16
-# CHANGE LOG (v15 -> v16): hole_metrics() / circularity_pct() — ค่าสรุปต่อรูสำหรับหน้า Evaluation และรายงาน PDF:
-#   % ความเป็นวงกลมต่อชั้น = 100 × (1 − roundness / tolerance), จุดลึกสุดของรู (ผนังทรงกลม: fit ทรงกลม
-#   ให้จุดที่วัด → ก้น = −(cz − R) เทียบ CAD; แตะพื้นจริง; หรือบอกชั้นลึกสุดที่แตะได้)
-# CHANGE LOG (v14 -> v15): estimate_z_offset() — หา Z offset (ผิวบนจริงอยู่เหนือ Z0 ที่ตั้งกี่ มม.) จากผนังรู
-#   ที่เอียง/โค้ง: เลื่อน z ของจุดวัดหา dz ที่ RMS ของ dev น้อยสุด (Gauss-Newton) + บอกความไว
-#   (ผนังตรงหาไม่ได้) และตัวขยาย tip-radius error → Z error (ผนังเอียงมุมเดียว เช่น taper แยกไม่ได้)
-# CHANGE LOG (v13 -> v14): Feature 1 — align (จาก Set up, ui/wall_zero.py v13): แปลงจุดวัด (PRB − WCO) เข้า
-#   พิกัดชิ้นงานก่อนประเมิน: หักศูนย์เลื่อนตามความลึก x − kx·(z − z_ref), หมุนกลับรอบศูนย์ −yaw,
-#   z − (gx·dx + gy·dy) (ผิวบนเอียง) — จุดที่ไม่อยู่บนเส้นทางโพรบแล้ว: dev += m·off (off = ส่วนที่ตั้งฉาก n)
-# CHANGE LOG (v12 -> v13):
-#   Effective Tip แยกแกน X / Y (tip_radius_xy) — รัศมีชดเชยของแต่ละจุดตามทิศที่โพรบเดิน n:
-#   r(n) = rX·nx² + rY·ny² + r̄·nz² (หัวโพรบ kinematic ทริกช้า/เร็วไม่เท่ากันแต่ละทิศ — ทดสอบ 2026-11-03
-#   ผนังนอกชิ้น 30×30: D_eff X ≈ 1.36, Y ≈ 0.47 หลังแก้ $1) — _contact_pair/_table_dev รับ r เป็น
-#   float หรือ (r̄, rX, rY); บันทึก r ที่ใช้รายจุด ('r_used') ลง CSV
-# CHANGE LOG (v11 -> v12):
-#   FIX (ผนังเอียง/โค้ง): ใช้ตารางจุดแตะจาก B-Rep ('trig' — core/gcode_generator.py v17) ถ้ามี:
-#   ศูนย์กลางลูกบอลที่คาด P(r) = S + s(r)·n, จุดแตะบน CAD = P(r) + r·m(r), จุดวัด = PRB−WCO + r·m(r)
-#   (r = Effective Tip ⌀/2, m(r) = ทิศตั้งฉากผิวจริงตรงจุดที่ลูกบอลรัศมี r แตะ)
-#   FIX (ระยะเบี่ยง): 'distance_mm' = |ระยะเบี่ยงตามทิศตั้งฉากผิว| (a − e)·m แบบ CMM แทนระยะ 3 มิติ
-#   — ผนังตั้งตรงได้ค่าเท่าเดิม ผนังเอียง θ ค่าเดิมโตเกิน 1/cos θ (taper 15° +3.5%, ทรงกลม 45° +41%)
-#   เก็บระยะ 3 มิติไว้ที่ 'euclid_mm' และค่ามีเครื่องหมายที่ 'dev' (+ = ผิวจริงลึกเข้าไปในเนื้อกว่า CAD)
-#   FEATURE (คาลิเบรตผนังนอก): จุด shape='calib' → result['calibration'] = Effective Tip ⌀ ของรอบนี้
-#   (span − ขนาดจริงต่อแกน) และใช้แทนค่าใน Hardware Setting ถ้า use_run_calib (ค่าเริ่มต้น)
-#   FEATURE (pretravel='travel'): ทางเลือกแบบจำลองระยะทริก — เครื่องเดินต่อ p = R − r ตามทิศที่โพรบเดิน
-#   หลังลูกบอลแตะ (แทนการกดเข้าผิวตามทิศตั้งฉาก) ผนังตรงได้ค่าเท่ากันทุกประการ ต่างกันเฉพาะผนังเอียง
-#   (taper 15° ต่าง 0.03 มม., หลุมทรงกลมชั้นลึกต่างได้ 0.3 มม.) — ใช้ข้อมูลจริงตัดสินว่าแบบไหนตรง
-#   FEATURE: compensate=False ประเมินแบบไม่ชดเชย (จุดดิบ = ศูนย์กลางลูกบอล เทียบผิว CAD ตรง ๆ)
-#   ทุกจุดเก็บ raw_log / wco / cad / dev_nocomp / exp_center / normal — export_results_csv()
-# CHANGE LOG (v10 -> v11):
-#   FEATURE (Best-fit centre): evaluate_points(best_fit=True) — ต่อรู หาการเลื่อนในระนาบตั้งฉากแกนรู
-#   (least squares ของระยะเบี่ยงตามทิศตั้งฉากผิว) ที่ทำให้จุดวัดเข้ากับ CAD ที่สุด แล้วเลื่อนจุดวัดทั้งรู
-#   ก่อนประเมิน — แยก "ตำแหน่งรูเยื้อง / ตั้ง zero คลาด" ออกจาก "ขนาด + รูปทรง" แบบ CMM
-#   holes[id]['best_fit_offset'] = (dx, dy, dz) ที่เลื่อนจุดวัด (ตำแหน่งรูจริง = CAD − offset)
-#   ระยะเบี่ยงในโหมดนี้ = ระยะถึงผิว CAD (รูกลม: |ระยะถึงแกนวงกลม CAD − รัศมี|, อื่น ๆ: ตามทิศตั้งฉากผิว)
-#   ไม่ใช่ระยะถึงจุด CAD จุดเดียว — จุดที่เลื่อนแล้วไถลไปตามผนังไม่ถูกนับเป็นความคลาด
-# CHANGE LOG (v09 -> v10):
-#   ก้านชน: แจ้งเตือนอย่างเดียว — จุดที่สงสัย (p['suspect']) ยังนับผ่าน/ไม่ผ่านและอยู่ใน circle fit
-#   ตามปกติ (ผู้ใช้ขอ) result/hole['suspect_points'] = จำนวนจุดที่ค่าอาจคลาดเพราะก้านแตะผนัง
-# CHANGE LOG (v08 -> v09):
-#   FEATURE (ผนังเอียง): จุดที่มี mx/my/mz (ทิศตั้งฉากผิว — gcode_generator v13) ลูกบอลแตะผนัง
-#   ด้วยด้านข้าง/ใต้ลูก: ศูนย์กลางลูกบอลที่คาด = E − r/(m·n)·n, จุดบนผิว = ศูนย์กลาง + r·m
-#   (ผนังตรง m = n ได้ผลเท่าเดิม) — expected ที่แสดงเป็นจุดที่ลูกบอลแตะผิวจริง
-#   FEATURE (ก้านชน): ต่อ segment เทียบ "ระยะผนังเฉลี่ย" (ค่าเบี่ยงตามทิศโพรบ) ของแต่ละชั้นกับชั้นบน
-#   ชั้นที่แคบลงเกิน SHAFT_SHRINK_MM (CAD ไม่ได้แคบลง) → จุดที่แตะก่อนผนังเกินเกณฑ์ = 'suspect'
-#   (ก้านโพรบแตะปากรู/ผนังก่อนลูกบอล) ตัดออกจากผ่าน/ไม่ผ่านและ circle fit — นับไว้ที่
-#   result['suspect_points'] / hole['suspect_points'] / layer['shaft_suspect']
-# CHANGE LOG (v07 -> v08):
-#   FEATURE: จุดพื้นก้นรู (shape='floor', layer_idx=-1 — โพรบแนว Z) ประเมินเฉพาะ
-#   ความลึก: ระยะ = |(actual - expected) · แกนรู| ไม่นับการเยื้องแนวราบ — เก็บแยกที่
-#   holes[id]['floor'] = {expected, actual, depth_error (+ = ลึกกว่า CAD), passed}
-#   ไม่อยู่ใน segments/layers (ไม่ปนกับ circle fit) แต่ยังนับรวมผ่าน/ไม่ผ่านของรู
-#   build_settings_snapshot() บันทึก measure_floor + ความลึกสูงสุดของรู (CAD) และ
-#   apply/diff รองรับ measure_floor (schema เก่าที่ไม่มี key = ปิด)
-# CHANGE LOG (v06 -> v07):
-#   FEATURE: ชดเชยรัศมีหัวโพรบ (Probe Radius Compensation) — เครื่องรายงานพิกัด
-#   "จุดศูนย์กลางลูกบอล" ซึ่งห่างผิวจริงเท่ารัศมีลูกบอลเสมอ evaluate_points() รับ
-#   tip_radius_mm แล้วเลื่อนจุดที่วัดได้เข้าหาผนังตามทิศที่โพรบเดิน (nx/ny/nz จาก
-#   build_point_map) ก่อนเทียบ — schema เก่าที่ไม่มีทิศจะได้ compensation='unavailable'
-#   FEATURE: Least-squares circle fit รายชั้นของรูกลม (core/circle_fit.py) — ได้
-#   เส้นผ่าศูนย์กลาง, ระยะเยื้องศูนย์ และความกลม เทียบกับค่าจาก CAD (layer['circle'])
-# CHANGE LOG (v05 -> v06):
-#   build_settings_snapshot() บันทึก 'screen_rot' (การหมุนจอ) และ
-#   diff_snapshots() ถือว่าการหมุนจอที่เปลี่ยนไปตั้งแต่ export = view เปลี่ยน
-#   (พิกัด X/Y ของ G-code ตามการหมุนจอแล้ว — ดู gcode_generator.py v08)
-# CHANGE LOG (v04 -> v05):
-#   FEATURE: ช่องสี่เหลี่ยม (StepPocket) — _hole_fingerprint() ต่อท้ายขนาด
-#   ช่อง (กว้าง×ยาว×รัศมีมุม) สำหรับรูทรง 'rect' เท่านั้น fingerprint ของรู
-#   กลมเหมือน v04 ทุกตัวอักษร (schema เดิมยังจับคู่ได้) — evaluate_points()
-#   ไม่ต้องแก้ เพราะเทียบจุดต่อจุดตาม point map ที่รองรับช่องแล้ว
-# CHANGE LOG (v03 -> v04):
-#   FIX (bug report — screenshot showed only 1/4 holes matched after
-#   "Restore"): build_settings_snapshot()/apply_settings_snapshot() never
-#   captured or restored the HOLE-LEVEL `selected_for_inspection` flag —
-#   only per-hole layers/points/zigzag (and, for multi-segment holes,
-#   each segment's own selected_for_inspection) were saved/restored. The
-#   top-level "is this hole even selected for inspection at all" state
-#   was completely absent from the snapshot. Combined with
-#   core/gcode_export_panel.py only ever passing the currently-SELECTED
-#   holes into build_settings_snapshot() (so un-selected holes never
-#   appeared in the snapshot at all), a restore could never actually
-#   reproduce "which holes were selected at export time" — it could only
-#   tweak the layer/point settings of whatever selection happened to
-#   already be active in the UI. That mismatch is exactly why the
-#   screenshot showed 3 holes as "no data": those holes' selection state
-#   (and therefore their presence/absence in the expected-points list)
-#   never got restored.
-#   FEATURE (user request — "should save ALL current settings, and
-#   loading should directly replace the current settings with the new
-#   ones"): 
-#     - build_settings_snapshot(holes, view_name) now records
-#       `selected_for_inspection` explicitly on every hole entry (both
-#       single- and multi-segment shapes) — callers are now expected to
-#       pass ALL current holes (not just the selected ones) so the
-#       snapshot is a COMPLETE picture of "what was configured at export
-#       time", not just a fragment of it. See
-#       core/gcode_export_panel.py v09's changelog for the matching
-#       caller-side change.
-#     - apply_settings_snapshot(holes, snapshot, full_replace=True) now
-#       also restores `hole.selected_for_inspection` (and, for
-#       multi-segment holes, keeps restoring each segment's own
-#       selected_for_inspection as before). NEW: when full_replace=True
-#       (the default, and the only mode used anywhere in the app now),
-#       any hole in `holes` that has NO match in the snapshot is
-#       explicitly set to `selected_for_inspection = False` — the
-#       loaded schema is treated as the complete, authoritative
-#       configuration, so anything it doesn't mention is "not selected"
-#       rather than "whatever it happened to be before". Pass
-#       full_replace=False to keep the old v03 behavior (only touch
-#       matched holes, leave everything else untouched) if ever needed.
-#   No change to evaluate_points() or diff_snapshots() — both identical
-#   to v03. _hole_fingerprint() matching rule is unchanged.
+# สรุปหน้าที่:
+#   เปรียบเทียบจุดวัดจริงกับจุดคาดหวัง: ชดเชยรัศมีหัววัด (Effective Tip แยก
+#   X/Y, แบบจำลองระยะทริก), แก้การเอียง, คำนวณระยะเบี่ยงตามทิศตั้งฉากผิว, fit
+#   วงกลมรายชั้น (⌀ ความกลม ศูนย์เยื้อง), ผ่าน/ไม่ผ่าน, หา Z offset และ export
+#   CSV
 #
-# NOTE เรื่อง key ของรูใน holes dict ที่ evaluate_points() คืนกลับมา:
-# ฟังก์ชันนี้ (core/*) ไม่รู้จัก "global index เข้า app.current_holes" เพราะ
-# เป็น concept ฝั่ง UI — จึง key ด้วย hole_id (str ของ hole.display_id) แทน
-# ผู้เรียก (ui/evaluation_left_panel.py, ui/evaluation_sidebar_panel.py)
-# เป็นฝ่าย remap เป็น global-index-keyed dict เองอีกที ก่อนส่งต่อให้
-# ui/tabs/evaluation_tab.py วาดผล (ดู contract ในไฟล์นั้น)
+# ไฟล์ที่เกี่ยวข้อง:
+#   ใช้งานไฟล์เหล่านี้:
+#     - core/circle_fit.py — fit วงกลม least squares (fit_circle_3d)
+#     - core/models.py — โครงสร้างข้อมูลรูและฟังก์ชันชั้น/จุดแตะ (clamp_layers, hole_floor_depth)
+#   ถูกใช้งานโดย:
+#     - core/gcode_export_panel.py — หน้าต่าง G-code Export (build_settings_snapshot)
+#     - ui/evaluation_left_panel.py — แผงซ้ายแท็บ Evaluation (โหลด log/Schema, Run inspection) (apply_settings_snapshot, build_settings_snapshot, diff_snapshots, estimate_z_offset, evaluate_points, export_results_csv)
+#     - ui/evaluation_report.py — สร้างรายงาน PDF (hole_metrics)
+#     - ui/evaluation_sidebar_panel.py — แผงขวาแท็บ Evaluation (ผลรายรู/ชั้น/จุด) (_hole_fingerprint, evaluate_points, hole_metrics)
+#   ไลบรารีภายนอก: csv, math, numpy
 #
-# ตัวแปรสำคัญที่ปรับจูนได้: ไม่มี (ค่า tolerance ถูกส่งเข้ามาจากภายนอกเสมอ
-# ไม่ hardcode ในไฟล์นี้)
+# รายละเอียด:
+#   เปรียบเทียบจุดที่คาดหวัง (จาก STEP หรือจากไฟล์
+#   Schema .json ที่โหลดไว้) กับจุดที่ถูกโพรบจริง (จาก .log ของ OpenBuilds
+#   Control) + ตรวจจับ setting ที่เปลี่ยนไปตั้งแต่ export + คืนค่า settings
+#   snapshot กลับเข้ารู (full replace, เรียกอัตโนมัติตอนโหลด schema)
+#
+#   NOTE เรื่อง key ของรูใน holes dict ที่ evaluate_points() คืนกลับมา:
+#   ฟังก์ชันนี้ (core/*) ไม่รู้จัก "global index เข้า app.current_holes" เพราะ
+#   เป็น concept ฝั่ง UI — จึง key ด้วย hole_id (str ของ hole.display_id) แทน
+#   ผู้เรียก (ui/evaluation_left_panel.py, ui/evaluation_sidebar_panel.py)
+#   เป็นฝ่าย remap เป็น global-index-keyed dict เองอีกที ก่อนส่งต่อให้
+#   ui/tabs/evaluation_tab.py วาดผล (ดู contract ในไฟล์นั้น)
+#
+#   ตัวแปรสำคัญที่ปรับจูนได้: ไม่มี (ค่า tolerance ถูกส่งเข้ามาจากภายนอกเสมอ
+#   ไม่ hardcode ในไฟล์นี้)
 # ==============================================================================
+
 import math
 
 import numpy as np
@@ -134,12 +42,12 @@ import numpy as np
 from core.circle_fit import fit_circle_3d
 from core.models import clamp_layers, hole_floor_depth
 
-# v09: ชั้นลึกที่ผนัง "เข้ามาใกล้" กว่าชั้นบนเกินนี้ (mm ต่อด้าน, เทียบกับ CAD) → สงสัยก้านโพรบชน
+# ชั้นลึกที่ผนัง "เข้ามาใกล้" กว่าชั้นบนเกินนี้ (mm ต่อด้าน, เทียบกับ CAD) → สงสัยก้านโพรบชน
 SHAFT_SHRINK_MM = 0.2
 
 
 def _surface_dir(point):
-    """v09: ทิศตั้งฉากผิวผนังเอียง (None = ผนังตรง/schema เก่า)"""
+    """ทิศตั้งฉากผิวผนังเอียง (None = ผนังตรง/schema เก่า)"""
     try:
         return (float(point['mx']), float(point['my']), float(point['mz']))
     except (KeyError, TypeError, ValueError):
@@ -185,7 +93,7 @@ def _layer_circle(points: list, tolerance_mm: float):
 
 
 def _trig_at(exp, r: float):
-    """v12: (s, m) จากตารางจุดแตะ B-Rep ที่รัศมีลูกบอล r (interpolate เชิงเส้น) — None ถ้าไม่มีตาราง"""
+    """(s, m) จากตารางจุดแตะ B-Rep ที่รัศมีลูกบอล r (interpolate เชิงเส้น) — None ถ้าไม่มีตาราง"""
     t = exp.get('trig')
     if not t:
         return None
@@ -197,7 +105,7 @@ def _trig_at(exp, r: float):
 
 
 def _table_dist(exp, s_meas: float) -> float:
-    """v12: ระยะจากศูนย์กลางลูกบอล (ที่ระยะเดิน s_meas) ถึงผิว CAD — ย้อนตาราง s(r) (s ลดลงเมื่อ r โต)
+    """ระยะจากศูนย์กลางลูกบอล (ที่ระยะเดิน s_meas) ถึงผิว CAD — ย้อนตาราง s(r) (s ลดลงเมื่อ r โต)
     นอกช่วงตาราง ต่อเส้นตรงจากปลาย (ค่าลบ = ศูนย์กลางลูกบอลเลยผิว CAD เข้าไปในเนื้อ)"""
     t = np.asarray(exp['trig'], dtype=float)
     r, sv = t[:, 0], t[:, 1]
@@ -209,7 +117,7 @@ def _table_dist(exp, s_meas: float) -> float:
 
 
 def align_point(p, al):
-    """v14: จุดวัด (x, y, z พิกัดงาน) → พิกัดชิ้นงาน ด้วยผลวัดเอียงจาก Set up (al = app.part_alignment)"""
+    """จุดวัด (x, y, z พิกัดงาน) → พิกัดชิ้นงาน ด้วยผลวัดเอียงจาก Set up (al = app.part_alignment)"""
     x, y, z = (float(c) for c in p)
     cx, cy = al['pivot']
     kx, ky = al['lean']
@@ -221,7 +129,7 @@ def align_point(p, al):
 
 
 def _off_term(exp, raw, r: float) -> float:
-    """v14: ศูนย์กลางลูกบอลอยู่นอกเส้นทางโพรบ off (⟂ n) → ระยะถึงผิวลดลง m·off ⇒ dev เพิ่ม m·off"""
+    """ศูนย์กลางลูกบอลอยู่นอกเส้นทางโพรบ off (⟂ n) → ระยะถึงผิวลดลง m·off ⇒ dev เพิ่ม m·off"""
     g = _trig_at(exp, r)
     if g is None or 'sx' not in exp:
         return 0.0
@@ -232,7 +140,7 @@ def _off_term(exp, raw, r: float) -> float:
 
 
 def _r_at(exp, r_tip) -> float:
-    """v13: รัศมีชดเชยของจุดนี้ — r_tip เป็น float หรือ (r̄, rX, rY) = Effective Tip แยกแกน X/Y
+    """รัศมีชดเชยของจุดนี้ — r_tip เป็น float หรือ (r̄, rX, rY) = Effective Tip แยกแกน X/Y
     ผสมตามทิศที่โพรบเดิน n: r = rX·nx² + rY·ny² + r̄·nz² (ผนังแนว X ใช้ rX, แนว Y ใช้ rY)"""
     if not isinstance(r_tip, tuple):
         return r_tip
@@ -246,10 +154,10 @@ def _r_at(exp, r_tip) -> float:
 
 
 def _table_dev(exp, raw, r_tip: float, comp_on) -> float:
-    """v12: ระยะเบี่ยงตามทิศตั้งฉากผิวแบบแม่นตรง = รัศมีที่ชดเชย − ระยะจริงจากศูนย์กลางลูกบอลถึงผิว CAD
+    """ระยะเบี่ยงตามทิศตั้งฉากผิวแบบแม่นตรง = รัศมีที่ชดเชย − ระยะจริงจากศูนย์กลางลูกบอลถึงผิว CAD
     ผิวจริงเลื่อนเข้าเนื้อ δ → ลูกบอลรัศมี r ทริกเมื่อห่างผิว CAD r − δ ⇒ δ = r − ระยะ (ถูกแม้ผิวโค้งมาก)
     'travel': ศูนย์กลางลูกบอลจริงตอนเริ่มแตะ = ดิบ − (R − r)·n แล้วเทียบกับ R"""
-    r_tip = _r_at(exp, r_tip)   # v13
+    r_tip = _r_at(exp, r_tip)
     n = np.asarray(_probe_dir(exp), dtype=float)
     s_meas = float(np.dot(np.asarray(raw, dtype=float)
                           - np.array([float(exp['sx']), float(exp['sy']), float(exp['sz'])]), n))
@@ -261,19 +169,19 @@ def _table_dev(exp, raw, r_tip: float, comp_on) -> float:
 
 def _contact_pair(exp, raw, r_tip: float, comp_on: bool):
     """(จุดบนผิวตาม CAD, จุดที่วัดได้หลังชดเชยรัศมี, ทิศตั้งฉากผิวที่ใช้วัดระยะเบี่ยง) ของจุดเดียว
-    v12: มีตาราง B-Rep → P(r) = S + s(r)·n คือศูนย์กลางลูกบอลที่คาด, e = P(r) + r·m, a = ดิบ + r·m
+    มีตาราง B-Rep → P(r) = S + s(r)·n คือศูนย์กลางลูกบอลที่คาด, e = P(r) + r·m, a = ดิบ + r·m
     ไม่ชดเชย (comp_on False) = ตารางที่ r = 0: e = จุดที่เส้นทางทะลุผิว CAD, a = ศูนย์กลางลูกบอลดิบ
     comp_on == 'travel': ลูกบอลจริง R แตะผิวแล้วเครื่องเดินต่อ p = R − r ตามทิศ n ก่อนทริก →
     e = S + s(R)·n + R·m(R), a = ดิบ − p·n + R·m(R) (ผนังตรงได้เท่ากับแบบปกติ)"""
     ex, ey, ez = float(exp['x']), float(exp['y']), float(exp['z'])
-    r_tip = _r_at(exp, r_tip)   # v13
+    r_tip = _r_at(exp, r_tip)
     r = r_tip if comp_on else 0.0
     g = _trig_at(exp, r)
     if g is not None and 'sx' in exp:
         s_, m = g
         n = np.asarray(_probe_dir(exp), dtype=float)
         start = np.array([float(exp['sx']), float(exp['sy']), float(exp['sz'])])
-        if comp_on == 'travel':   # v12: ระยะทริกตามทิศที่เดิน
+        if comp_on == 'travel':   # ระยะทริกตามทิศที่เดิน
             r_ball = float(exp['trig'][-1][0])
             s_b, m_b = _trig_at(exp, r_ball)
             pre = max(0.0, r_ball - r)
@@ -286,7 +194,7 @@ def _contact_pair(exp, raw, r_tip: float, comp_on: bool):
         return e, a, tuple(m)
     m = _surface_dir(exp)
     w = m or _probe_dir(exp) or (0.0, 0.0, 0.0)
-    if m is not None and comp_on:   # v09: ผนังเอียง (schema ก่อน v12) — ลูกบอลแตะตามทิศตั้งฉากผิว m
+    if m is not None and comp_on:   # ผนังเอียง (schema ก่อน) — ลูกบอลแตะตามทิศตั้งฉากผิว m
         n = _probe_dir(exp)
         k = r_tip / max(1e-6, m[0] * n[0] + m[1] * n[1] + m[2] * n[2])
         e = (ex - k * n[0] + r_tip * m[0], ey - k * n[1] + r_tip * m[1],
@@ -303,7 +211,7 @@ def _contact_pair(exp, raw, r_tip: float, comp_on: bool):
 
 def run_calibration(expected_points: list, actual_points: list, true_size: dict = None,
                     tip_d_max: float = None) -> dict:
-    """v12: Effective Tip ⌀ จากจุดแตะผนังนอก (shape='calib') — ต่อแกน: span ระหว่างศูนย์กลาง
+    """Effective Tip ⌀ จากจุดแตะผนังนอก (shape='calib') — ต่อแกน: span ระหว่างศูนย์กลาง
     ลูกบอลสองฝั่ง − ขนาดชิ้นงาน (เวอร์เนียร์ใน true_size ถ้ามี ไม่งั้นขนาด CAD ระหว่างจุดผิวสองฝั่ง)
     คืน {} ถ้าไม่มีจุดคาลิเบรต; {'axes': {...}, 'd_eff': ค่าเฉลี่ยแกนที่ใช้ได้ หรือ None}"""
     total = min(len(expected_points), len(actual_points))
@@ -338,7 +246,7 @@ def run_calibration(expected_points: list, actual_points: list, true_size: dict 
 
 def _best_fit_shifts(expected_points, actual_points, total: int, r_tip: float, comp_on: bool,
                      circles: dict = None) -> dict:
-    """v11: {hole_id: np.array(3)} — การเลื่อนจุดวัดของแต่ละรูในระนาบตั้งฉากแกนรู ที่ทำให้ผลรวม
+    """{hole_id: np.array(3)} — การเลื่อนจุดวัดของแต่ละรูในระนาบตั้งฉากแกนรู ที่ทำให้ผลรวม
     (ระยะเบี่ยงตามทิศตั้งฉากผิว)² น้อยที่สุด  แกนรู = ทิศที่ตั้งฉากกับทิศโพรบทุกจุด (SVD)
     รูที่ทิศโพรบไม่ครบ 2 มิติ หรือมีจุดน้อยกว่า 3 จุด ไม่เลื่อน"""
     groups = {}
@@ -401,7 +309,7 @@ def _best_fit_shifts(expected_points, actual_points, total: int, r_tip: float, c
 
 
 def _nominal_circles(expected_points, total: int, r_tip: float, comp_on: bool) -> dict:
-    """v11: {(hole_id, seg_idx, layer_idx): (centre, axis, radius)} ของวงกลม CAD ที่จุดแตะผิว
+    """{(hole_id, seg_idx, layer_idx): (centre, axis, radius)} ของวงกลม CAD ที่จุดแตะผิว
     แต่ละชั้นของรูกลม (≥ 3 จุด) — ใช้วัดระยะถึงผิวในโหมด best-fit"""
     groups = {}
     for i in range(total):
@@ -423,7 +331,7 @@ def _nominal_circles(expected_points, total: int, r_tip: float, comp_on: bool) -
 
 
 def _signed_wall(p):
-    """v09: ผนังอยู่ไกลกว่า CAD เท่าไหร่ตามทิศที่โพรบเดิน (− = แตะก่อนถึงผนัง)"""
+    """ผนังอยู่ไกลกว่า CAD เท่าไหร่ตามทิศที่โพรบเดิน (− = แตะก่อนถึงผนัง)"""
     n = p.get('dir')
     if n is None:
         return None
@@ -432,7 +340,7 @@ def _signed_wall(p):
 
 
 def _mark_shaft_contacts(layers: list) -> list:
-    """v09: layers ของ segment เดียว เรียงบน→ล่าง — ชั้นแรกเป็นฐาน (ลูกบอลยังแตะก่อนก้าน)
+    """layers ของ segment เดียว เรียงบน→ล่าง — ชั้นแรกเป็นฐาน (ลูกบอลยังแตะก่อนก้าน)
     ชั้นลึกที่ค่าเฉลี่ย "ผนังเข้ามาใกล้" กว่าฐานเกิน SHAFT_SHRINK_MM = ก้านชน → จุดในชั้นนั้นที่
     แตะก่อนฐานเกินเกณฑ์ได้ p['suspect'] = True คืนรายการจุดที่ถูกตัด"""
     out = []
@@ -481,16 +389,16 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
     actual_points   : list ที่ได้จาก core/log_parser.py::parse_openbuilds_log()
                        — แต่ละอันมี x, y, z (เรียงตามลำดับที่เครื่องทำงานจริง)
     tolerance_mm    : ระยะเบี่ยงเบนสูงสุดที่ยังถือว่า "ผ่าน" (mm)
-    tip_radius_mm   : v07 — รัศมีหัวโพรบ (ใช้ค่าที่ calibrate แล้วถ้ามี) สำหรับชดเชย
+    tip_radius_mm   : — รัศมีหัวโพรบ (ใช้ค่าที่ calibrate แล้วถ้ามี) สำหรับชดเชย
                        จุดที่วัดได้ (ศูนย์กลางลูกบอล) ให้เป็นจุดบนผิวชิ้นงาน — 0 = ไม่ชดเชย
-    compensate      : v12 — False = ไม่ชดเชยรัศมี (ดูผลดิบ)
-    use_run_calib   : v12 — มีจุดแตะผนังนอก (shape='calib') → ใช้ Effective Tip ของรอบนี้แทน tip_radius_mm
-    calib_true      : v12 — {'X': ขนาดจริงเวอร์เนียร์, 'Y': ...} (ไม่ใส่ = ขนาด CAD)
-    tip_d_max       : v12 — ⌀ ลูกบอลจริง ใช้ตรวจว่า Effective Tip ⌀ ที่ได้อยู่ในช่วง 0 – ⌀ จริง
-    pretravel       : v12 — 'normal' (ทริกเมื่อกดเข้าผิวตามทิศตั้งฉาก = รัศมี r คงที่ แบบ CMM ทั่วไป)
+    compensate      : — False = ไม่ชดเชยรัศมี (ดูผลดิบ)
+    use_run_calib   : — มีจุดแตะผนังนอก (shape='calib') → ใช้ Effective Tip ของรอบนี้แทน tip_radius_mm
+    calib_true      : — {'X': ขนาดจริงเวอร์เนียร์, 'Y': ...} (ไม่ใส่ = ขนาด CAD)
+    tip_d_max       : — ⌀ ลูกบอลจริง ใช้ตรวจว่า Effective Tip ⌀ ที่ได้อยู่ในช่วง 0 – ⌀ จริง
+    pretravel       : — 'normal' (ทริกเมื่อกดเข้าผิวตามทิศตั้งฉาก = รัศมี r คงที่ แบบ CMM ทั่วไป)
                        หรือ 'travel' (เครื่องเดินต่อ R − r ตามทิศที่โพรบเดิน) — ผนังตรงเท่ากัน
-    tip_radius_xy   : v13 — (rX, rY) Effective Tip แยกแกนจาก Set up (None = ใช้ tip_radius_mm ทุกทิศ)
-    align           : v14 — ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up (None = ไม่แปลงจุดวัด)
+    tip_radius_xy   : — (rX, rY) Effective Tip แยกแกนจาก Set up (None = ใช้ tip_radius_mm ทุกทิศ)
+    align           : — ผลวัดเอียง/แกน Z เอียง/หมุนจาก Set up (None = ไม่แปลงจุดวัด)
 
     Returns
     -------
@@ -501,34 +409,34 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
       failed_point_refs, expected_count, actual_count,
       sequence_mismatch, settings_mismatch, holes
     """
-    if align:   # v14: จุดวัดทั้งหมดเข้าพิกัดชิ้นงานก่อน (best-fit / คาลิเบรตก็ใช้จุดที่แปลงแล้ว)
+    if align:   # จุดวัดทั้งหมดเข้าพิกัดชิ้นงานก่อน (best-fit / คาลิเบรตก็ใช้จุดที่แปลงแล้ว)
         actual_points = [dict(a, x=q[0], y=q[1], z=q[2], prb_work=(a['x'], a['y'], a['z']))
                          for a in actual_points for q in [align_point((a['x'], a['y'], a['z']), align)]]
     matched = min(len(expected_points), len(actual_points))
-    idx_all = [i for i in range(matched) if expected_points[i].get('shape') != 'calib']   # v12
+    idx_all = [i for i in range(matched) if expected_points[i].get('shape') != 'calib']
     total_points = len(idx_all)
     passed_points = 0
 
-    # v12: Effective Tip จากผนังนอกของรอบนี้ (ถ้ามีจุดคาลิเบรตใน G-code)
+    # Effective Tip จากผนังนอกของรอบนี้ (ถ้ามีจุดคาลิเบรตใน G-code)
     calibration = run_calibration(expected_points, actual_points, calib_true, tip_d_max)
     r_tip = max(0.0, float(tip_radius_mm or 0.0))
     tip_source = 'setting'
     if use_run_calib and calibration.get('d_eff'):
         r_tip, tip_source = calibration['d_eff'] / 2.0, 'run'
 
-    # v07: ชดเชยรัศมีหัวโพรบ — ทำได้เมื่อ schema มีทิศที่โพรบเดินครบทุกจุด
+    # ชดเชยรัศมีหัวโพรบ — ทำได้เมื่อ schema มีทิศที่โพรบเดินครบทุกจุด
     has_dirs = total_points > 0 and all(_probe_dir(expected_points[i]) is not None for i in idx_all)
     comp_on = bool(compensate) and r_tip > 0.0 and has_dirs
-    if comp_on:   # v12: แบบจำลองระยะทริก ส่งต่อผ่าน comp_on ('normal' / 'travel')
+    if comp_on:   # แบบจำลองระยะทริก ส่งต่อผ่าน comp_on ('normal' / 'travel')
         comp_on = 'travel' if pretravel == 'travel' else 'normal'
     compensation = 'on' if comp_on else ('unavailable' if compensate and r_tip > 0.0 else 'off')
-    rxy = None   # v13: Effective Tip แยกแกน — ส่ง (r̄, rX, rY) แทน r̄ ให้ทุกฟังก์ชันที่คิดรายจุด
+    rxy = None   # Effective Tip แยกแกน — ส่ง (r̄, rX, rY) แทน r̄ ให้ทุกฟังก์ชันที่คิดรายจุด
     if tip_source == 'setting' and tip_radius_xy and all(float(v) > 0 for v in tip_radius_xy):
         rxy = (float(tip_radius_xy[0]), float(tip_radius_xy[1]))
     r_pass = (r_tip, rxy[0], rxy[1]) if rxy else r_tip
 
     holes: dict = {}
-    # v11: Best-fit centre — เลื่อนจุดวัดทั้งรูก่อนประเมิน (ไม่ตรวจตำแหน่งรู ตรวจขนาด + รูปทรง)
+    # Best-fit centre — เลื่อนจุดวัดทั้งรูก่อนประเมิน (ไม่ตรวจตำแหน่งรู ตรวจขนาด + รูปทรง)
     circles = _nominal_circles(expected_points, matched, r_pass, comp_on) if best_fit else {}
     shifts = (_best_fit_shifts(expected_points, actual_points, matched, r_pass, comp_on, circles)
               if best_fit else {})
@@ -538,24 +446,24 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         act = actual_points[i]
 
         raw = (float(act['x']), float(act['y']), float(act['z']))
-        raw_log = raw                                            # v12: ค่า PRB − WCO ก่อนเลื่อน best-fit
-        e0, _a0, w0 = _contact_pair(exp, raw_log, 0.0, False)    # v12: ไม่ชดเชย — ศูนย์กลางลูกบอล vs ผิว CAD
+        raw_log = raw                                            # ค่า PRB − WCO ก่อนเลื่อน best-fit
+        e0, _a0, w0 = _contact_pair(exp, raw_log, 0.0, False)    # ไม่ชดเชย — ศูนย์กลางลูกบอล vs ผิว CAD
         dev_nocomp = float(np.dot(np.subtract(raw_log, e0), w0))
-        exact = bool(exp.get('trig')) and 'sx' in exp and _probe_dir(exp) is not None   # v12
+        exact = bool(exp.get('trig')) and 'sx' in exp and _probe_dir(exp) is not None
         if exact:
             dev_nocomp = _table_dev(exp, raw_log, 0.0, False)
-            if align:   # v14
+            if align:
                 dev_nocomp += _off_term(exp, raw_log, 0.0)
         sh_ = shifts.get(str(exp.get('hole_id', '?')))
         if sh_ is not None:
             raw = (raw[0] + sh_[0], raw[1] + sh_[1], raw[2] + sh_[2])
-        r_pt = _r_at(exp, r_pass)   # v13: รัศมีชดเชยของจุดนี้ (แยกแกน X/Y ถ้ามี)
+        r_pt = _r_at(exp, r_pass)   # รัศมีชดเชยของจุดนี้ (แยกแกน X/Y ถ้ามี)
         (ex, ey, ez), (ax_, ay_, az_), w = _contact_pair(exp, raw, r_pt, comp_on)
         dx, dy, dz = ax_ - ex, ay_ - ey, az_ - ez
-        dev = float(dx * w[0] + dy * w[1] + dz * w[2])   # v12: ระยะเบี่ยงตามทิศตั้งฉากผิว (มีเครื่องหมาย)
-        if exact:   # v12: ย้อนตาราง B-Rep — แม่นแม้ผนังโค้งมาก/แตะแบบเฉียด (ผนังเรียบได้ค่าเดียวกัน)
+        dev = float(dx * w[0] + dy * w[1] + dz * w[2])   # ระยะเบี่ยงตามทิศตั้งฉากผิว (มีเครื่องหมาย)
+        if exact:   # ย้อนตาราง B-Rep — แม่นแม้ผนังโค้งมาก/แตะแบบเฉียด (ผนังเรียบได้ค่าเดียวกัน)
             dev = _table_dev(exp, raw, r_pt, comp_on)
-            if align:   # v14
+            if align:
                 dev += _off_term(exp, raw, r_pt if comp_on != 'travel' else float(exp['trig'][-1][0]))
         euclid = math.sqrt(dx * dx + dy * dy + dz * dz)
         r_used = r_pt if comp_on else 0.0
@@ -568,11 +476,11 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                  'exp_center': exp_center, 'normal': tuple(float(c) for c in w), 'dev': dev,
                  'euclid_mm': euclid, 'r_used': r_used, 'prb_work': act.get('prb_work')}
         is_floor = exp.get('shape') == 'floor'
-        if is_floor:   # v08: พื้นก้นรู — เทียบความลึกตามแกนรูอย่างเดียว
+        if is_floor:   # พื้นก้นรู — เทียบความลึกตามแกนรูอย่างเดียว
             n = _probe_dir(exp) or (0.0, 0.0, -1.0)
             depth_err = dx * n[0] + dy * n[1] + dz * n[2]
             distance = abs(depth_err)
-        elif sh_ is not None:   # v11: best-fit — ระยะถึงผิว CAD ไม่ใช่ถึงจุด CAD จุดเดียว
+        elif sh_ is not None:   # best-fit — ระยะถึงผิว CAD ไม่ใช่ถึงจุด CAD จุดเดียว
             key = (str(exp.get('hole_id', '?')), int(exp.get('seg_idx', 0)), int(exp.get('layer_idx', 0)))
             circ = circles.get(key)
             if circ is not None:
@@ -583,7 +491,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                 w = _surface_dir(exp) or _probe_dir(exp)
                 distance = abs(float(dx * w[0] + dy * w[1] + dz * w[2]))
         else:
-            distance = abs(dev)   # v12: ตามทิศตั้งฉากผิว (ผนังตรง = ค่าเดิม)
+            distance = abs(dev)   # ตามทิศตั้งฉากผิว (ผนังตรง = ค่าเดิม)
         passed = distance <= tolerance_mm
         if passed:
             passed_points += 1
@@ -605,7 +513,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             hole_entry['passed_points'] += 1
         hole_entry['max_deviation'] = max(hole_entry['max_deviation'], distance)
 
-        if is_floor:   # v08: แยกไว้ระดับรู — ไม่สร้าง layer ปลอม
+        if is_floor:   # แยกไว้ระดับรู — ไม่สร้าง layer ปลอม
             hole_entry['floor'] = {
                 'expected':    (ex, ey, ez),
                 'actual':      (ax_, ay_, az_),
@@ -629,14 +537,14 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
         layer_entry['points'].append({
             'point_idx':   pt_idx,
             'expected':    (ex, ey, ez),
-            'actual':      (ax_, ay_, az_),      # v07: หลังชดเชยรัศมีหัวโพรบแล้ว
+            'actual':      (ax_, ay_, az_),      # หลังชดเชยรัศมีหัวโพรบแล้ว
             'actual_raw':  raw,                  # ค่าดิบจากเครื่อง (ศูนย์กลางลูกบอล)
             'shape':       exp.get('shape', 'circle' if 'nx' in exp else None),
             'delta':       (dx, dy, dz),
             'distance_mm': distance,   # "Offset (mm)" in the UI
             'passed':      passed,
-            'dir':         _probe_dir(exp),   # v09: ใช้ตรวจก้านชน
-            **extra,                          # v12
+            'dir':         _probe_dir(exp),   # ใช้ตรวจก้านชน
+            **extra,
         })
 
     holes_out = {}
@@ -650,7 +558,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             layers_out = []
             for lyr_idx in sorted(seg_entry['_layers'].keys()):
                 seg_entry['_layers'][lyr_idx]['points'].sort(key=lambda p: p['point_idx'])
-            # v10: ก้านโพรบอาจแตะผนัง — แจ้งเตือนเท่านั้น (ไม่ตัดจุดออก)
+            # ก้านโพรบอาจแตะผนัง — แจ้งเตือนเท่านั้น (ไม่ตัดจุดออก)
             for _p in _mark_shaft_contacts([seg_entry['_layers'][k] for k in sorted(seg_entry['_layers'])]):
                 suspect_total += 1
                 hole_entry['suspect_points'] = hole_entry.get('suspect_points', 0) + 1
@@ -658,7 +566,7 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
                 layer_entry = seg_entry['_layers'][lyr_idx]
                 used = layer_entry['points']
                 layer_entry['passed'] = all(p['passed'] for p in used)
-                layer_entry['circle'] = _layer_circle(used, tolerance_mm)   # v07
+                layer_entry['circle'] = _layer_circle(used, tolerance_mm)
                 for p in used:
                     if not p['passed']:
                         failed_point_refs.append({
@@ -681,11 +589,11 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
             'total_points':  hole_entry['total_points'],
             'passed_points': hole_entry['passed_points'],
             'max_deviation': hole_entry['max_deviation'],
-            'suspect_points': hole_entry.get('suspect_points', 0),   # v09
-            'best_fit_offset': (tuple(float(v) for v in shifts[hole_id])   # v11
+            'suspect_points': hole_entry.get('suspect_points', 0),
+            'best_fit_offset': (tuple(float(v) for v in shifts[hole_id])
                                 if hole_id in shifts else None),
             'segments':      segments_out,
-            'floor':         hole_entry.get('floor'),   # v08 — None ถ้าไม่ได้แตะพื้น
+            'floor':         hole_entry.get('floor'),   # — None ถ้าไม่ได้แตะพื้น
         }
         if hole_entry.get('_floor_failed'):
             failed_point_refs.append({'hole_id': hole_id, 'seg_idx': 0, 'layer_idx': -1,
@@ -695,21 +603,21 @@ def evaluate_points(expected_points: list, actual_points: list, tolerance_mm: fl
 
     return {
         'tolerance_mm':       tolerance_mm,
-        'tip_radius_mm':      r_tip if comp_on else 0.0,   # v07
-        'tip_radius_xy':      rxy if comp_on else None,    # v13: (rX, rY) ที่ใช้ — None = ทุกทิศ r̄
+        'tip_radius_mm':      r_tip if comp_on else 0.0,
+        'tip_radius_xy':      rxy if comp_on else None,    # (rX, rY) ที่ใช้ — None = ทุกทิศ r̄
         'alignment':          ({k: align[k] for k in ('lean', 'slope', 'yaw_rad', 'z_ref', 'pivot', 'top_z')
-                               if k in align} if align else None),   # v14
+                               if k in align} if align else None),
         'compensation':       compensation,                # 'on' / 'off' / 'unavailable'
-        'tip_source':         tip_source,                  # v12: 'run' (ผนังนอกรอบนี้) / 'setting'
-        'pretravel':          comp_on or None,             # v12: 'normal' / 'travel' / None (ไม่ชดเชย)
-        'calibration':        calibration,                 # v12: {} ถ้า G-code ไม่มีจุดคาลิเบรต
-        'calib_points':       matched - total_points,      # v12
-        'best_fit':           bool(best_fit),              # v11
+        'tip_source':         tip_source,                  # 'run' (ผนังนอกรอบนี้) / 'setting'
+        'pretravel':          comp_on or None,             # 'normal' / 'travel' / None (ไม่ชดเชย)
+        'calibration':        calibration,                 # {} ถ้า G-code ไม่มีจุดคาลิเบรต
+        'calib_points':       matched - total_points,
+        'best_fit':           bool(best_fit),
         'total_points':       total_points,
         'passed_points':      passed_points,
         'failed_points':      failed_points,
         'failed_point_refs':  failed_point_refs,
-        'suspect_points':     suspect_total,               # v10 — ก้านโพรบอาจแตะผนัง (เตือนเท่านั้น)
+        'suspect_points':     suspect_total,               # — ก้านโพรบอาจแตะผนัง (เตือนเท่านั้น)
         'expected_count':     len(expected_points) - (matched - total_points),
         'actual_count':       len(actual_points) - (matched - total_points),
         'sequence_mismatch':  len(expected_points) != len(actual_points),
@@ -725,7 +633,7 @@ def _all_devs(result: dict):
 
 
 def estimate_z_offset(expected_points: list, actual_points: list, tolerance_mm: float, **kw) -> dict:
-    """v15: Z offset = ผิวบนจริงอยู่เหนือ Z0 ที่ตั้งไว้กี่ มม. (+ = Z0 ต่ำไป ลูกบอลลงลึกกว่าที่ตั้งใจ)
+    """Z offset = ผิวบนจริงอยู่เหนือ Z0 ที่ตั้งไว้กี่ มม. (+ = Z0 ต่ำไป ลูกบอลลงลึกกว่าที่ตั้งใจ)
     เลื่อน z ของจุดวัด −dz; ความไวต่อจุด s = ∂dev/∂dz (≈ m_z ของผิว ณ จุดแตะ)
       - ผนังตรง (s ≈ 0)                     → หาไม่ได้ (observable False)
       - s ต่างกันตามความลึก (sphere, โค้ง)  → ฟิต dz + bias ขนาดรูคงที่ c พร้อมกัน (separable True)
@@ -808,7 +716,7 @@ SPHERE_CAD_RMS = 0.02   # CAD points within this of one sphere → spherical wal
 
 
 def circularity_pct(roundness, tolerance_mm):
-    """v16: % ความเป็นวงกลมของ 1 ชั้น = 100 × (1 − roundness / tolerance), ตัดที่ 0–100
+    """% ความเป็นวงกลมของ 1 ชั้น = 100 × (1 − roundness / tolerance), ตัดที่ 0–100
     100 % = กลมพอดี, 0 % = ความไม่กลม (max − min ของรัศมีจากวงกลม LS) เท่ากับ tolerance หรือมากกว่า"""
     if roundness is None or not tolerance_mm:
         return None
@@ -816,7 +724,7 @@ def circularity_pct(roundness, tolerance_mm):
 
 
 def hole_metrics(info: dict, tolerance_mm: float, cad_floor_depth=None) -> dict:
-    """v16: ค่าสรุปของ 1 รูจากผลประเมิน (holes[gi]) — ใช้ทั้งหน้า Evaluation และรายงาน PDF
+    """ค่าสรุปของ 1 รูจากผลประเมิน (holes[gi]) — ใช้ทั้งหน้า Evaluation และรายงาน PDF
       layers:  [{seg, layer, depth, n, passed, failed, max_abs, circularity, roundness, d_err, c_off}]
       deepest: จุดลึกสุดของรู
         method 'sphere' — ผนังทรงกลม (จุด CAD อยู่บนทรงกลมเดียว): fit ทรงกลมให้จุดที่วัดแล้วหา
@@ -876,7 +784,7 @@ def hole_metrics(info: dict, tolerance_mm: float, cad_floor_depth=None) -> dict:
 
 
 def export_results_csv(result: dict, filepath: str) -> None:
-    """v12: บันทึกผลรายจุดเป็น CSV — ทั้งค่าดิบ (ไม่ชดเชย) และค่าหลังชดเชยในแถวเดียวกัน
+    """บันทึกผลรายจุดเป็น CSV — ทั้งค่าดิบ (ไม่ชดเชย) และค่าหลังชดเชยในแถวเดียวกัน
     raw = PRB − WCO (ศูนย์กลางลูกบอล), cad = จุดที่เส้นทางโพรบทะลุผิว CAD,
     dev_nocomp = (raw − cad)·m0 (ถือว่าศูนย์กลางลูกบอลคือผิว), exp_center = ศูนย์กลางลูกบอลที่คาดที่ r,
     comp = raw + r·m (จุดแตะที่วัดได้), cad_contact = จุดแตะตาม CAD, dev = (comp − cad_contact)·m"""
@@ -890,12 +798,12 @@ def export_results_csv(result: dict, filepath: str) -> None:
     with open(filepath, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["# log", result.get('log_filename', '')])
-        rxy = result.get('tip_radius_xy')   # v13
+        rxy = result.get('tip_radius_xy')
         w.writerow(["# compensation", result.get('compensation'), "r_eff (mm)", f"{r:.4f}",
                     "r_eff X / Y (mm)", f"{rxy[0]:.4f} / {rxy[1]:.4f}" if rxy else "same all directions",
                     "source", result.get('tip_source', 'setting'),
                     "tolerance (mm)", result.get('tolerance_mm'), "best_fit", result.get('best_fit')])
-        al = result.get('alignment')   # v14
+        al = result.get('alignment')
         if al:
             w.writerow(["# alignment (raw = PRB − WCO after correction)", "lean x/y per z",
                         f"{al['lean'][0]:+.5f} / {al['lean'][1]:+.5f}", "top slope x/y",
@@ -951,7 +859,7 @@ def _hole_fingerprint(hole) -> str:
     radius = getattr(hole, 'radius', 0.0) or 0.0
     depth  = getattr(hole, 'depth', 0.0) or 0.0
     fp = f"{round(float(ox), 2)}_{round(float(oy), 2)}_{round(float(oz), 2)}_{round(float(radius), 3)}_{round(float(depth), 2)}"
-    if getattr(sh, 'shape', 'circle') == 'rect':   # v05
+    if getattr(sh, 'shape', 'circle') == 'rect':
         fp += f"_rect{round(sh.half_u * 2, 3)}x{round(sh.half_v * 2, 3)}r{round(sh.corner_radius, 3)}"
     elif getattr(sh, 'shape', 'circle') == 'channel':
         fp += f"_chan{round(sh.half_len * 2, 3)}x{round(sh.half_v * 2, 3)}"
@@ -959,11 +867,11 @@ def _hole_fingerprint(hole) -> str:
 
 
 def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) -> dict:
-    """จับภาพค่าตั้งค่าการตรวจสอบ "ทั้งหมด" ของทุกรูที่ส่งเข้ามา — v04:
+    """จับภาพค่าตั้งค่าการตรวจสอบ "ทั้งหมด" ของทุกรูที่ส่งเข้ามา —
     ผู้เรียกควรส่ง ALL current holes เข้ามา (ไม่ใช่แค่รูที่ selected_for_
     inspection == True) เพื่อให้ snapshot เป็นภาพสมบูรณ์ของการตั้งค่า ณ
     ขณะนั้น รวมถึง "รูไหนถูกเลือกไว้บ้าง" ด้วย ไม่ใช่แค่ค่าปรับจูนของรูที่
-    ถูกเลือกอยู่แล้วเท่านั้น (ดู v03 -> v04 changelog ด้านบนไฟล์สำหรับบั๊กที่
+    ถูกเลือกอยู่แล้วเท่านั้น (ดู changelog ด้านบนไฟล์สำหรับบั๊กที่
     เกิดจากการไม่ทำแบบนี้) — เรียกทั้งตอน export G-code จริง
     (core/gcode_export_panel.py) และตอนโหลดผลตรวจ .log
     (ui/evaluation_left_panel.py, สำหรับสร้าง "live snapshot ปัจจุบัน" ไป
@@ -977,7 +885,7 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
         <fingerprint>: {
           'display_id': ...,        # เก็บไว้เพื่อรายงานผล ไม่ใช้เทียบ equality
           'multi_segment': bool,
-          'selected_for_inspection': bool,   # v04 — hole ทั้งใบถูกเลือกไว้หรือไม่
+          'selected_for_inspection': bool,   # — hole ทั้งใบถูกเลือกไว้หรือไม่
           # single-segment:
           'layers', 'points_per_layer', 'zigzag_inspection', 'zigzag_degree'
           # multi-segment แทนที่ด้วย:
@@ -993,9 +901,9 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
     for hole in holes:
         fp = _hole_fingerprint(hole)
         segs = getattr(hole, 'segments', None) or []
-        hole_selected = bool(getattr(hole, 'selected_for_inspection', False))   # v04
+        hole_selected = bool(getattr(hole, 'selected_for_inspection', False))
         sh = getattr(hole, '_step_hole', None)
-        depth_info = {   # v08: ความลึกสูงสุดของรูตาม CAD (บันทึกไว้ดูอย่างเดียว — ไม่ใช้เทียบ)
+        depth_info = {   # ความลึกสูงสุดของรูตาม CAD (บันทึกไว้ดูอย่างเดียว — ไม่ใช้เทียบ)
             'measure_floor':  bool(getattr(hole, 'measure_floor', False)),
             'max_depth_mm':   None if sh is None else round(float(sh.depth), 4),
             'floor_depth_mm': None if sh is None or hole_floor_depth(sh) is None
@@ -1006,7 +914,7 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
             snapshot['holes'][fp] = {
                 'display_id':               getattr(hole, 'display_id', '?'),
                 'multi_segment':             True,
-                'selected_for_inspection':   hole_selected,   # v04
+                'selected_for_inspection':   hole_selected,
                 'segments': [
                     {
                         'seg_idx':                 getattr(cfg, 'seg_idx', si),
@@ -1024,7 +932,7 @@ def build_settings_snapshot(holes: list, view_name: str, screen_rot: int = 0) ->
             snapshot['holes'][fp] = {
                 'display_id':               getattr(hole, 'display_id', '?'),
                 'multi_segment':             False,
-                'selected_for_inspection':   hole_selected,   # v04
+                'selected_for_inspection':   hole_selected,
                 'layers':                    hole.layers,
                 'points_per_layer':          hole.points_per_layer,
                 'zigzag_inspection':         hole.zigzag_inspection,
@@ -1050,11 +958,11 @@ def _segment_settings_differ(old_segs: list, new_segs: list) -> bool:
 def _hole_settings_differ(old_cfg: dict, new_cfg: dict) -> bool:
     if old_cfg.get('multi_segment') != new_cfg.get('multi_segment'):
         return True
-    # v04: a hole being selected/unselected entirely is itself a
+    # a hole being selected/unselected entirely is itself a
     # meaningful settings change for the stale-settings banner.
     if old_cfg.get('selected_for_inspection') != new_cfg.get('selected_for_inspection'):
         return True
-    if bool(old_cfg.get('measure_floor', False)) != bool(new_cfg.get('measure_floor', False)):   # v08
+    if bool(old_cfg.get('measure_floor', False)) != bool(new_cfg.get('measure_floor', False)):
         return True
     if new_cfg.get('multi_segment'):
         return _segment_settings_differ(
@@ -1079,7 +987,7 @@ def diff_snapshots(old_snapshot: dict, new_snapshot: dict) -> list:
     old_holes = old_snapshot.get('holes', {})
     new_holes = new_snapshot.get('holes', {})
     view_changed = (old_snapshot.get('view_name') != new_snapshot.get('view_name') or
-                    old_snapshot.get('screen_rot', 0) != new_snapshot.get('screen_rot', 0))   # v06
+                    old_snapshot.get('screen_rot', 0) != new_snapshot.get('screen_rot', 0))
 
     mismatched = []
     for fp, new_cfg in new_holes.items():
@@ -1093,7 +1001,7 @@ def diff_snapshots(old_snapshot: dict, new_snapshot: dict) -> list:
 
 
 # ==============================================================================
-# 3) apply_settings_snapshot() — v04: full-replace restore, now including
+# 3) apply_settings_snapshot() — full-replace restore, now including
 # the hole-level selected_for_inspection flag
 # ==============================================================================
 def apply_settings_snapshot(holes: list, snapshot: dict, full_replace: bool = True) -> dict:
@@ -1104,8 +1012,8 @@ def apply_settings_snapshot(holes: list, snapshot: dict, full_replace: bool = Tr
     _hole_fingerprint() — เกณฑ์เดียวกับ diff_snapshots()) — MUTATES
     `holes` IN PLACE.
 
-    v04: เรียกโดยตรงทันทีที่โหลดไฟล์ Schema สำเร็จ (ui/evaluation_left_panel.py
-    v07's "📂 Load Schema (.json)") — ไม่มีปุ่ม "Restore" แยกต่างหากอีก
+    เรียกโดยตรงทันทีที่โหลดไฟล์ Schema สำเร็จ (ui/evaluation_left_panel.py
+'s "📂 Load Schema (.json)") — ไม่มีปุ่ม "Restore" แยกต่างหากอีก
     ต่อไป การโหลด = การแทนที่ค่าปัจจุบันทันที ตามที่ผู้ใช้ต้องการ
 
     Parameters
@@ -1123,7 +1031,7 @@ def apply_settings_snapshot(holes: list, snapshot: dict, full_replace: bool = Tr
                    set selected_for_inspection = False ไปด้วย เพราะถือว่า
                    schema ที่โหลดมาคือค่าที่ถูกต้องสมบูรณ์ทั้งหมด ("ไม่มีอยู่
                    ใน schema" = "ไม่ได้ถูกเลือกไว้ตอน export") ตั้งเป็น False
-                   เพื่อคงพฤติกรรมเดิม (v03 — แตะเฉพาะรูที่จับคู่ได้ ปล่อย
+                   เพื่อคงพฤติกรรมเดิม (— แตะเฉพาะรูที่จับคู่ได้ ปล่อย
                    รูอื่นไว้เหมือนเดิม) หากจำเป็นในอนาคต
 
     Returns
@@ -1156,8 +1064,8 @@ def apply_settings_snapshot(holes: list, snapshot: dict, full_replace: bool = Tr
 
         matched += 1
         hole.selected_for_inspection = cfg.get('selected_for_inspection',
-                                                hole.selected_for_inspection)   # v04
-        hole.measure_floor = bool(cfg.get('measure_floor', False))               # v08
+                                                hole.selected_for_inspection)
+        hole.measure_floor = bool(cfg.get('measure_floor', False))
 
         if cfg.get('multi_segment'):
             segs = getattr(hole, 'segments', None) or []
